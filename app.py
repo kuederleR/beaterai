@@ -86,8 +86,20 @@ def letterbox(img, new_shape=(640, 640), color=(114, 114, 114), auto=True, scale
 def generate_frames():
     cap = cv2.VideoCapture(VIDEO_SOURCE)
     
+    if not cap.isOpened() and isinstance(VIDEO_SOURCE, str):
+        print("Standard VideoCapture failed. Trying GStreamer pipeline...")
+        # Jetson containers often require GStreamer to read mp4 files
+        gstreamer_pipeline = f"uridecodebin uri=file://{VIDEO_SOURCE} ! videoconvert ! appsink"
+        cap = cv2.VideoCapture(gstreamer_pipeline, cv2.CAP_GSTREAMER)
+
     if not cap.isOpened():
         print(f"Error: Could not open video source {VIDEO_SOURCE}")
+        # Yield an error image to the browser instead of silently closing the connection
+        error_img = np.zeros((480, 800, 3), dtype=np.uint8)
+        cv2.putText(error_img, "Error: Could not open video stream.", (20, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        cv2.putText(error_img, "Check docker compose logs yolopv2-stream", (20, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        ret, buffer = cv2.imencode('.jpg', error_img)
+        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
         return
 
     print("Started generating frames...")
