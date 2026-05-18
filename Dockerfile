@@ -23,6 +23,9 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 # Create weights directory
 RUN mkdir -p data/weights
 
+# Download a sample driving video for testing without a camera
+RUN wget -O sample.mp4 https://github.com/intel-iot-devkit/sample-videos/raw/master/car-detection.mp4
+
 # Copy our custom streaming application
 COPY app.py .
 

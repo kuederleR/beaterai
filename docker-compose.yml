@@ -4,13 +4,9 @@ services:
     runtime: nvidia
     ports:
       - "5000:5000"
-    devices:
-      # Map the USB camera if available. You may need to change this if using an RTSP stream.
-      # Ensure your user has access to /dev/video0 or run docker compose with sudo.
-      - "/dev/video0:/dev/video0"
     environment:
       # Video source: '0' for /dev/video0, or an RTSP URL, or a path to a video file
-      - VIDEO_SOURCE=0
+      - VIDEO_SOURCE=/app/sample.mp4
       - DEVICE=0 # GPU index
     volumes:
       # Cache downloaded weights to avoid re-downloading on rebuild
