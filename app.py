@@ -96,8 +96,12 @@ def generate_frames():
         if not success:
             # Restart video if it's a file, otherwise we break
             if isinstance(VIDEO_SOURCE, str):
+                print("End of video stream, restarting...")
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                continue
+                success, frame = cap.read()
+                if not success:
+                    print("Failed to read frame after restarting video. Halting stream.")
+                    break
             else:
                 break
 
