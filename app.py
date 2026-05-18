@@ -102,82 +102,91 @@ def generate_frames():
         yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
         return
 
-    print("Started generating frames...")
+    print("Started generating frames...", flush=True)
+    import traceback
     while True:
-        success, frame = cap.read()
-        if not success:
-            # Restart video if it's a file, otherwise we break
-            if isinstance(VIDEO_SOURCE, str):
-                print("End of video stream, restarting...")
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                success, frame = cap.read()
-                if not success:
-                    print("Failed to read frame after restarting video. Halting stream.")
+        try:
+            success, frame = cap.read()
+            if not success:
+                if isinstance(VIDEO_SOURCE, str):
+                    print("End of video stream, restarting...", flush=True)
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    success, frame = cap.read()
+                    if not success:
+                        print("Failed to read frame after restarting video. Halting stream.", flush=True)
+                        break
+                else:
                     break
-            else:
-                break
 
-        im0 = frame.copy()
-        h, w = im0.shape[:2]
-        
-        # Preprocess
-        img, ratio, pad = letterbox(im0, IMG_SIZE, stride=32, auto=False)
-        img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
-        img = np.ascontiguousarray(img)
-        
-        img_tensor = torch.from_numpy(img).to(device)
-        img_tensor = img_tensor.half() if half else img_tensor.float()
-        img_tensor /= 255.0
-        if img_tensor.ndimension() == 3:
-            img_tensor = img_tensor.unsqueeze(0)
-
-        # Inference
-        with torch.no_grad():
-            [pred, anchor_grid], seg, ll = model(img_tensor)
-            pred = split_for_trace_model(pred, anchor_grid)
-            pred = non_max_suppression(pred, CONF_THRES, IOU_THRES)
+            im0 = frame.copy()
+            h, w = im0.shape[:2]
             
-            da_seg_mask = driving_area_mask(seg)
-            ll_seg_mask = lane_line_mask(ll)
+            # Preprocess
+            img, ratio, pad = letterbox(im0, IMG_SIZE, stride=32, auto=False)
+            img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+            img = np.ascontiguousarray(img)
+            
+            img_tensor = torch.from_numpy(img).to(device)
+            img_tensor = img_tensor.half() if half else img_tensor.float()
+            img_tensor /= 255.0
+            if img_tensor.ndimension() == 3:
+                img_tensor = img_tensor.unsqueeze(0)
 
-        # Draw segmentations
-        color_area = np.zeros((img_tensor.shape[2], img_tensor.shape[3], 3), dtype=np.uint8)
-        
-        da_mask = da_seg_mask[0] # assuming batch size 1
-        ll_mask = ll_seg_mask[0]
-        
-        color_area[da_mask] = [0, 255, 0] # Drivable area: Green
-        color_area[ll_mask] = [255, 0, 0] # Lane lines: Blue
-        
-        # Unpad and resize masks to original image size
-        dw, dh = pad
-        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
-        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
-        
-        # Crop out the padding
-        color_area_cropped = color_area[top:IMG_SIZE-bottom, left:IMG_SIZE-right]
-        # Resize to original resolution
-        color_area_resized = cv2.resize(color_area_cropped, (w, h), interpolation=cv2.INTER_NEAREST)
-        
-        # Blend segmentation with original image
-        overlay = im0.copy()
-        mask_indices = np.any(color_area_resized != [0, 0, 0], axis=-1)
-        overlay[mask_indices] = color_area_resized[mask_indices]
-        im0 = cv2.addWeighted(overlay, 0.5, im0, 0.5, 0)
+            # Inference
+            with torch.no_grad():
+                [pred, anchor_grid], seg, ll = model(img_tensor)
+                pred = split_for_trace_model(pred, anchor_grid)
+                pred = non_max_suppression(pred, CONF_THRES, IOU_THRES)
+                
+                da_seg_mask = driving_area_mask(seg)
+                ll_seg_mask = lane_line_mask(ll)
 
-        # Draw detections
-        for det in pred:
-            if len(det):
-                det[:, :4] = scale_coords(img_tensor.shape[2:], det[:, :4], im0.shape).round()
-                for *xyxy, conf, cls in reversed(det):
-                    plot_one_box(xyxy, im0, line_thickness=3)
+            # Draw segmentations
+            color_area = np.zeros((img_tensor.shape[2], img_tensor.shape[3], 3), dtype=np.uint8)
+            
+            da_mask = da_seg_mask[0] # assuming batch size 1
+            ll_mask = ll_seg_mask[0]
+            
+            # Use == 1 to create proper boolean masks!
+            color_area[da_mask == 1] = [0, 255, 0] # Drivable area: Green
+            color_area[ll_mask == 1] = [255, 0, 0] # Lane lines: Blue
+            
+            # Unpad and resize masks to original image size
+            dw, dh = pad
+            top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+            left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+            
+            # Crop out the padding
+            color_area_cropped = color_area[top:IMG_SIZE-bottom, left:IMG_SIZE-right]
+            # Resize to original resolution
+            color_area_resized = cv2.resize(color_area_cropped, (w, h), interpolation=cv2.INTER_NEAREST)
+            
+            # Blend segmentation with original image
+            overlay = im0.copy()
+            mask_indices = np.any(color_area_resized != [0, 0, 0], axis=-1)
+            overlay[mask_indices] = color_area_resized[mask_indices]
+            im0 = cv2.addWeighted(overlay, 0.5, im0, 0.5, 0)
 
-        # Encode frame
-        ret, buffer = cv2.imencode('.jpg', im0)
-        frame_bytes = buffer.tobytes()
-        
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            # Draw detections
+            for det in pred:
+                if len(det):
+                    det[:, :4] = scale_coords(img_tensor.shape[2:], det[:, :4], im0.shape).round()
+                    for *xyxy, conf, cls in reversed(det):
+                        plot_one_box(xyxy, im0, color=(0, 0, 255), line_thickness=3)
+
+            # Encode frame
+            ret, buffer = cv2.imencode('.jpg', im0)
+            frame_bytes = buffer.tobytes()
+            
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        except Exception as e:
+            traceback.print_exc()
+            error_img = np.zeros((480, 800, 3), dtype=np.uint8)
+            cv2.putText(error_img, f"Stream Crashed: {str(e)}", (20, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            ret, buffer = cv2.imencode('.jpg', error_img)
+            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+            break
 
 # --- Flask Routes ---
 @app.route('/')
