@@ -144,8 +144,10 @@ def generate_frames():
         color_area_resized = cv2.resize(color_area_cropped, (w, h), interpolation=cv2.INTER_NEAREST)
         
         # Blend segmentation with original image
+        overlay = im0.copy()
         mask_indices = np.any(color_area_resized != [0, 0, 0], axis=-1)
-        im0[mask_indices] = cv2.addWeighted(im0[mask_indices], 0.5, color_area_resized[mask_indices], 0.5, 0)
+        overlay[mask_indices] = color_area_resized[mask_indices]
+        im0 = cv2.addWeighted(overlay, 0.5, im0, 0.5, 0)
 
         # Draw detections
         for det in pred:
