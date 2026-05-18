@@ -11,4 +11,5 @@ services:
     volumes:
       # Cache downloaded weights to avoid re-downloading on rebuild
       - ./weights:/app/data/weights
+      - ./app.py:/app/app.py
     restart: unless-stopped
