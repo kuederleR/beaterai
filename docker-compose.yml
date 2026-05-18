@@ -2,14 +2,14 @@ services:
   yolopv2-stream:
     build: .
     runtime: nvidia
+    ipc: host
     ports:
       - "5000:5000"
     environment:
-      # Video source: '0' for /dev/video0, or an RTSP URL, or a path to a video file
       - VIDEO_SOURCE=/app/sample.mp4
-      - DEVICE=0 # GPU index
+      - DEVICE=0
+      - PYTHONUNBUFFERED=1
     volumes:
-      # Cache downloaded weights to avoid re-downloading on rebuild
       - ./weights:/app/data/weights
       - ./app.py:/app/app.py
     restart: unless-stopped
