@@ -166,9 +166,19 @@ def inference_loop(model, device, half):
                 da_mask = da_seg_mask[0]
                 ll_mask = ll_seg_mask[0]
 
-                color_area = np.zeros(
-                    (img_tensor.shape[2], img_tensor.shape[3], 3), dtype=np.uint8
-                )
+                h_t, w_t = img_tensor.shape[2], img_tensor.shape[3]
+                color_area = np.zeros((h_t, w_t, 3), dtype=np.uint8)
+
+                # Resize masks to match model input size (YOLOPv2 outputs at 2x)
+                if isinstance(da_mask, torch.Tensor):
+                    da_mask = da_mask.cpu().numpy()
+                if isinstance(ll_mask, torch.Tensor):
+                    ll_mask = ll_mask.cpu().numpy()
+                da_mask = cv2.resize(da_mask.astype(np.uint8), (w_t, h_t),
+                                     interpolation=cv2.INTER_NEAREST)
+                ll_mask = cv2.resize(ll_mask.astype(np.uint8), (w_t, h_t),
+                                     interpolation=cv2.INTER_NEAREST)
+
                 color_area[da_mask == 1] = [0, 255, 0]   # Drivable area: green
                 color_area[ll_mask == 1] = [255, 0, 0]   # Lane lines: blue
 
