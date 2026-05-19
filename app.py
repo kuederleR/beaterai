@@ -144,7 +144,7 @@ def inference_loop(model, device, half):
                 h, w = im0.shape[:2]
 
                 # Preprocess
-                img, ratio, pad = letterbox(im0, IMG_SIZE, stride=32, auto=False)
+                img, ratio, pad = letterbox(im0, IMG_SIZE, stride=32, auto=True)
                 img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB
                 img = np.ascontiguousarray(img)
 
@@ -159,6 +159,7 @@ def inference_loop(model, device, half):
                     [pred, anchor_grid], seg, ll = model(img_tensor)
                     pred = split_for_trace_model(pred, anchor_grid)
                     pred = non_max_suppression(pred, CONF_THRES, IOU_THRES)
+                    # YOLOPv2's mask functions hardcode extraction from a 384x640 padded tensor
                     da_seg_mask = driving_area_mask(seg)
                     ll_seg_mask = lane_line_mask(ll)
 
@@ -166,38 +167,22 @@ def inference_loop(model, device, half):
                 da_mask = da_seg_mask[0]
                 ll_mask = ll_seg_mask[0]
 
-                h_t, w_t = img_tensor.shape[2], img_tensor.shape[3]
-                color_area = np.zeros((h_t, w_t, 3), dtype=np.uint8)
-
-                # Resize masks to match model input size (YOLOPv2 outputs at 2x)
                 if isinstance(da_mask, torch.Tensor):
                     da_mask = da_mask.cpu().numpy()
                 if isinstance(ll_mask, torch.Tensor):
                     ll_mask = ll_mask.cpu().numpy()
-                da_mask = cv2.resize(da_mask.astype(np.uint8), (w_t, h_t),
-                                     interpolation=cv2.INTER_NEAREST)
-                ll_mask = cv2.resize(ll_mask.astype(np.uint8), (w_t, h_t),
-                                     interpolation=cv2.INTER_NEAREST)
 
+                # YOLOPv2 hardcodes the mask output to 720x1280, so we create a canvas of that size
+                color_area = np.zeros((da_mask.shape[0], da_mask.shape[1], 3), dtype=np.uint8)
                 color_area[da_mask == 1] = [0, 255, 0]   # Drivable area: Green
-                color_area[ll_mask == 1] = [0, 0, 255]   # Lane lines: Red (OpenCV uses BGR)
+                color_area[ll_mask == 1] = [0, 0, 255]   # Lane lines: Red (BGR)
 
-                # Remove letterbox padding and resize back to original dims
-                dw, dh = pad
-                top = int(round(dh - 0.1))
-                bottom = int(round(dh + 0.1))
-                left = int(round(dw - 0.1))
-                right = int(round(dw + 0.1))
-                color_cropped = color_area[top:IMG_SIZE - bottom,
-                                           left:IMG_SIZE - right]
-                color_resized = cv2.resize(color_cropped, (w, h),
-                                           interpolation=cv2.INTER_NEAREST)
+                # Resize the 720x1280 mask to the actual video frame dimensions
+                color_area = cv2.resize(color_area, (w, h), interpolation=cv2.INTER_NEAREST)
 
                 # Alpha-blend the segmentation mask onto the original frame
-                mask = np.any(color_resized != 0, axis=-1)
-                im0[mask] = cv2.addWeighted(
-                    im0, 0.5, color_resized, 0.5, 0
-                )[mask]
+                mask = np.any(color_area != 0, axis=-1)
+                im0[mask] = cv2.addWeighted(im0, 0.5, color_area, 0.5, 0)[mask]
 
                 # --- Draw detection boxes ---
                 for det in pred:
