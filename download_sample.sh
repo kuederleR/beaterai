@@ -1,25 +1,26 @@
 #!/bin/bash
 set -e
 
-# Try multiple sources for a dashcam/driving video with lane lines
-# These are all public domain / CC0 licensed driving clips
+# Try multiple sources for first-person dashcam driving videos
+# These are Pexels CDN direct links (public domain / Pexels License)
 
 URLS=(
-    # Pexels driving video (direct CDN link) - highway driving with lanes
-    "https://videos.pexels.com/video-files/2053100/2053100-sd_640_360_30fps.mp4"
-    # Pexels city driving
-    "https://videos.pexels.com/video-files/857195/857195-sd_640_360_25fps.mp4"
-    # Another Pexels driving clip
+    # Pexels 5382495: Dashcam POV on expressway with lane lines and traffic
+    "https://videos.pexels.com/video-files/5382495/5382495-sd_640_360_25fps.mp4"
+    "https://videos.pexels.com/video-files/5382495/5382495-hd_1280_720_25fps.mp4"
+    # Pexels 3048163: Car driving on highway
     "https://videos.pexels.com/video-files/3048163/3048163-sd_640_360_25fps.mp4"
+    # Pexels 2659475: POV driving on road
+    "https://videos.pexels.com/video-files/2659475/2659475-sd_640_360_25fps.mp4"
 )
 
 for url in "${URLS[@]}"; do
     echo "Trying: $url"
-    if curl -L -f -o sample.mp4 "$url" 2>/dev/null; then
+    if curl -L -f --connect-timeout 15 --max-time 120 -o sample.mp4 "$url" 2>/dev/null; then
         size=$(stat -c%s sample.mp4 2>/dev/null || stat -f%z sample.mp4 2>/dev/null)
-        if [ "$size" -gt 10000 ]; then
-            echo "Downloaded sample.mp4 ($size bytes)"
-            file sample.mp4
+        if [ "$size" -gt 50000 ]; then
+            echo "SUCCESS: Downloaded sample.mp4 ($size bytes)"
+            file sample.mp4 || true
             exit 0
         else
             echo "File too small ($size bytes), trying next..."
