@@ -92,8 +92,9 @@ def make_error_frame(message):
 def inference_loop(model, device, half):
     """Background thread: reads video, runs inference, stores latest JPEG frame."""
     global latest_frame, status_info
+    import av
 
-    # Diagnostics: check file and OpenCV build info
+    # Diagnostics: check file exists
     if isinstance(VIDEO_SOURCE, str):
         if os.path.exists(VIDEO_SOURCE):
             size = os.path.getsize(VIDEO_SOURCE)
@@ -109,47 +110,24 @@ def inference_loop(model, device, half):
                 latest_frame = make_error_frame(msg)
             return
 
-    # Print OpenCV build info for debugging
-    print(f"[inference] OpenCV version: {cv2.__version__}", flush=True)
-    build_info = cv2.getBuildInformation()
-    for line in build_info.split('\n'):
-        if any(k in line.lower() for k in ['gstreamer', 'ffmpeg', 'avcodec', 'video i/o']):
-            print(f"[inference] {line.strip()}", flush=True)
+    print(f"[inference] Opening video source with PyAV: {VIDEO_SOURCE}", flush=True)
 
-    print(f"[inference] Opening video source: {VIDEO_SOURCE}", flush=True)
-
-    # Try standard OpenCV first
-    cap = cv2.VideoCapture(VIDEO_SOURCE)
-
-    # Fallback: try multiple GStreamer pipelines
-    if not cap.isOpened() and isinstance(VIDEO_SOURCE, str):
-        gst_pipelines = [
-            # GStreamer with libav (ffmpeg) decoder
-            f'filesrc location={VIDEO_SOURCE} ! qtdemux ! avdec_h264 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1',
-            # GStreamer with generic decodebin
-            f'filesrc location={VIDEO_SOURCE} ! decodebin ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1',
-            # URI-based approach
-            f'uridecodebin uri=file://{VIDEO_SOURCE} ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1',
-            # Jetson hardware decoder
-            f'filesrc location={VIDEO_SOURCE} ! qtdemux ! h264parse ! nvv4l2decoder ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! appsink drop=1',
-        ]
-        for i, gst in enumerate(gst_pipelines):
-            print(f"[inference] Trying GStreamer pipeline {i+1}: {gst}", flush=True)
-            cap = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)
-            if cap.isOpened():
-                print(f"[inference] GStreamer pipeline {i+1} succeeded!", flush=True)
-                break
-            else:
-                print(f"[inference] GStreamer pipeline {i+1} failed.", flush=True)
-
-    if not cap.isOpened():
-        msg = f"Could not open video source: {VIDEO_SOURCE}"
+    try:
+        container = av.open(str(VIDEO_SOURCE))
+    except Exception as e:
+        msg = f"PyAV could not open {VIDEO_SOURCE}: {e}"
         print(f"[inference] ERROR: {msg}", flush=True)
         status_info["state"] = "error"
         status_info["error"] = msg
         with frame_lock:
             latest_frame = make_error_frame(msg)
         return
+
+    video_stream = container.streams.video[0]
+    video_stream.thread_type = "AUTO"
+    print(f"[inference] Video opened: {video_stream.codec_context.width}x"
+          f"{video_stream.codec_context.height}, codec={video_stream.codec_context.name}",
+          flush=True)
 
     fps_counter = 0
     fps_start = time.time()
@@ -158,97 +136,99 @@ def inference_loop(model, device, half):
 
     while True:
         try:
-            ret, frame = cap.read()
-            if not ret:
-                if isinstance(VIDEO_SOURCE, str):
-                    # Loop the video file
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    ret, frame = cap.read()
-                    if not ret:
-                        status_info["state"] = "error"
-                        status_info["error"] = "Cannot read video after restart"
-                        with frame_lock:
-                            latest_frame = make_error_frame("Cannot read video after restart")
-                        return
-                else:
-                    break
+            for frame_av in container.decode(video=0):
+                # Convert PyAV frame to numpy BGR array (OpenCV format)
+                frame = frame_av.to_ndarray(format='bgr24')
 
-            im0 = frame.copy()
-            h, w = im0.shape[:2]
+                im0 = frame.copy()
+                h, w = im0.shape[:2]
 
-            # Preprocess
-            img, ratio, pad = letterbox(im0, IMG_SIZE, stride=32, auto=False)
-            img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB
-            img = np.ascontiguousarray(img)
+                # Preprocess
+                img, ratio, pad = letterbox(im0, IMG_SIZE, stride=32, auto=False)
+                img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB
+                img = np.ascontiguousarray(img)
 
-            img_tensor = torch.from_numpy(img).to(device)
-            img_tensor = img_tensor.half() if half else img_tensor.float()
-            img_tensor /= 255.0
-            if img_tensor.ndimension() == 3:
-                img_tensor = img_tensor.unsqueeze(0)
+                img_tensor = torch.from_numpy(img).to(device)
+                img_tensor = img_tensor.half() if half else img_tensor.float()
+                img_tensor /= 255.0
+                if img_tensor.ndimension() == 3:
+                    img_tensor = img_tensor.unsqueeze(0)
 
-            # Inference
-            with torch.no_grad():
-                [pred, anchor_grid], seg, ll = model(img_tensor)
-                pred = split_for_trace_model(pred, anchor_grid)
-                pred = non_max_suppression(pred, CONF_THRES, IOU_THRES)
-                da_seg_mask = driving_area_mask(seg)
-                ll_seg_mask = lane_line_mask(ll)
+                # Inference
+                with torch.no_grad():
+                    [pred, anchor_grid], seg, ll = model(img_tensor)
+                    pred = split_for_trace_model(pred, anchor_grid)
+                    pred = non_max_suppression(pred, CONF_THRES, IOU_THRES)
+                    da_seg_mask = driving_area_mask(seg)
+                    ll_seg_mask = lane_line_mask(ll)
 
-            # --- Draw segmentation overlays ---
-            da_mask = da_seg_mask[0]
-            ll_mask = ll_seg_mask[0]
+                # --- Draw segmentation overlays ---
+                da_mask = da_seg_mask[0]
+                ll_mask = ll_seg_mask[0]
 
-            color_area = np.zeros((img_tensor.shape[2], img_tensor.shape[3], 3),
-                                  dtype=np.uint8)
-            color_area[da_mask == 1] = [0, 255, 0]   # Drivable area: green
-            color_area[ll_mask == 1] = [255, 0, 0]    # Lane lines: blue
+                color_area = np.zeros(
+                    (img_tensor.shape[2], img_tensor.shape[3], 3), dtype=np.uint8
+                )
+                color_area[da_mask == 1] = [0, 255, 0]   # Drivable area: green
+                color_area[ll_mask == 1] = [255, 0, 0]   # Lane lines: blue
 
-            # Remove letterbox padding and resize back to original dims
-            dw, dh = pad
-            top = int(round(dh - 0.1))
-            bottom = int(round(dh + 0.1))
-            left = int(round(dw - 0.1))
-            right = int(round(dw + 0.1))
-            color_cropped = color_area[top:IMG_SIZE - bottom,
-                                       left:IMG_SIZE - right]
-            color_resized = cv2.resize(color_cropped, (w, h),
-                                       interpolation=cv2.INTER_NEAREST)
+                # Remove letterbox padding and resize back to original dims
+                dw, dh = pad
+                top = int(round(dh - 0.1))
+                bottom = int(round(dh + 0.1))
+                left = int(round(dw - 0.1))
+                right = int(round(dw + 0.1))
+                color_cropped = color_area[top:IMG_SIZE - bottom,
+                                           left:IMG_SIZE - right]
+                color_resized = cv2.resize(color_cropped, (w, h),
+                                           interpolation=cv2.INTER_NEAREST)
 
-            # Alpha-blend the segmentation mask onto the original frame
-            mask = np.any(color_resized != 0, axis=-1)
-            im0[mask] = cv2.addWeighted(im0, 0.5, color_resized, 0.5, 0)[mask]
+                # Alpha-blend the segmentation mask onto the original frame
+                mask = np.any(color_resized != 0, axis=-1)
+                im0[mask] = cv2.addWeighted(
+                    im0, 0.5, color_resized, 0.5, 0
+                )[mask]
 
-            # --- Draw detection boxes ---
-            for det in pred:
-                if len(det):
-                    det[:, :4] = scale_coords(
-                        img_tensor.shape[2:], det[:, :4], im0.shape
-                    ).round()
-                    for *xyxy, conf, cls in reversed(det):
-                        plot_one_box(xyxy, im0, color=(0, 0, 255),
-                                     line_thickness=3)
+                # --- Draw detection boxes ---
+                for det in pred:
+                    if len(det):
+                        det[:, :4] = scale_coords(
+                            img_tensor.shape[2:], det[:, :4], im0.shape
+                        ).round()
+                        for *xyxy, conf, cls in reversed(det):
+                            plot_one_box(xyxy, im0, color=(0, 0, 255),
+                                         line_thickness=3)
 
-            # Encode to JPEG and store
-            _, buf = cv2.imencode('.jpg', im0, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            with frame_lock:
-                latest_frame = buf.tobytes()
+                # Encode to JPEG and store
+                _, buf = cv2.imencode('.jpg', im0,
+                                      [cv2.IMWRITE_JPEG_QUALITY, 80])
+                with frame_lock:
+                    latest_frame = buf.tobytes()
 
-            fps_counter += 1
-            elapsed = time.time() - fps_start
-            if elapsed >= 2.0:
-                status_info["fps"] = round(fps_counter / elapsed, 1)
-                fps_counter = 0
-                fps_start = time.time()
-            status_info["frames_processed"] += 1
+                fps_counter += 1
+                elapsed = time.time() - fps_start
+                if elapsed >= 2.0:
+                    status_info["fps"] = round(fps_counter / elapsed, 1)
+                    fps_counter = 0
+                    fps_start = time.time()
+                status_info["frames_processed"] += 1
+
+            # Video ended — loop by re-opening
+            print("[inference] Video ended, looping...", flush=True)
+            container.close()
+            container = av.open(str(VIDEO_SOURCE))
+            video_stream = container.streams.video[0]
+            video_stream.thread_type = "AUTO"
 
         except Exception:
             traceback.print_exc()
             status_info["state"] = "error"
             status_info["error"] = traceback.format_exc()
             with frame_lock:
-                latest_frame = make_error_frame("Inference crashed – see docker logs")
-            time.sleep(5)  # pause before retrying
+                latest_frame = make_error_frame(
+                    "Inference crashed - see docker logs"
+                )
+            time.sleep(5)
             continue
 
 
