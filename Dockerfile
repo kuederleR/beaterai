@@ -30,11 +30,12 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 # Create weights directory
 RUN mkdir -p data/weights
 
-# Download a dashcam driving video with lane lines and traffic
-# Using a public domain driving clip from the KITTI dataset mirror
-# If the download fails, we generate a synthetic test pattern as fallback
-COPY download_sample.sh .
-RUN chmod +x download_sample.sh && ./download_sample.sh
+# Download a proper dashcam driving video (Udacity self-driving car nanodegree project video)
+# This is a highly reliable GitHub raw link of actual forward-facing highway driving
+RUN curl -L -o sample.mp4 \
+    "https://raw.githubusercontent.com/udacity/CarND-Advanced-Lane-Lines/master/project_video.mp4" \
+    && ls -lh sample.mp4 \
+    && file sample.mp4
 
 # Copy our custom streaming application
 COPY app.py .

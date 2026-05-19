@@ -179,8 +179,8 @@ def inference_loop(model, device, half):
                 ll_mask = cv2.resize(ll_mask.astype(np.uint8), (w_t, h_t),
                                      interpolation=cv2.INTER_NEAREST)
 
-                color_area[da_mask == 1] = [0, 255, 0]   # Drivable area: green
-                color_area[ll_mask == 1] = [255, 0, 0]   # Lane lines: blue
+                color_area[da_mask == 1] = [0, 255, 0]   # Drivable area: Green
+                color_area[ll_mask == 1] = [0, 0, 255]   # Lane lines: Red (OpenCV uses BGR)
 
                 # Remove letterbox padding and resize back to original dims
                 dw, dh = pad
@@ -206,7 +206,8 @@ def inference_loop(model, device, half):
                             img_tensor.shape[2:], det[:, :4], im0.shape
                         ).round()
                         for *xyxy, conf, cls in reversed(det):
-                            plot_one_box(xyxy, im0, color=(0, 0, 255),
+                            # Yellow bounding boxes (BGR format)
+                            plot_one_box(xyxy, im0, color=(0, 255, 255),
                                          line_thickness=3)
 
                 # Encode to JPEG and store
