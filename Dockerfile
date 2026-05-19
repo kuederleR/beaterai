@@ -30,11 +30,11 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 # Create weights directory
 RUN mkdir -p data/weights
 
-# Download a sample driving video (-L follows GitHub redirects)
-RUN curl -L -o sample.mp4 \
-    "https://github.com/intel-iot-devkit/sample-videos/raw/master/car-detection.mp4" \
-    && ls -lh sample.mp4 \
-    && file sample.mp4
+# Download a dashcam driving video with lane lines and traffic
+# Using a public domain driving clip from the KITTI dataset mirror
+# If the download fails, we generate a synthetic test pattern as fallback
+COPY download_sample.sh .
+RUN chmod +x download_sample.sh && ./download_sample.sh
 
 # Copy our custom streaming application
 COPY app.py .
