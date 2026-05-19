@@ -164,8 +164,8 @@ def inference_loop(model, device, half):
                     ll_seg_mask = lane_line_mask(ll)
 
                 # --- Draw segmentation overlays ---
-                da_mask = da_seg_mask[0]
-                ll_mask = ll_seg_mask[0]
+                da_mask = da_seg_mask
+                ll_mask = ll_seg_mask
 
                 if isinstance(da_mask, torch.Tensor):
                     da_mask = da_mask.cpu().numpy()
