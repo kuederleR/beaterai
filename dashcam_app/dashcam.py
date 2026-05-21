@@ -242,7 +242,12 @@ if __name__ == '__main__':
     print("=" * 50, flush=True)
     
     if not os.path.exists(WEIGHTS_PATH):
-        print("Weights not found, please ensure they are mounted.", flush=True)
+        print("Weights not found, downloading...", flush=True)
+        os.makedirs('data/weights', exist_ok=True)
+        os.system(
+            f"wget -q -O {WEIGHTS_PATH} "
+            "https://github.com/CAIC-AD/YOLOPv2/releases/download/V0.0.1/yolopv2.pt"
+        )
 
     device = select_device(DEVICE_STR)
     half = device.type != 'cpu'

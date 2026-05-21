@@ -1,5 +1,2 @@
 Flask==3.0.3
-torch
-torchvision
-opencv-python
-numpy
+Werkzeug==3.0.3
