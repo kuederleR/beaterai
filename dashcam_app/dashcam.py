@@ -147,13 +147,16 @@ def inference_loop(model, device, half):
     fps_start = time.time()
 
     while True:
+        has_frame = False
         with frame_lock:
-            if raw_frame_buffer is None:
-                time.sleep(0.01)
-                continue
-            im0 = raw_frame_buffer.copy()
-            # Clear buffer to ensure we don't process the exact same frame twice if inference is very fast
-            raw_frame_buffer = None
+            if raw_frame_buffer is not None:
+                im0 = raw_frame_buffer.copy()
+                raw_frame_buffer = None
+                has_frame = True
+                
+        if not has_frame:
+            time.sleep(0.01)
+            continue
 
         # Overlay logic
         if state["overlay_enabled"] and model is not None:
