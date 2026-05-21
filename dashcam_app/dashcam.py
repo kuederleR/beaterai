@@ -84,18 +84,19 @@ def make_error_frame(message):
 def capture_loop():
     global raw_frame_buffer, state, video_writer, latest_web_frame
     
-    # Attempt GStreamer pipeline for highly optimized reading on Jetson
+    # Attempt GStreamer pipeline requesting MJPEG directly from the camera to bypass USB bandwidth limits
     gstreamer_pipeline = (
         f"v4l2src device={VIDEO_SOURCE} ! "
-        f"video/x-raw, width={CAPTURE_WIDTH}, height={CAPTURE_HEIGHT}, framerate={TARGET_FPS}/1 ! "
-        f"videoconvert ! video/x-raw, format=BGR ! appsink drop=1"
+        f"image/jpeg, width={CAPTURE_WIDTH}, height={CAPTURE_HEIGHT}, framerate={TARGET_FPS}/1 ! "
+        f"nvjpegdec ! video/x-raw ! videoconvert ! video/x-raw, format=BGR ! appsink drop=1"
     )
-    print(f"[INFO] Opening camera with GStreamer pipeline: {gstreamer_pipeline}", flush=True)
+    print(f"[INFO] Opening camera with GStreamer MJPEG pipeline: {gstreamer_pipeline}", flush=True)
     cap = cv2.VideoCapture(gstreamer_pipeline, cv2.CAP_GSTREAMER)
     
     if not cap.isOpened():
-        print(f"[WARNING] GStreamer failed, falling back to V4L2 backend...", flush=True)
+        print(f"[WARNING] GStreamer failed, falling back to V4L2 backend with MJPG FOURCC...", flush=True)
         cap = cv2.VideoCapture(VIDEO_SOURCE)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
         cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
