@@ -366,7 +366,7 @@
                 }
 
                 // Update FPS
-                fpsDisplay.innerText = `FPS: ${data.fps}`;
+                fpsDisplay.innerText = `Capture: ${data.capture_fps} FPS | Web: ${data.web_fps} FPS`;
 
                 // Update Recording UI based on server state
                 if (data.recording !== isRecording) {

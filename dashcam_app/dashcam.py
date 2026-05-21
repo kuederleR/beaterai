@@ -32,12 +32,14 @@ CAPTURE_HEIGHT = 800
 TARGET_FPS = 30
 
 # --- State ---
-latest_frame = None
+latest_web_frame = None
+raw_frame_buffer = None
 frame_lock = threading.Lock()
 state = {
     "recording": False,
     "overlay_enabled": False,
-    "fps": 0.0,
+    "capture_fps": 0.0,
+    "web_fps": 0.0,
     "recording_since": None,
     "error": None
 }
@@ -78,19 +80,31 @@ def make_error_frame(message):
     _, buf = cv2.imencode('.jpg', error_img)
     return buf.tobytes()
 
-def camera_loop(model, device, half):
-    global latest_frame, state, video_writer
+# --- Thread 1: Camera Capture and Direct Recording ---
+def capture_loop():
+    global raw_frame_buffer, state, video_writer, latest_web_frame
     
-    cap = cv2.VideoCapture(VIDEO_SOURCE)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
-    cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
+    # Attempt GStreamer pipeline for highly optimized reading on Jetson
+    gstreamer_pipeline = (
+        f"v4l2src device={VIDEO_SOURCE} ! "
+        f"video/x-raw, width={CAPTURE_WIDTH}, height={CAPTURE_HEIGHT}, framerate={TARGET_FPS}/1 ! "
+        f"videoconvert ! video/x-raw, format=BGR ! appsink drop=1"
+    )
+    print(f"[INFO] Opening camera with GStreamer pipeline: {gstreamer_pipeline}", flush=True)
+    cap = cv2.VideoCapture(gstreamer_pipeline, cv2.CAP_GSTREAMER)
+    
+    if not cap.isOpened():
+        print(f"[WARNING] GStreamer failed, falling back to V4L2 backend...", flush=True)
+        cap = cv2.VideoCapture(VIDEO_SOURCE)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
+        cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
     
     if not cap.isOpened():
         state["error"] = f"Could not open camera {VIDEO_SOURCE}"
         print(f"[ERROR] {state['error']}", flush=True)
         with frame_lock:
-            latest_frame = make_error_frame(state["error"])
+            latest_web_frame = make_error_frame(state["error"])
         return
 
     fps_counter = 0
@@ -103,26 +117,51 @@ def camera_loop(model, device, half):
             time.sleep(1)
             continue
             
-        im0 = frame.copy()
+        with frame_lock:
+            # Store copy in shared buffer for inference thread
+            raw_frame_buffer = frame.copy()
         
-        # Recording logic (raw frame)
+        # Recording logic (raw frame, completely decoupled from inference)
         if state["recording"]:
             if video_writer is None:
-                # Start new recording
                 os.makedirs("recordings", exist_ok=True)
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"recordings/dashcam_{timestamp}.avi"
                 fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-                video_writer = cv2.VideoWriter(filename, fourcc, TARGET_FPS, (im0.shape[1], im0.shape[0]))
+                video_writer = cv2.VideoWriter(filename, fourcc, TARGET_FPS, (frame.shape[1], frame.shape[0]))
                 state["recording_since"] = time.time()
                 print(f"[INFO] Started recording: {filename}", flush=True)
-            video_writer.write(im0)
+            video_writer.write(frame)
         else:
             if video_writer is not None:
                 video_writer.release()
                 video_writer = None
                 state["recording_since"] = None
                 print(f"[INFO] Stopped recording", flush=True)
+
+        fps_counter += 1
+        elapsed = time.time() - fps_start
+        if elapsed >= 2.0:
+            state["capture_fps"] = round(fps_counter / elapsed, 1)
+            fps_counter = 0
+            fps_start = time.time()
+
+
+# --- Thread 2: AI Inference and Web Encoding ---
+def inference_loop(model, device, half):
+    global latest_web_frame, raw_frame_buffer, state
+    
+    fps_counter = 0
+    fps_start = time.time()
+
+    while True:
+        with frame_lock:
+            if raw_frame_buffer is None:
+                time.sleep(0.01)
+                continue
+            im0 = raw_frame_buffer.copy()
+            # Clear buffer to ensure we don't process the exact same frame twice if inference is very fast
+            raw_frame_buffer = None
 
         # Overlay logic
         if state["overlay_enabled"] and model is not None:
@@ -145,13 +184,8 @@ def camera_loop(model, device, half):
                 ll_seg_mask = lane_line_mask(ll)
 
             # --- Draw segmentation overlays ---
-            da_mask = da_seg_mask
-            ll_mask = ll_seg_mask
-
-            if isinstance(da_mask, torch.Tensor):
-                da_mask = da_mask.cpu().numpy()
-            if isinstance(ll_mask, torch.Tensor):
-                ll_mask = ll_mask.cpu().numpy()
+            da_mask = da_seg_mask.cpu().numpy() if isinstance(da_seg_mask, torch.Tensor) else da_seg_mask
+            ll_mask = ll_seg_mask.cpu().numpy() if isinstance(ll_seg_mask, torch.Tensor) else ll_seg_mask
 
             color_area = np.zeros((da_mask.shape[0], da_mask.shape[1], 3), dtype=np.uint8)
             color_area[da_mask == 1] = [0, 255, 0]
@@ -169,22 +203,27 @@ def camera_loop(model, device, half):
                     ).round()
                     for *xyxy, conf, cls in reversed(det):
                         plot_one_box(xyxy, im0, color=(0, 255, 255), line_thickness=3)
+            
+            # Help garbage collection since GPU memory is precious
+            del img_tensor, pred, anchor_grid, seg, ll
 
+        # Encode to JPEG for the web interface
         _, buf = cv2.imencode('.jpg', im0, [cv2.IMWRITE_JPEG_QUALITY, 80])
         with frame_lock:
-            latest_frame = buf.tobytes()
+            latest_web_frame = buf.tobytes()
 
         fps_counter += 1
         elapsed = time.time() - fps_start
         if elapsed >= 2.0:
-            state["fps"] = round(fps_counter / elapsed, 1)
+            state["web_fps"] = round(fps_counter / elapsed, 1)
             fps_counter = 0
             fps_start = time.time()
+
 
 def generate_mjpeg():
     while True:
         with frame_lock:
-            frame = latest_frame
+            frame = latest_web_frame
         if frame is None:
             wait_img = np.zeros((480, 800, 3), dtype=np.uint8)
             cv2.putText(wait_img, "Initializing dashcam...",
@@ -195,6 +234,7 @@ def generate_mjpeg():
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
         time.sleep(0.033)
+
 
 # --- Flask Routes ---
 @app.route('/')
@@ -213,7 +253,8 @@ def status():
         duration = int(time.time() - state["recording_since"])
     
     return jsonify({
-        "fps": state["fps"],
+        "capture_fps": state["capture_fps"],
+        "web_fps": state["web_fps"],
         "recording": state["recording"],
         "overlay_enabled": state["overlay_enabled"],
         "recording_duration": duration,
@@ -271,8 +312,14 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"Error loading model: {e}", flush=True)
 
-    t = threading.Thread(target=camera_loop, args=(model, device, half), daemon=True)
-    t.start()
+    # Start multi-threaded architecture
+    print("Starting Capture thread...", flush=True)
+    t_capture = threading.Thread(target=capture_loop, daemon=True)
+    t_capture.start()
+
+    print("Starting Inference thread...", flush=True)
+    t_inference = threading.Thread(target=inference_loop, args=(model, device, half), daemon=True)
+    t_inference.start()
 
     print("Starting Flask server on port 5001...", flush=True)
     app.run(host='0.0.0.0', port=5001, threaded=True)
