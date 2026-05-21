@@ -1,0 +1,22 @@
+services:
+  dashcam:
+    build: .
+    runtime: nvidia
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    ports:
+      - "5001:5001"
+    environment:
+      - VIDEO_SOURCE=/dev/video0
+      - DEVICE=0
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./recordings:/app/recordings
+      - ../weights:/app/data/weights
+      - ./dashcam.py:/app/dashcam.py
+      - ./templates:/app/templates
+    devices:
+      - /dev/video0:/dev/video0
+    restart: unless-stopped

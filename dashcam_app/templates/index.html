@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashcam Control</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --surface-color: rgba(30, 41, 59, 0.7);
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --accent-blue: #3b82f6;
+            --accent-red: #ef4444;
+            --accent-green: #10b981;
+            --border-radius: 16px;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+        }
+
+        .header {
+            width: 100%;
+            max-width: 800px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            font-size: 24px;
+            font-weight: 600;
+            background: -webkit-linear-gradient(#60a5fa, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 99px;
+            background: var(--surface-color);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+        
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: var(--text-secondary);
+        }
+
+        .status-badge.live .status-dot {
+            background-color: var(--accent-green);
+            box-shadow: 0 0 10px var(--accent-green);
+        }
+
+        .status-badge.recording {
+            color: var(--accent-red);
+            border-color: rgba(239, 68, 68, 0.3);
+        }
+
+        .status-badge.recording .status-dot {
+            background-color: var(--accent-red);
+            box-shadow: 0 0 10px var(--accent-red);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+
+        .video-container {
+            width: 100%;
+            max-width: 800px;
+            background: var(--surface-color);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: var(--border-radius);
+            overflow: hidden;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+            position: relative;
+            margin-bottom: 24px;
+        }
+
+        .video-feed {
+            width: 100%;
+            height: auto;
+            display: block;
+            object-fit: cover;
+            aspect-ratio: 16/10;
+        }
+
+        .stats-overlay {
+            position: absolute;
+            top: 16px;
+            left: 16px;
+            background: rgba(0,0,0,0.6);
+            backdrop-filter: blur(4px);
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .controls {
+            width: 100%;
+            max-width: 800px;
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 16px;
+        }
+
+        @media(min-width: 600px) {
+            .controls {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+
+        .control-card {
+            background: var(--surface-color);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: var(--border-radius);
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            transition: transform 0.2s;
+        }
+
+        .control-card:active {
+            transform: scale(0.98);
+        }
+
+        /* Toggle Switch */
+        .toggle-container {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            width: 100%;
+            cursor: pointer;
+        }
+
+        .toggle-label {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 34px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: rgba(255,255,255,0.1);
+            transition: .4s;
+            border-radius: 34px;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+
+        input:checked + .slider {
+            background-color: var(--accent-blue);
+            border-color: var(--accent-blue);
+        }
+
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+
+        /* Record Button */
+        .record-btn {
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+            width: 100%;
+        }
+
+        .record-icon {
+            width: 64px;
+            height: 64px;
+            border-radius: 50%;
+            border: 4px solid var(--text-secondary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .record-inner {
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            background-color: var(--text-secondary);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .record-btn.active .record-icon {
+            border-color: var(--accent-red);
+        }
+
+        .record-btn.active .record-inner {
+            background-color: var(--accent-red);
+            border-radius: 12px;
+            transform: scale(0.6);
+        }
+
+        .record-label {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary);
+            transition: color 0.3s;
+        }
+        
+        .record-btn.active .record-label {
+            color: var(--accent-red);
+        }
+        
+        .error-banner {
+            display: none;
+            width: 100%;
+            max-width: 800px;
+            background: rgba(239, 68, 68, 0.2);
+            border: 1px solid var(--accent-red);
+            color: #fca5a5;
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            font-size: 14px;
+        }
+
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>Dashcam OS</h1>
+        <div class="status-badge" id="mainStatus">
+            <div class="status-dot"></div>
+            <span id="statusText">Connecting...</span>
+        </div>
+    </div>
+
+    <div class="error-banner" id="errorBanner"></div>
+
+    <div class="video-container">
+        <div class="stats-overlay">
+            <div id="fpsDisplay">FPS: --</div>
+            <div id="durationDisplay" style="display:none; color: #fca5a5;">REC: 00:00</div>
+        </div>
+        <img src="/video_feed" class="video-feed" alt="Camera Feed" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjgwIiBoZWlnaHQ9IjgwMCI+PHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsbD0iIzIyMiIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LWZhbWlseT0iYXJpYWwiIGZvbnQtc2l6ZT0iMjQiIGZpbGw9IiM2NjYiIGRvbWluYW50LWJhc2VsaW5lPSJtaWRkbGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkNhbWVyYSBPZmZsaW5lPC90ZXh0Pjwvc3ZnPg=='" />
+    </div>
+
+    <div class="controls">
+        <div class="control-card">
+            <button class="record-btn" id="recordBtn" onclick="toggleRecording()">
+                <div class="record-icon">
+                    <div class="record-inner"></div>
+                </div>
+                <span class="record-label" id="recordLabel">Start Recording</span>
+            </button>
+        </div>
+
+        <div class="control-card">
+            <div class="toggle-container" onclick="document.getElementById('overlayToggle').click()">
+                <span class="toggle-label">YOLOpV2 Overlay</span>
+                <label class="switch" onclick="event.stopPropagation()">
+                    <input type="checkbox" id="overlayToggle" onchange="toggleOverlay(this)">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div style="font-size: 12px; color: var(--text-secondary); text-align: center; margin-top: 8px;">
+                Toggle real-time AI perception mask on the video feed.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // State
+        let isRecording = false;
+        let isOverlayEnabled = false;
+
+        // Elements
+        const mainStatus = document.getElementById('mainStatus');
+        const statusText = document.getElementById('statusText');
+        const fpsDisplay = document.getElementById('fpsDisplay');
+        const durationDisplay = document.getElementById('durationDisplay');
+        const recordBtn = document.getElementById('recordBtn');
+        const recordLabel = document.getElementById('recordLabel');
+        const overlayToggle = document.getElementById('overlayToggle');
+        const errorBanner = document.getElementById('errorBanner');
+
+        function formatDuration(seconds) {
+            const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+            const s = (seconds % 60).toString().padStart(2, '0');
+            return `${m}:${s}`;
+        }
+
+        async function fetchStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                
+                // Update Error
+                if (data.error) {
+                    errorBanner.style.display = 'block';
+                    errorBanner.innerText = data.error;
+                } else {
+                    errorBanner.style.display = 'none';
+                }
+
+                // Update FPS
+                fpsDisplay.innerText = `FPS: ${data.fps}`;
+
+                // Update Recording UI based on server state
+                if (data.recording !== isRecording) {
+                    isRecording = data.recording;
+                    updateRecordingUI();
+                }
+
+                if (isRecording) {
+                    durationDisplay.style.display = 'block';
+                    durationDisplay.innerText = `REC: ${formatDuration(data.recording_duration)}`;
+                    
+                    mainStatus.className = 'status-badge recording';
+                    statusText.innerText = 'Recording';
+                } else {
+                    durationDisplay.style.display = 'none';
+                    mainStatus.className = 'status-badge live';
+                    statusText.innerText = 'Live View';
+                }
+
+                // Update Overlay UI based on server state
+                if (data.overlay_enabled !== isOverlayEnabled) {
+                    isOverlayEnabled = data.overlay_enabled;
+                    overlayToggle.checked = isOverlayEnabled;
+                }
+
+            } catch (err) {
+                mainStatus.className = 'status-badge';
+                statusText.innerText = 'Disconnected';
+                fpsDisplay.innerText = `FPS: --`;
+            }
+        }
+
+        function updateRecordingUI() {
+            if (isRecording) {
+                recordBtn.classList.add('active');
+                recordLabel.innerText = 'Stop Recording';
+            } else {
+                recordBtn.classList.remove('active');
+                recordLabel.innerText = 'Start Recording';
+            }
+        }
+
+        async function toggleRecording() {
+            // Optimistic UI update
+            isRecording = !isRecording;
+            updateRecordingUI();
+            
+            try {
+                const res = await fetch('/api/toggle_recording', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: isRecording })
+                });
+                const data = await res.json();
+                isRecording = data.recording;
+                updateRecordingUI();
+            } catch(e) {
+                // Revert on error
+                isRecording = !isRecording;
+                updateRecordingUI();
+            }
+        }
+
+        async function toggleOverlay(checkbox) {
+            isOverlayEnabled = checkbox.checked;
+            
+            try {
+                const res = await fetch('/api/toggle_overlay', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: isOverlayEnabled })
+                });
+                const data = await res.json();
+                isOverlayEnabled = data.overlay_enabled;
+                checkbox.checked = isOverlayEnabled;
+            } catch(e) {
+                // Revert on error
+                isOverlayEnabled = !isOverlayEnabled;
+                checkbox.checked = isOverlayEnabled;
+            }
+        }
+
+        // Poll status every 1s
+        setInterval(fetchStatus, 1000);
+        fetchStatus();
+    </script>
+</body>
+</html>
