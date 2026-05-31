@@ -147,18 +147,43 @@ def capture_loop():
 
 
 # --- Thread 2: AI Inference and Web Encoding ---
-def extract_lane_polynomials(ll_mask, center_x):
-    """Uses a sliding window to isolate the ego lane and fit polynomials"""
+def extract_lane_polynomials(ll_mask, da_mask, center_x):
+    """Uses a sliding window to isolate the ego lane and fit polynomials, automatically cropping out the car hood."""
     h, w = ll_mask.shape
     
-    bottom_half = ll_mask[int(h*0.5):, :]
-    histogram = np.sum(bottom_half, axis=0)
+    # 1. Automatically detect the top of the car hood using the Drivable Area (da_mask)
+    # We analyze the center 1/3rd of the image from the bottom up to find where the road actually begins.
+    center_da = da_mask[:, int(w*0.33):int(w*0.66)]
+    road_pixels_per_row = np.sum(center_da, axis=1)
+    
+    hood_top_y = h - 1
+    for y in range(h-1, int(h*0.5), -1):
+        # If at least 10% of the center width is classified as drivable road, we have cleared the hood.
+        if road_pixels_per_row[y] > (w * 0.33 * 0.1): 
+            hood_top_y = y
+            break
+            
+    # Add a safety margin (e.g., 20 pixels) above the hood to avoid any distorted/noisy edge pixels
+    hood_top_y = max(int(h * 0.5), hood_top_y - 20)
+    
+    # Our clean road search space is strictly between the horizon (h*0.5) and the hood
+    search_top = int(h * 0.5)
+    search_bottom = hood_top_y
+    search_height = search_bottom - search_top
+    
+    if search_height < 50: # If we can't see enough road, abort
+        return None, None, hood_top_y
+    
+    # 2. Extract starting base for lane lines using a histogram on the bottom half of the VALID road
+    hist_start = search_top + int(search_height * 0.5)
+    valid_region = ll_mask[hist_start:search_bottom, :]
+    histogram = np.sum(valid_region, axis=0)
     
     leftx_base = np.argmax(histogram[:center_x]) if np.max(histogram[:center_x]) > 0 else None
     rightx_base = np.argmax(histogram[center_x:]) + center_x if np.max(histogram[center_x:]) > 0 else None
     
     nwindows = 15
-    window_height = int(h / 2 / nwindows)
+    window_height = int(search_height / nwindows)
     margin = 50
     minpix = 10
     
@@ -168,8 +193,8 @@ def extract_lane_polynomials(ll_mask, center_x):
     y_indices, x_indices = np.nonzero(ll_mask)
     
     for window in range(nwindows):
-        win_y_low = h - (window + 1) * window_height
-        win_y_high = h - window * window_height
+        win_y_low = search_bottom - (window + 1) * window_height
+        win_y_high = search_bottom - window * window_height
         
         if leftx_current is not None:
             win_xleft_low, win_xleft_high = leftx_current - margin, leftx_current + margin
@@ -190,7 +215,7 @@ def extract_lane_polynomials(ll_mask, center_x):
     left_poly = np.polyfit(y_indices[left_pts], x_indices[left_pts], 2) if len(left_pts) > minpix else None
     right_poly = np.polyfit(y_indices[right_pts], x_indices[right_pts], 2) if len(right_pts) > minpix else None
         
-    return left_poly, right_poly
+    return left_poly, right_poly, hood_top_y
 
 def inference_loop():
     global latest_web_frame, raw_frame_buffer, state
@@ -274,20 +299,20 @@ def inference_loop():
             # --- 2. TwinLiteNet Drivable Area & Lane Departure Warning ---
             da_mask, ll_mask = twinlite_model.detect(im_infer)
             
-            if ll_mask is not None:
+            if ll_mask is not None and da_mask is not None:
                 h, w = ll_mask.shape
                 car_center_x = w // 2
                 
-                left_poly, right_poly = extract_lane_polynomials(ll_mask, car_center_x)
+                left_poly, right_poly, hood_top_y = extract_lane_polynomials(ll_mask, da_mask, car_center_x)
                 
                 if left_poly is not None and right_poly is not None:
-                    # Generate perfectly smooth vectorized curves
-                    ploty = np.linspace(int(h*0.5), h-1, num=h//2)
+                    # Generate perfectly smooth vectorized curves, stopping EXACTLY at the hood line
+                    ploty = np.linspace(int(h*0.5), hood_top_y, num=h//2)
                     left_fitx = np.polyval(left_poly, ploty)
                     right_fitx = np.polyval(right_poly, ploty)
                     
-                    # Compute vehicle deviation at the very bottom of the lane
-                    lane_bottom_y = h - 1
+                    # Compute vehicle deviation at the hood line (the closest visible point to the car)
+                    lane_bottom_y = hood_top_y
                     left_bottom_x = np.polyval(left_poly, lane_bottom_y)
                     right_bottom_x = np.polyval(right_poly, lane_bottom_y)
                     
