@@ -1,11 +1,12 @@
 import sys
-import os
+import logging
 import time
 import threading
 import datetime
 import cv2
 import numpy as np
 import torch
+from scipy.ndimage import gaussian_filter1d
 
 # --- Fix for NVIDIA container headless OpenCV ---
 if not hasattr(cv2, 'imshow'):
@@ -149,21 +150,21 @@ def capture_loop():
 
 
 # --- Thread 2: AI Inference and Web Encoding ---
-def smooth_polynomial(poly, history, max_history=5):
-    """Applies a moving average to smooth out lane jitter across frames."""
-    if poly is None:
+def smooth_spline(fitx, history, max_history=5):
+    """Applies a moving average to smooth out lane splines across frames."""
+    if fitx is None:
         if len(history) > 0:
             return np.mean(history, axis=0)
         return None
         
-    history.append(poly)
+    history.append(fitx)
     if len(history) > max_history:
         history.pop(0)
         
     return np.mean(history, axis=0)
 
-def extract_lane_polynomials(ll_mask, da_mask, center_x):
-    """Uses a sliding window to isolate the ego lane and fit polynomials, automatically cropping out the car hood."""
+def extract_lane_splines(ll_mask, da_mask, center_x):
+    """Uses a sliding window to isolate the ego lane and fit Gaussian splines, preventing perspective banana-ing."""
     h, w = ll_mask.shape
     
     # 1. Automatically detect the top of the car hood using the Drivable Area (da_mask)
@@ -218,7 +219,9 @@ def extract_lane_polynomials(ll_mask, da_mask, center_x):
     margin = 40 # Increased slightly to track curved dashed lines reliably
     minpix = 15
     
-    left_pts, right_pts = [], []
+    left_x_pts, left_y_pts = [], []
+    right_x_pts, right_y_pts = [], []
+    
     leftx_current, rightx_current = leftx_base, rightx_base
     
     y_indices, x_indices = np.nonzero(ll_mask)
@@ -226,43 +229,45 @@ def extract_lane_polynomials(ll_mask, da_mask, center_x):
     for window in range(nwindows):
         win_y_low = search_bottom - (window + 1) * window_height
         win_y_high = search_bottom - window * window_height
+        win_y_center = (win_y_low + win_y_high) // 2
         
         if leftx_current is not None:
             win_xleft_low, win_xleft_high = leftx_current - margin, leftx_current + margin
             good_left_inds = ((y_indices >= win_y_low) & (y_indices < win_y_high) & 
                               (x_indices >= win_xleft_low) & (x_indices < win_xleft_high)).nonzero()[0]
-            left_pts.extend(good_left_inds)
             if len(good_left_inds) > minpix:
                 leftx_current = int(np.mean(x_indices[good_left_inds]))
+            left_x_pts.append(leftx_current)
+            left_y_pts.append(win_y_center)
                 
         if rightx_current is not None:
             win_xright_low, win_xright_high = rightx_current - margin, rightx_current + margin
             good_right_inds = ((y_indices >= win_y_low) & (y_indices < win_y_high) & 
                                (x_indices >= win_xright_low) & (x_indices < win_xright_high)).nonzero()[0]
-            right_pts.extend(good_right_inds)
             if len(good_right_inds) > minpix:
                 rightx_current = int(np.mean(x_indices[good_right_inds]))
+            right_x_pts.append(rightx_current)
+            right_y_pts.append(win_y_center)
                 
-    # 3. Robust Polynomial Fitting
-    # If a line is dashed, we might have very few points. Fitting a 2nd degree curve to sparse points causes "hourglassing".
-    # We fall back to a straight line (1st degree) if points are sparse!
-    if len(left_pts) > 50:
-        left_poly = np.polyfit(y_indices[left_pts], x_indices[left_pts], 2)
-    elif len(left_pts) > 10:
-        p1 = np.polyfit(y_indices[left_pts], x_indices[left_pts], 1)
-        left_poly = np.array([0.0, p1[0], p1[1]]) # Pad to 2nd order format
-    else:
-        left_poly = None
+    # 3. Robust Gaussian Spline Generation
+    # We replace rigid parabolic equations with fluid vector splines that perfectly match perspective view curves.
+    ploty = np.linspace(int(h*0.5), hood_top_y, num=h//2)
+    left_fitx, right_fitx = None, None
+    
+    if len(left_x_pts) == nwindows:
+        # Interpolate requires strictly increasing x-axis (our y coordinates in image space)
+        ly = np.array(left_y_pts)[::-1]
+        lx = np.array(left_x_pts)[::-1]
+        raw_fitx = np.interp(ploty, ly, lx)
+        left_fitx = scipy.ndimage.gaussian_filter1d(raw_fitx, sigma=8.0)
         
-    if len(right_pts) > 50:
-        right_poly = np.polyfit(y_indices[right_pts], x_indices[right_pts], 2)
-    elif len(right_pts) > 10:
-        p1 = np.polyfit(y_indices[right_pts], x_indices[right_pts], 1)
-        right_poly = np.array([0.0, p1[0], p1[1]])
-    else:
-        right_poly = None
+    if len(right_x_pts) == nwindows:
+        ry = np.array(right_y_pts)[::-1]
+        rx = np.array(right_x_pts)[::-1]
+        raw_fitx = np.interp(ploty, ry, rx)
+        right_fitx = scipy.ndimage.gaussian_filter1d(raw_fitx, sigma=8.0)
         
-    return left_poly, right_poly, hood_top_y
+    return left_fitx, right_fitx, ploty, hood_top_y
 
 def inference_loop():
     global latest_web_frame, raw_frame_buffer, state
@@ -350,22 +355,17 @@ def inference_loop():
                 h, w = ll_mask.shape
                 car_center_x = w // 2
                 
-                left_poly, right_poly, hood_top_y = extract_lane_polynomials(ll_mask, da_mask, car_center_x)
+                left_fitx, right_fitx, ploty, hood_top_y = extract_lane_splines(ll_mask, da_mask, car_center_x)
                 
                 # Apply temporal smoothing to completely eliminate frame-to-frame jitter
-                left_poly = smooth_polynomial(left_poly, state["left_poly_history"])
-                right_poly = smooth_polynomial(right_poly, state["right_poly_history"])
+                left_fitx = smooth_spline(left_fitx, state["left_poly_history"])
+                right_fitx = smooth_spline(right_fitx, state["right_poly_history"])
                 
-                if left_poly is not None and right_poly is not None:
-                    # Generate perfectly smooth vectorized curves, stopping EXACTLY at the hood line
-                    ploty = np.linspace(int(h*0.5), hood_top_y, num=h//2)
-                    left_fitx = np.polyval(left_poly, ploty)
-                    right_fitx = np.polyval(right_poly, ploty)
-                    
+                if left_fitx is not None and right_fitx is not None:
                     # Compute vehicle deviation at the hood line (the closest visible point to the car)
                     lane_bottom_y = hood_top_y
-                    left_bottom_x = np.polyval(left_poly, lane_bottom_y)
-                    right_bottom_x = np.polyval(right_poly, lane_bottom_y)
+                    left_bottom_x = left_fitx[-1]
+                    right_bottom_x = right_fitx[-1]
                     
                     lane_width = right_bottom_x - left_bottom_x
                     lane_center_x = (left_bottom_x + right_bottom_x) / 2
