@@ -166,13 +166,6 @@ def extract_lane_polynomials(ll_mask, da_mask, center_x):
     """Uses a sliding window to isolate the ego lane and fit polynomials, automatically cropping out the car hood."""
     h, w = ll_mask.shape
     
-    # 0. FUSE MASKS: Physically erase all adjacent lane lines from the data
-    # We expand the ego-lane mask by ~30 pixels to cover the immediate boundaries
-    kernel = np.ones((31, 31), np.uint8)
-    da_dilated = cv2.dilate(da_mask, kernel, iterations=1)
-    # Stencil out any painted lines that don't border the ego lane!
-    ll_mask = cv2.bitwise_and(ll_mask, ll_mask, mask=da_dilated)
-    
     # 1. Automatically detect the top of the car hood using the Drivable Area (da_mask)
     # We analyze the center 1/3rd of the image from the bottom up to find where the road actually begins.
     center_da = da_mask[:, int(w*0.33):int(w*0.66)]
@@ -196,37 +189,29 @@ def extract_lane_polynomials(ll_mask, da_mask, center_x):
     if search_height < 50: # If we can't see enough road, abort
         return None, None, hood_top_y
     
-    # 2. Extract starting base using the SOLID Drivable Area mask as a highly reliable prior
-    # This prevents the tracker from locking onto noise if the painted line is dashed/missing
-    bottom_da = da_mask[search_bottom - 20 : search_bottom, :]
-    da_hist = np.sum(bottom_da, axis=0)
-    
-    road_indices = np.where(da_hist > 5)[0]
-    if len(road_indices) > 0:
-        da_left_edge = road_indices[0]
-        da_right_edge = road_indices[-1]
-    else:
-        da_left_edge = center_x - int(w*0.2)
-        da_right_edge = center_x + int(w*0.2)
-        
-    hist_start = search_top + int(search_height * 0.5)
-    valid_region = ll_mask[hist_start:search_bottom, :]
+    # 2. Extract starting base using a localized histogram of the full valid road
+    # By summing the ENTIRE valid y-region, we guarantee we catch dashes of dashed lines.
+    valid_region = ll_mask[search_top:search_bottom, :]
     histogram = np.sum(valid_region, axis=0)
     
-    # Search for painted line peak ONLY within a window around the Drivable Area edge
-    left_min = max(0, da_left_edge - 60)
-    left_max = min(center_x, da_left_edge + 60)
-    if left_max > left_min and np.max(histogram[left_min:left_max]) > 0:
-        leftx_base = np.argmax(histogram[left_min:left_max]) + left_min
+    # Ego-Band Searching: We physically restrict the base search to where the ego lane lines 
+    # MUST logically exist relative to the camera center (e.g. 20 to 250 pixels away).
+    # This completely blinds the algorithm to the outer boundaries of the highway.
+    left_search_min = max(0, center_x - 250)
+    left_search_max = max(0, center_x - 20)
+    
+    if left_search_max > left_search_min and np.max(histogram[left_search_min:left_search_max]) > 10:
+        leftx_base = np.argmax(histogram[left_search_min:left_search_max]) + left_search_min
     else:
-        leftx_base = da_left_edge # Fallback to DA edge if dashed line is in a gap
+        leftx_base = None
         
-    right_min = max(center_x, da_right_edge - 60)
-    right_max = min(w, da_right_edge + 60)
-    if right_max > right_min and np.max(histogram[right_min:right_max]) > 0:
-        rightx_base = np.argmax(histogram[right_min:right_max]) + right_min
+    right_search_min = min(w, center_x + 20)
+    right_search_max = min(w, center_x + 250)
+    
+    if right_search_max > right_search_min and np.max(histogram[right_search_min:right_search_max]) > 10:
+        rightx_base = np.argmax(histogram[right_search_min:right_search_max]) + right_search_min
     else:
-        rightx_base = da_right_edge
+        rightx_base = None
     
     nwindows = 15
     window_height = int(search_height / nwindows)
