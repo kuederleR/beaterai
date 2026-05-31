@@ -5,11 +5,24 @@ import threading
 import datetime
 import cv2
 import numpy as np
+
+# --- Fix for NVIDIA container headless OpenCV ---
+if not hasattr(cv2, 'imshow'):
+    cv2.imshow = lambda *args, **kwargs: None
+    cv2.waitKey = lambda *args, **kwargs: None
+    cv2.destroyAllWindows = lambda *args, **kwargs: None
+if not hasattr(cv2, 'IMREAD_COLOR'):
+    cv2.IMREAD_COLOR = 1
+if not hasattr(cv2, 'IMREAD_GRAYSCALE'):
+    cv2.IMREAD_GRAYSCALE = 0
+if not hasattr(cv2, 'IMREAD_UNCHANGED'):
+    cv2.IMREAD_UNCHANGED = -1
+
 from flask import Flask, Response, jsonify, request, render_template
 from ultralytics import YOLO
 
-# Import our new UFLD lane detector
-from ufld_detector import UFLDDetector
+# Import TwinLiteNet for fast drivable area segmentation
+from twinlite_detector import TwinLiteDetector
 
 os.environ['PYTHONUNBUFFERED'] = '1'
 
@@ -136,8 +149,8 @@ def inference_loop():
     os.makedirs('data/weights', exist_ok=True)
     yolo_model = YOLO('yolov8n.pt') # Will auto-download if missing
     
-    print("[INFO] Loading UFLD Lane detector...", flush=True)
-    ufld_model = UFLDDetector()
+    print("[INFO] Loading TwinLiteNet Lane detector...", flush=True)
+    twinlite_model = TwinLiteDetector()
 
     while True:
         has_frame = False
@@ -176,35 +189,42 @@ def inference_loop():
                             cv2.rectangle(im0, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 4)
                             cv2.putText(im0, "TOO CLOSE!", (int(x1), int(y1)-10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
 
-            # --- 2. UFLD Lane Departure Warning ---
-            lanes = ufld_model.detect(im0)
+            # --- 2. TwinLiteNet Drivable Area & Lane Departure Warning ---
+            da_mask, ll_mask = twinlite_model.detect(im0)
             
-            ego_left = lanes[1]
-            ego_right = lanes[2]
-            
-            # Draw lanes
-            colors = [(255,0,0), (0,255,0), (0,0,255), (255,255,0)]
-            for i, lane in enumerate(lanes):
-                for pt in lane:
-                    cv2.circle(im0, pt, 5, colors[i], -1)
+            if da_mask is not None:
+                # Create a colored mask for drivable area (Green) and lane lines (Red)
+                color_mask = np.zeros_like(im0)
+                color_mask[da_mask == 1] = [0, 255, 0]
+                color_mask[ll_mask == 1] = [0, 0, 255]
+                
+                # Alpha blend with the original frame
+                alpha = 0.4
+                mask_indices = np.any(color_mask != 0, axis=-1)
+                im0[mask_indices] = cv2.addWeighted(im0, 1.0 - alpha, color_mask, alpha, 0)[mask_indices]
 
-            # LDW Logic: Check bottom-most detected points of the ego lanes
-            if len(ego_left) > 0 and len(ego_right) > 0:
-                left_x = ego_left[-1][0]
-                right_x = ego_right[-1][0]
+                # LDW Logic: Check the bottom portion of the drivable area mask
+                h, w = da_mask.shape
+                check_y = int(h * 0.85) # Check at 85% height to avoid hood
+                row_mask = da_mask[check_y, :]
+                road_pixels = np.where(row_mask == 1)[0]
                 
-                lane_center = (left_x + right_x) / 2
-                camera_center = CAPTURE_WIDTH / 2
-                
-                drift = camera_center - lane_center
-                
-                # Draw center tracking dot
-                cv2.circle(im0, (int(lane_center), int(ego_left[-1][1])), 8, (255, 255, 255), -1)
-                
-                if abs(drift) > LDW_MAX_DRIFT:
-                    ldw_triggered = True
-                    direction = "RIGHT" if drift > 0 else "LEFT"
-                    cv2.putText(im0, f"LANE DEPARTURE: {direction}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
+                if len(road_pixels) > 0:
+                    left_x = road_pixels[0]
+                    right_x = road_pixels[-1]
+                    
+                    lane_center = (left_x + right_x) / 2
+                    camera_center = w / 2
+                    
+                    drift = camera_center - lane_center
+                    
+                    # Draw center tracking dot
+                    cv2.circle(im0, (int(lane_center), check_y), 8, (255, 255, 255), -1)
+                    
+                    if abs(drift) > LDW_MAX_DRIFT:
+                        ldw_triggered = True
+                        direction = "RIGHT" if drift > 0 else "LEFT"
+                        cv2.putText(im0, f"LANE DEPARTURE: {direction}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
 
         # Update global state for UI alerts
         state["fcw_warning"] = fcw_triggered
