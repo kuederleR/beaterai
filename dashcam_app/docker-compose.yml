@@ -1,7 +1,7 @@
 services:
   dashcam:
     build: .
-    # runtime: nvidia
+    runtime: nvidia
     ipc: host
     ulimits:
       memlock: -1

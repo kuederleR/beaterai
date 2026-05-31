@@ -28,6 +28,8 @@ RUN rm -rf /usr/lib/python3.10/dist-packages/cv2 \
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
+# Attempt to install Jetson ONNXRuntime GPU. If it fails, fallback to CPU version.
+RUN pip3 install --no-cache-dir --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu122/ onnxruntime-gpu || pip3 install --no-cache-dir onnxruntime
 # Create weights and recordings directories
 RUN mkdir -p data/weights recordings
 
