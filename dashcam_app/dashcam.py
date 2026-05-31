@@ -277,22 +277,25 @@ def inference_loop():
     fps_start = time.time()
 
     print("[INFO] Loading YOLOv8n object detector...", flush=True)
-    os.makedirs('data/weights', exist_ok=True)
+    os.makedirs('models', exist_ok=True)
     yolo_model = YOLO('yolov8n.pt') # Will auto-download if missing
     
     state["cuda_available"] = torch.cuda.is_available()
     state["gpu_device_name"] = torch.cuda.get_device_name(0) if state["cuda_available"] else "None"
     
     if state["cuda_available"]:
-        engine_path = 'yolov8n.engine'
+        engine_path = 'models/yolov8n.engine'
         if not os.path.exists(engine_path):
             print("[INFO] Exporting YOLOv8n to TensorRT engine (this will take a few minutes)...", flush=True)
             try:
                 yolo_model.export(format='engine', device='0', half=True)
+                if os.path.exists('yolov8n.engine'):
+                    os.rename('yolov8n.engine', engine_path)
             except Exception as e:
                 print(f"[ERROR] Failed to export TensorRT: {e}", flush=True)
+                
         if os.path.exists(engine_path):
-            print("[INFO] Loading TensorRT engine...", flush=True)
+            print("[INFO] Loading TensorRT engine from cache...", flush=True)
             yolo_model = YOLO(engine_path, task='detect')
     
     yolo_dev = 'cuda:0' if torch.cuda.is_available() else 'cpu'
