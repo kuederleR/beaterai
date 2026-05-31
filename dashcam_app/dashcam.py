@@ -37,13 +37,16 @@ CAPTURE_WIDTH = 1280
 CAPTURE_HEIGHT = 800
 TARGET_FPS = 30
 
+INFER_WIDTH = 640
+INFER_HEIGHT = 400
+
 # FCW Settings
-FCW_WARNING_WIDTH = 400  # If a car's bounding box is wider than this in pixels, it's very close
-CENTER_LANE_X_MIN = CAPTURE_WIDTH // 3
-CENTER_LANE_X_MAX = (CAPTURE_WIDTH // 3) * 2
+FCW_WARNING_WIDTH = 200  # If a car's bounding box is wider than this in pixels, it's very close
+CENTER_LANE_X_MIN = INFER_WIDTH // 3
+CENTER_LANE_X_MAX = (INFER_WIDTH // 3) * 2
 
 # LDW Settings
-LDW_MAX_DRIFT = 80 # Max pixel drift from center before warning
+LDW_MAX_DRIFT = 40 # Max pixel drift from center before warning
 
 # --- State ---
 latest_web_frame = None
@@ -157,6 +160,18 @@ def inference_loop():
     state["cuda_available"] = torch.cuda.is_available()
     state["gpu_device_name"] = torch.cuda.get_device_name(0) if state["cuda_available"] else "None"
     
+    if state["cuda_available"]:
+        engine_path = 'yolov8n.engine'
+        if not os.path.exists(engine_path):
+            print("[INFO] Exporting YOLOv8n to TensorRT engine (this will take a few minutes)...", flush=True)
+            try:
+                yolo_model.export(format='engine', device='0', half=True)
+            except Exception as e:
+                print(f"[ERROR] Failed to export TensorRT: {e}", flush=True)
+        if os.path.exists(engine_path):
+            print("[INFO] Loading TensorRT engine...", flush=True)
+            yolo_model = YOLO(engine_path, task='detect')
+    
     yolo_dev = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     state["yolo_device"] = yolo_dev
     print(f"\n{'='*50}\n[DEBUG - GPU CHECK]\nCUDA Available: {state['cuda_available']}\nGPU Name: {state['gpu_device_name']}\nYOLOv8 Device Target: {yolo_dev}\n{'='*50}\n", flush=True)
@@ -184,13 +199,15 @@ def inference_loop():
         elif len(im0.shape) == 3 and im0.shape[2] == 4:
             im0 = cv2.cvtColor(im0, cv2.COLOR_BGRA2BGR)
 
+        im_infer = cv2.resize(im0, (INFER_WIDTH, INFER_HEIGHT), interpolation=cv2.INTER_LINEAR)
+
         fcw_triggered = False
         ldw_triggered = False
 
         if state["adas_enabled"]:
             # --- 1. YOLOv8 Forward Collision Warning ---
             # Predict objects without tracking overhead
-            results = yolo_model.predict(im0, classes=[2, 5, 7], verbose=False, device='cuda:0' if torch.cuda.is_available() else 'cpu') # Cars, buses, trucks
+            results = yolo_model.predict(im_infer, classes=[2, 5, 7], verbose=False, device=yolo_dev) # Cars, buses, trucks
             
             for r in results:
                 boxes = r.boxes
@@ -200,28 +217,28 @@ def inference_loop():
                     cx = (x1 + x2) / 2
                     
                     # Draw box
-                    cv2.rectangle(im0, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+                    cv2.rectangle(im_infer, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
                     
                     # FCW Logic: If vehicle is in the center lane and box width is very large (close)
                     if CENTER_LANE_X_MIN < cx < CENTER_LANE_X_MAX:
                         if w > FCW_WARNING_WIDTH:
                             fcw_triggered = True
-                            cv2.rectangle(im0, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 4)
-                            cv2.putText(im0, "TOO CLOSE!", (int(x1), int(y1)-10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                            cv2.rectangle(im_infer, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 4)
+                            cv2.putText(im_infer, "TOO CLOSE!", (int(x1), int(y1)-10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
 
             # --- 2. TwinLiteNet Drivable Area & Lane Departure Warning ---
-            da_mask, ll_mask = twinlite_model.detect(im0)
+            da_mask, ll_mask = twinlite_model.detect(im_infer)
             
             if da_mask is not None:
                 # Create a colored mask for drivable area (Green) and lane lines (Red)
-                color_mask = np.zeros_like(im0)
+                color_mask = np.zeros_like(im_infer)
                 color_mask[da_mask == 1] = [0, 255, 0]
                 color_mask[ll_mask == 1] = [0, 0, 255]
                 
                 # Alpha blend with the original frame
                 alpha = 0.4
                 mask_indices = np.any(color_mask != 0, axis=-1)
-                im0[mask_indices] = cv2.addWeighted(im0[mask_indices], 1.0 - alpha, color_mask[mask_indices], alpha, 0)
+                im_infer[mask_indices] = cv2.addWeighted(im_infer[mask_indices], 1.0 - alpha, color_mask[mask_indices], alpha, 0)
 
                 # LDW Logic: Check the bottom portion of the drivable area mask
                 h, w = da_mask.shape
@@ -239,19 +256,19 @@ def inference_loop():
                     drift = camera_center - lane_center
                     
                     # Draw center tracking dot
-                    cv2.circle(im0, (int(lane_center), check_y), 8, (255, 255, 255), -1)
+                    cv2.circle(im_infer, (int(lane_center), check_y), 8, (255, 255, 255), -1)
                     
                     if abs(drift) > LDW_MAX_DRIFT:
                         ldw_triggered = True
                         direction = "RIGHT" if drift > 0 else "LEFT"
-                        cv2.putText(im0, f"LANE DEPARTURE: {direction}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
+                        cv2.putText(im_infer, f"LANE DEPARTURE: {direction}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
 
         # Update global state for UI alerts
         state["fcw_warning"] = fcw_triggered
         state["ldw_warning"] = ldw_triggered
 
         # Encode to JPEG for the web interface
-        _, buf = cv2.imencode('.jpg', im0, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        _, buf = cv2.imencode('.jpg', im_infer, [cv2.IMWRITE_JPEG_QUALITY, 70])
         with frame_lock:
             latest_web_frame = buf.tobytes()
 
