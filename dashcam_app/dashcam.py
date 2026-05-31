@@ -260,13 +260,13 @@ def extract_lane_splines(ll_mask, da_mask, center_x):
         ly = np.array(left_y_pts)[::-1]
         lx = np.array(left_x_pts)[::-1]
         raw_fitx = np.interp(ploty, ly, lx)
-        left_fitx = scipy.ndimage.gaussian_filter1d(raw_fitx, sigma=8.0)
+        left_fitx = gaussian_filter1d(raw_fitx, sigma=8.0)
         
     if len(right_x_pts) == nwindows:
         ry = np.array(right_y_pts)[::-1]
         rx = np.array(right_x_pts)[::-1]
         raw_fitx = np.interp(ploty, ry, rx)
-        right_fitx = scipy.ndimage.gaussian_filter1d(raw_fitx, sigma=8.0)
+        right_fitx = gaussian_filter1d(raw_fitx, sigma=8.0)
         
     return left_fitx, right_fitx, ploty, hood_top_y
 
