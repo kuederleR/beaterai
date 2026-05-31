@@ -71,7 +71,9 @@ state = {
     "left_poly_history": [],
     "right_poly_history": [],
     "calibrate_requested": False,
-    "calibration": None
+    "calibration": None,
+    "calibration_buffer": [],
+    "calibration_frames_left": 0
 }
 
 if os.path.exists('models/calibration.json'):
@@ -177,7 +179,7 @@ def smooth_spline(fitx, history, max_history=5):
         
     return np.mean(history, axis=0)
 
-def perform_calibration(ll_mask):
+def extract_raw_vp(ll_mask):
     h, w = ll_mask.shape
     bottom_band = ll_mask[h - 40:h, :]
     histogram = np.sum(bottom_band, axis=0)
@@ -244,28 +246,7 @@ def perform_calibration(ll_mask):
     
     if vp_y > h or vp_y < 0: return None
     
-    bottom_y = h
-    top_y = vp_y + (h - vp_y) * 0.3
-    
-    src = np.float32([
-        [m1 * bottom_y + b1, bottom_y],
-        [m2 * bottom_y + b2, bottom_y],
-        [m2 * top_y + b2, top_y],
-        [m1 * top_y + b1, top_y]
-    ])
-    
-    margin_x = w * 0.25
-    dst = np.float32([
-        [margin_x, h],
-        [w - margin_x, h],
-        [w - margin_x, 0],
-        [margin_x, 0]
-    ])
-    
-    M = cv2.getPerspectiveTransform(src, dst)
-    Minv = cv2.getPerspectiveTransform(dst, src)
-    
-    return {"M": M, "Minv": Minv, "top_y": int(top_y)}
+    return {"vp_x": vp_x, "vp_y": vp_y, "m1": m1, "b1": b1, "m2": m2, "b2": b2}
 
 def extract_lane_bev(ll_mask, M):
     h, w = ll_mask.shape
@@ -524,20 +505,65 @@ def inference_loop():
                 car_center_x = w // 2
                 
                 if state.get("calibrate_requested"):
-                    calib = perform_calibration(ll_mask)
-                    if calib is not None:
-                        state["calibration"] = calib
-                        os.makedirs('models', exist_ok=True)
-                        with open('models/calibration.json', 'w') as f:
-                            json.dump({
-                                "M": calib["M"].tolist(), 
-                                "Minv": calib["Minv"].tolist(),
-                                "top_y": calib["top_y"]
-                            }, f)
-                        print("[INFO] IPM Calibration Successful and Saved!", flush=True)
-                    else:
-                        print("[ERROR] IPM Calibration Failed. Drive straight and try again.", flush=True)
+                    print("[INFO] Starting robust 30-frame calibration...", flush=True)
                     state["calibrate_requested"] = False
+                    state["calibration_frames_left"] = 30
+                    state["calibration_buffer"] = []
+                    
+                if state["calibration_frames_left"] > 0:
+                    raw_vp = extract_raw_vp(ll_mask)
+                    if raw_vp is not None:
+                        state["calibration_buffer"].append(raw_vp)
+                    state["calibration_frames_left"] -= 1
+                    
+                    if state["calibration_frames_left"] == 0:
+                        if len(state["calibration_buffer"]) >= 15:
+                            # We have enough good frames! Calculate rolling median.
+                            med_vp_x = np.median([c["vp_x"] for c in state["calibration_buffer"]])
+                            med_vp_y = np.median([c["vp_y"] for c in state["calibration_buffer"]])
+                            med_m1 = np.median([c["m1"] for c in state["calibration_buffer"]])
+                            med_b1 = np.median([c["b1"] for c in state["calibration_buffer"]])
+                            med_m2 = np.median([c["m2"] for c in state["calibration_buffer"]])
+                            med_b2 = np.median([c["b2"] for c in state["calibration_buffer"]])
+                            
+                            # Gently enforce symmetry towards camera optical center
+                            target_center_x = w / 2
+                            med_vp_x = med_vp_x * 0.5 + target_center_x * 0.5
+                            
+                            # Calculate extended horizon for deeper draw distance (shrink into horizon)
+                            bottom_y = h
+                            top_y = med_vp_y + 15
+                            
+                            src = np.float32([
+                                [med_m1 * bottom_y + med_b1, bottom_y],
+                                [med_m2 * bottom_y + med_b2, bottom_y],
+                                [med_m2 * top_y + med_b2, top_y],
+                                [med_m1 * top_y + med_b1, top_y]
+                            ])
+                            
+                            margin_x = w * 0.25
+                            dst = np.float32([
+                                [margin_x, h],
+                                [w - margin_x, h],
+                                [w - margin_x, 0],
+                                [margin_x, 0]
+                            ])
+                            
+                            M = cv2.getPerspectiveTransform(src, dst)
+                            Minv = cv2.getPerspectiveTransform(dst, src)
+                            
+                            state["calibration"] = {"M": M, "Minv": Minv, "top_y": int(top_y)}
+                            
+                            os.makedirs('models', exist_ok=True)
+                            with open('models/calibration.json', 'w') as f:
+                                json.dump({
+                                    "M": M.tolist(), 
+                                    "Minv": Minv.tolist(),
+                                    "top_y": int(top_y)
+                                }, f)
+                            print("[INFO] Robust IPM Calibration Successful and Saved!", flush=True)
+                        else:
+                            print("[ERROR] Too much noise during calibration phase. Try again on a straighter road.", flush=True)
                     
                 if state["calibration"] is not None:
                     # --- BIRD'S EYE VIEW PERCEPTION PIPELINE ---
