@@ -57,7 +57,11 @@ state = {
     "capture_fps": 0.0,
     "web_fps": 0.0,
     "recording_since": None,
-    "error": None
+    "error": None,
+    "cuda_available": False,
+    "gpu_device_name": "None",
+    "yolo_device": "Unknown",
+    "twinlite_device": "Unknown"
 }
 video_writer = None
 
@@ -150,8 +154,17 @@ def inference_loop():
     os.makedirs('data/weights', exist_ok=True)
     yolo_model = YOLO('yolov8n.pt') # Will auto-download if missing
     
+    state["cuda_available"] = torch.cuda.is_available()
+    state["gpu_device_name"] = torch.cuda.get_device_name(0) if state["cuda_available"] else "None"
+    
+    yolo_dev = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    state["yolo_device"] = yolo_dev
+    print(f"\n{'='*50}\n[DEBUG - GPU CHECK]\nCUDA Available: {state['cuda_available']}\nGPU Name: {state['gpu_device_name']}\nYOLOv8 Device Target: {yolo_dev}\n{'='*50}\n", flush=True)
+    
+    
     print("[INFO] Loading TwinLiteNet Lane detector...", flush=True)
     twinlite_model = TwinLiteDetector()
+    state["twinlite_device"] = str(twinlite_model.device)
 
     while True:
         has_frame = False
@@ -290,7 +303,11 @@ def status():
         "fcw_warning": state["fcw_warning"],
         "ldw_warning": state["ldw_warning"],
         "recording_duration": duration,
-        "error": state["error"]
+        "error": state["error"],
+        "cuda_available": state["cuda_available"],
+        "gpu_device_name": state["gpu_device_name"],
+        "yolo_device": state["yolo_device"],
+        "twinlite_device": state["twinlite_device"]
     })
 
 @app.route('/api/toggle_recording', methods=['POST'])
