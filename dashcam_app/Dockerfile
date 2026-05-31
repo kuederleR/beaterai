@@ -20,9 +20,6 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Clone the YOLOPv2 repository for utils
-RUN git clone https://github.com/CAIC-AD/YOLOPv2.git .
-
 # Install requirements
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
@@ -31,8 +28,10 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 RUN mkdir -p data/weights recordings
 
 # Copy our custom dashcam application
+COPY ufld_detector.py .
 COPY dashcam.py .
 COPY templates/ templates/
+COPY install_service.sh .
 
 EXPOSE 5001
 
