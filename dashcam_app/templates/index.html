@@ -357,6 +357,18 @@
         </div>
 
         <div class="control-card">
+            <button class="record-btn" id="calibrateBtn" onclick="requestCalibration()">
+                <div class="record-icon" style="border-color: var(--accent-blue);">
+                    <div class="record-inner" style="background-color: var(--accent-blue); border-radius: 4px; transform: scale(0.6);"></div>
+                </div>
+                <span class="record-label" id="calibrateLabel">Calibrate BEV</span>
+            </button>
+            <div style="font-size: 12px; color: var(--text-secondary); text-align: center; margin-top: 8px;">
+                Drive straight and click to calibrate perspective.
+            </div>
+        </div>
+
+        <div class="control-card">
             <div class="toggle-container" onclick="document.getElementById('adasToggle').click()">
                 <span class="toggle-label">ADAS Perception</span>
                 <label class="switch" onclick="event.stopPropagation()">
@@ -498,6 +510,25 @@
                 // Revert on error
                 isAdasEnabled = !isAdasEnabled;
                 checkbox.checked = isAdasEnabled;
+            }
+        }
+        
+        async function requestCalibration() {
+            const btn = document.getElementById('calibrateBtn');
+            const label = document.getElementById('calibrateLabel');
+            
+            btn.style.opacity = '0.5';
+            label.innerText = 'Calibrating...';
+            
+            try {
+                await fetch('/api/calibrate', { method: 'POST' });
+                setTimeout(() => {
+                    btn.style.opacity = '1';
+                    label.innerText = 'Calibrate BEV';
+                }, 2000);
+            } catch(e) {
+                btn.style.opacity = '1';
+                label.innerText = 'Calibration Failed';
             }
         }
 
