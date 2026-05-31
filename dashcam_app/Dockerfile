@@ -32,7 +32,7 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 RUN mkdir -p data/weights recordings
 
 # Copy our custom dashcam application
-COPY ufld_detector.py .
+COPY twinlite_detector.py .
 COPY dashcam.py .
 COPY templates/ templates/
 COPY install_service.sh .
