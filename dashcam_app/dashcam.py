@@ -17,6 +17,7 @@ app = Flask(__name__)
 
 # --- Configuration ---
 VIDEO_SOURCE = os.environ.get('VIDEO_SOURCE', '/dev/video0')
+DEV_VIDEO_PATH = os.environ.get('DEV_VIDEO_PATH', None)
 DEVICE_STR = os.environ.get('DEVICE', '0')
 CAPTURE_WIDTH = 1280
 CAPTURE_HEIGHT = 800
@@ -57,16 +58,20 @@ def make_error_frame(message):
 def capture_loop():
     global raw_frame_buffer, state, video_writer, latest_web_frame
     
-    # Use V4L2 backend explicitly to request MJPEG from the USB camera
-    print(f"[INFO] Opening camera {VIDEO_SOURCE} via V4L2 with MJPEG format...", flush=True)
-    cap = cv2.VideoCapture(VIDEO_SOURCE, cv2.CAP_V4L2)
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
-    cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
+    if DEV_VIDEO_PATH and os.path.exists(DEV_VIDEO_PATH):
+        print(f"[INFO] DEV MODE: Looping video from {DEV_VIDEO_PATH}", flush=True)
+        cap = cv2.VideoCapture(DEV_VIDEO_PATH)
+    else:
+        # Use V4L2 backend explicitly to request MJPEG from the USB camera
+        print(f"[INFO] Opening camera {VIDEO_SOURCE} via V4L2 with MJPEG format...", flush=True)
+        cap = cv2.VideoCapture(VIDEO_SOURCE, cv2.CAP_V4L2)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
+        cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
     
     if not cap.isOpened():
-        state["error"] = f"Could not open camera {VIDEO_SOURCE}"
+        state["error"] = f"Could not open camera {VIDEO_SOURCE if not DEV_VIDEO_PATH else DEV_VIDEO_PATH}"
         print(f"[ERROR] {state['error']}", flush=True)
         with frame_lock:
             latest_web_frame = make_error_frame(state["error"])
@@ -78,9 +83,18 @@ def capture_loop():
     while True:
         ret, frame = cap.read()
         if not ret:
+            if DEV_VIDEO_PATH:
+                # Loop video
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+            
             print("[WARNING] Could not read frame from camera. Retrying...", flush=True)
             time.sleep(0.01)
             continue
+            
+        if DEV_VIDEO_PATH:
+            # Simulate real-time framerate for video files so it doesn't run at 1000fps
+            time.sleep(1.0 / TARGET_FPS)
             
         with frame_lock:
             raw_frame_buffer = frame.copy()
