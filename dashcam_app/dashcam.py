@@ -64,7 +64,9 @@ state = {
     "cuda_available": False,
     "gpu_device_name": "None",
     "yolo_device": "Unknown",
-    "twinlite_device": "Unknown"
+    "twinlite_device": "Unknown",
+    "left_poly_history": [],
+    "right_poly_history": []
 }
 video_writer = None
 
@@ -147,6 +149,19 @@ def capture_loop():
 
 
 # --- Thread 2: AI Inference and Web Encoding ---
+def smooth_polynomial(poly, history, max_history=5):
+    """Applies a moving average to smooth out lane jitter across frames."""
+    if poly is None:
+        if len(history) > 0:
+            return np.mean(history, axis=0)
+        return None
+        
+    history.append(poly)
+    if len(history) > max_history:
+        history.pop(0)
+        
+    return np.mean(history, axis=0)
+
 def extract_lane_polynomials(ll_mask, da_mask, center_x):
     """Uses a sliding window to isolate the ego lane and fit polynomials, automatically cropping out the car hood."""
     h, w = ll_mask.shape
@@ -181,18 +196,42 @@ def extract_lane_polynomials(ll_mask, da_mask, center_x):
     if search_height < 50: # If we can't see enough road, abort
         return None, None, hood_top_y
     
-    # 2. Extract starting base for lane lines using a histogram on the bottom half of the VALID road
+    # 2. Extract starting base using the SOLID Drivable Area mask as a highly reliable prior
+    # This prevents the tracker from locking onto noise if the painted line is dashed/missing
+    bottom_da = da_mask[search_bottom - 20 : search_bottom, :]
+    da_hist = np.sum(bottom_da, axis=0)
+    
+    road_indices = np.where(da_hist > 5)[0]
+    if len(road_indices) > 0:
+        da_left_edge = road_indices[0]
+        da_right_edge = road_indices[-1]
+    else:
+        da_left_edge = center_x - int(w*0.2)
+        da_right_edge = center_x + int(w*0.2)
+        
     hist_start = search_top + int(search_height * 0.5)
     valid_region = ll_mask[hist_start:search_bottom, :]
     histogram = np.sum(valid_region, axis=0)
     
-    leftx_base = np.argmax(histogram[:center_x]) if np.max(histogram[:center_x]) > 0 else None
-    rightx_base = np.argmax(histogram[center_x:]) + center_x if np.max(histogram[center_x:]) > 0 else None
+    # Search for painted line peak ONLY within a window around the Drivable Area edge
+    left_min = max(0, da_left_edge - 60)
+    left_max = min(center_x, da_left_edge + 60)
+    if left_max > left_min and np.max(histogram[left_min:left_max]) > 0:
+        leftx_base = np.argmax(histogram[left_min:left_max]) + left_min
+    else:
+        leftx_base = da_left_edge # Fallback to DA edge if dashed line is in a gap
+        
+    right_min = max(center_x, da_right_edge - 60)
+    right_max = min(w, da_right_edge + 60)
+    if right_max > right_min and np.max(histogram[right_min:right_max]) > 0:
+        rightx_base = np.argmax(histogram[right_min:right_max]) + right_min
+    else:
+        rightx_base = da_right_edge
     
     nwindows = 15
     window_height = int(search_height / nwindows)
-    margin = 25 # Tightened from 50 to prevent horizontal drift into noise
-    minpix = 10
+    margin = 40 # Increased slightly to track curved dashed lines reliably
+    minpix = 15
     
     left_pts, right_pts = [], []
     leftx_current, rightx_current = leftx_base, rightx_base
@@ -219,8 +258,24 @@ def extract_lane_polynomials(ll_mask, da_mask, center_x):
             if len(good_right_inds) > minpix:
                 rightx_current = int(np.mean(x_indices[good_right_inds]))
                 
-    left_poly = np.polyfit(y_indices[left_pts], x_indices[left_pts], 2) if len(left_pts) > minpix else None
-    right_poly = np.polyfit(y_indices[right_pts], x_indices[right_pts], 2) if len(right_pts) > minpix else None
+    # 3. Robust Polynomial Fitting
+    # If a line is dashed, we might have very few points. Fitting a 2nd degree curve to sparse points causes "hourglassing".
+    # We fall back to a straight line (1st degree) if points are sparse!
+    if len(left_pts) > 50:
+        left_poly = np.polyfit(y_indices[left_pts], x_indices[left_pts], 2)
+    elif len(left_pts) > 10:
+        p1 = np.polyfit(y_indices[left_pts], x_indices[left_pts], 1)
+        left_poly = np.array([0.0, p1[0], p1[1]]) # Pad to 2nd order format
+    else:
+        left_poly = None
+        
+    if len(right_pts) > 50:
+        right_poly = np.polyfit(y_indices[right_pts], x_indices[right_pts], 2)
+    elif len(right_pts) > 10:
+        p1 = np.polyfit(y_indices[right_pts], x_indices[right_pts], 1)
+        right_poly = np.array([0.0, p1[0], p1[1]])
+    else:
+        right_poly = None
         
     return left_poly, right_poly, hood_top_y
 
@@ -311,6 +366,10 @@ def inference_loop():
                 car_center_x = w // 2
                 
                 left_poly, right_poly, hood_top_y = extract_lane_polynomials(ll_mask, da_mask, car_center_x)
+                
+                # Apply temporal smoothing to completely eliminate frame-to-frame jitter
+                left_poly = smooth_polynomial(left_poly, state["left_poly_history"])
+                right_poly = smooth_polynomial(right_poly, state["right_poly_history"])
                 
                 if left_poly is not None and right_poly is not None:
                     # Generate perfectly smooth vectorized curves, stopping EXACTLY at the hood line
