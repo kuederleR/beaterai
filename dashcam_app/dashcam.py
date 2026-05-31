@@ -170,8 +170,8 @@ def inference_loop():
 
         if state["adas_enabled"]:
             # --- 1. YOLOv8 Forward Collision Warning ---
-            # Track objects (persist=True enables ByteTrack)
-            results = yolo_model.track(im0, persist=True, classes=[2, 5, 7], verbose=False, device='cuda:0' if torch.cuda.is_available() else 'cpu') # Cars, buses, trucks
+            # Predict objects without tracking overhead
+            results = yolo_model.predict(im0, classes=[2, 5, 7], verbose=False, device='cuda:0' if torch.cuda.is_available() else 'cpu') # Cars, buses, trucks
             
             for r in results:
                 boxes = r.boxes
@@ -191,18 +191,12 @@ def inference_loop():
                             cv2.putText(im0, "TOO CLOSE!", (int(x1), int(y1)-10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
 
             # --- 2. TwinLiteNet Drivable Area & Lane Departure Warning ---
-            da_mask, ll_mask = twinlite_model.detect(im0)
+            da_mask, color_mask = twinlite_model.detect(im0)
             
             if da_mask is not None:
-                # Create a colored mask for drivable area (Green) and lane lines (Red)
-                color_mask = np.zeros_like(im0)
-                color_mask[da_mask == 1] = [0, 255, 0]
-                color_mask[ll_mask == 1] = [0, 0, 255]
-                
-                # Alpha blend with the original frame
+                # Fast alpha blend: add weighted color_mask to the original frame
                 alpha = 0.4
-                mask_indices = np.any(color_mask != 0, axis=-1)
-                im0[mask_indices] = cv2.addWeighted(im0, 1.0 - alpha, color_mask, alpha, 0)[mask_indices]
+                im0 = cv2.addWeighted(im0, 1.0, color_mask, alpha, 0)
 
                 # LDW Logic: Check the bottom portion of the drivable area mask
                 h, w = da_mask.shape

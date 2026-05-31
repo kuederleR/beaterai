@@ -30,6 +30,8 @@ class TwinLiteDetector:
             self.model.load_state_dict(checkpoint)
             
             self.model = self.model.module
+            if self.device.type == 'cuda':
+                self.model = self.model.half()
             self.model = self.model.to(self.device)
             self.model.eval()
             print("[INFO] TwinLiteNet PyTorch Model loaded successfully.")
@@ -59,6 +61,8 @@ class TwinLiteDetector:
         # CHW -> add batch dimension
         img_chw = np.transpose(img_norm, (2, 0, 1))
         img_tensor = torch.from_numpy(img_chw).unsqueeze(0).to(self.device)
+        if self.device.type == 'cuda':
+            img_tensor = img_tensor.half()
         return img_tensor
 
     def detect(self, img):
@@ -78,8 +82,13 @@ class TwinLiteDetector:
         da_mask = da_predict.squeeze().cpu().numpy().astype(np.uint8) # shape [360, 640]
         ll_mask = ll_predict.squeeze().cpu().numpy().astype(np.uint8) # shape [360, 640]
         
-        # Resize masks back to original image size using nearest neighbor
-        da_mask_resized = cv2.resize(da_mask, (w, h), interpolation=cv2.INTER_NEAREST)
-        ll_mask_resized = cv2.resize(ll_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+        # Colorize at small resolution to save CPU memory bandwidth
+        color_mask_small = np.zeros((360, 640, 3), dtype=np.uint8)
+        color_mask_small[da_mask == 1] = [0, 255, 0] # Green for drivable area
+        color_mask_small[ll_mask == 1] = [0, 0, 255] # Red for lane lines
         
-        return da_mask_resized, ll_mask_resized
+        # Resize masks back to original image size
+        da_mask_resized = cv2.resize(da_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+        color_mask_resized = cv2.resize(color_mask_small, (w, h), interpolation=cv2.INTER_NEAREST)
+        
+        return da_mask_resized, color_mask_resized
