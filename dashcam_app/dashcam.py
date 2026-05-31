@@ -69,22 +69,8 @@ state = {
     "yolo_device": "Unknown",
     "twinlite_device": "Unknown",
     "left_poly_history": [],
-    "right_poly_history": [],
-    "calibrate_requested": False,
-    "calibration": None,
-    "calibration_buffer": [],
-    "calibration_frames_left": 0
+    "right_poly_history": []
 }
-
-if os.path.exists('models/calibration.json'):
-    try:
-        with open('models/calibration.json', 'r') as f:
-            state["calibration"] = json.load(f)
-            state["calibration"]["M"] = np.array(state["calibration"]["M"], dtype=np.float32)
-            state["calibration"]["Minv"] = np.array(state["calibration"]["Minv"], dtype=np.float32)
-            print("[INFO] Successfully loaded IPM Calibration Matrix.", flush=True)
-    except Exception as e:
-        print(f"[ERROR] Failed to load calibration matrix: {e}", flush=True)
 video_writer = None
 
 def make_error_frame(message):
@@ -178,136 +164,6 @@ def smooth_spline(fitx, history, max_history=5):
         history.pop(0)
         
     return np.mean(history, axis=0)
-
-def extract_raw_vp(ll_mask):
-    h, w = ll_mask.shape
-    bottom_band = ll_mask[h - 40:h, :]
-    histogram = np.sum(bottom_band, axis=0)
-    
-    center_x = w // 2
-    left_search_min, left_search_max = max(0, center_x - 300), max(0, center_x - 20)
-    right_search_min, right_search_max = min(w, center_x + 20), min(w, center_x + 300)
-    
-    leftx_base = None
-    if left_search_max > left_search_min and np.max(histogram[left_search_min:left_search_max]) > 5:
-        leftx_base = np.argmax(histogram[left_search_min:left_search_max]) + left_search_min
-        
-    rightx_base = None
-    if right_search_max > right_search_min and np.max(histogram[right_search_min:right_search_max]) > 5:
-        rightx_base = np.argmax(histogram[right_search_min:right_search_max]) + right_search_min
-        
-    if leftx_base is None or rightx_base is None:
-        return None
-        
-    nwindows = 10
-    window_height = int((h*0.4) / nwindows)
-    margin = 40
-    minpix = 15
-    
-    left_x_pts, left_y_pts = [], []
-    right_x_pts, right_y_pts = [], []
-    
-    leftx_current, rightx_current = leftx_base, rightx_base
-    y_indices, x_indices = np.nonzero(ll_mask)
-    
-    for window in range(nwindows):
-        win_y_low = h - (window + 1) * window_height
-        win_y_high = h - window * window_height
-        win_y_center = (win_y_low + win_y_high) // 2
-        
-        win_xleft_low, win_xleft_high = leftx_current - margin, leftx_current + margin
-        good_left = ((y_indices >= win_y_low) & (y_indices < win_y_high) & 
-                     (x_indices >= win_xleft_low) & (x_indices < win_xleft_high)).nonzero()[0]
-        if len(good_left) > minpix:
-            leftx_current = int(np.mean(x_indices[good_left]))
-            left_x_pts.append(leftx_current)
-            left_y_pts.append(win_y_center)
-            
-        win_xright_low, win_xright_high = rightx_current - margin, rightx_current + margin
-        good_right = ((y_indices >= win_y_low) & (y_indices < win_y_high) & 
-                      (x_indices >= win_xright_low) & (x_indices < win_xright_high)).nonzero()[0]
-        if len(good_right) > minpix:
-            rightx_current = int(np.mean(x_indices[good_right]))
-            right_x_pts.append(rightx_current)
-            right_y_pts.append(win_y_center)
-            
-    if len(left_x_pts) < 5 or len(right_x_pts) < 5:
-        return None
-        
-    p_left = np.polyfit(left_y_pts, left_x_pts, 1)
-    p_right = np.polyfit(right_y_pts, right_x_pts, 1)
-    
-    m1, b1 = p_left
-    m2, b2 = p_right
-    if abs(m1 - m2) < 1e-5: return None
-    
-    vp_y = (b2 - b1) / (m1 - m2)
-    vp_x = m1 * vp_y + b1
-    
-    if vp_y > h or vp_y < 0: return None
-    
-    return {"vp_x": vp_x, "vp_y": vp_y, "m1": m1, "b1": b1, "m2": m2, "b2": b2}
-
-def extract_lane_bev(ll_mask, M):
-    h, w = ll_mask.shape
-    bev_mask = cv2.warpPerspective(ll_mask, M, (w, h), flags=cv2.INTER_LINEAR)
-    
-    histogram = np.sum(bev_mask[h//2:, :], axis=0)
-    center_x = w // 2
-    
-    leftx_base = np.argmax(histogram[:center_x]) if np.max(histogram[:center_x]) > 5 else None
-    rightx_base = np.argmax(histogram[center_x:]) + center_x if np.max(histogram[center_x:]) > 5 else None
-    
-    nwindows = 15
-    window_height = h // nwindows
-    margin = 40
-    minpix = 15
-    
-    left_x_pts, left_y_pts = [], []
-    right_x_pts, right_y_pts = [], []
-    
-    leftx_current, rightx_current = leftx_base, rightx_base
-    y_indices, x_indices = np.nonzero(bev_mask)
-    
-    for window in range(nwindows):
-        win_y_low = h - (window + 1) * window_height
-        win_y_high = h - window * window_height
-        win_y_center = (win_y_low + win_y_high) // 2
-        
-        if leftx_current is not None:
-            win_xleft_low, win_xleft_high = leftx_current - margin, leftx_current + margin
-            good_left = ((y_indices >= win_y_low) & (y_indices < win_y_high) & 
-                         (x_indices >= win_xleft_low) & (x_indices < win_xleft_high)).nonzero()[0]
-            if len(good_left) > minpix:
-                leftx_current = int(np.mean(x_indices[good_left]))
-            left_x_pts.append(leftx_current)
-            left_y_pts.append(win_y_center)
-            
-        if rightx_current is not None:
-            win_xright_low, win_xright_high = rightx_current - margin, rightx_current + margin
-            good_right = ((y_indices >= win_y_low) & (y_indices < win_y_high) & 
-                          (x_indices >= win_xright_low) & (x_indices < win_xright_high)).nonzero()[0]
-            if len(good_right) > minpix:
-                rightx_current = int(np.mean(x_indices[good_right]))
-            right_x_pts.append(rightx_current)
-            right_y_pts.append(win_y_center)
-            
-    ploty = np.linspace(0, h-1, num=h)
-    left_fitx, right_fitx = None, None
-    
-    if len(left_x_pts) == nwindows:
-        ly = np.array(left_y_pts)[::-1]
-        lx = np.array(left_x_pts)[::-1]
-        raw_fitx = np.interp(ploty, ly, lx)
-        left_fitx = gaussian_filter1d(raw_fitx, sigma=15.0)
-        
-    if len(right_x_pts) == nwindows:
-        ry = np.array(right_y_pts)[::-1]
-        rx = np.array(right_x_pts)[::-1]
-        raw_fitx = np.interp(ploty, ry, rx)
-        right_fitx = gaussian_filter1d(raw_fitx, sigma=15.0)
-        
-    return left_fitx, right_fitx, ploty
 
 def extract_lane_splines(ll_mask, da_mask, center_x):
     """Uses a sliding window to isolate the ego lane and fit Gaussian splines, preventing perspective banana-ing."""
@@ -490,6 +346,10 @@ def inference_loop():
                     # Draw box
                     cv2.rectangle(im_infer, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
                     
+                    # Ignore the ego-vehicle hood/dash which touches the bottom 20 pixels
+                    if y2 > INFER_HEIGHT - 20:
+                        continue
+                        
                     # FCW Logic: If vehicle is in the center lane and box width is very large (close)
                     if CENTER_LANE_X_MIN < cx < CENTER_LANE_X_MAX:
                         if w > FCW_WARNING_WIDTH:
@@ -504,239 +364,76 @@ def inference_loop():
                 h, w = ll_mask.shape
                 car_center_x = w // 2
                 
-                if state.get("calibrate_requested"):
-                    print("[INFO] Starting robust 30-frame calibration...", flush=True)
-                    state["calibrate_requested"] = False
-                    state["calibration_frames_left"] = 30
-                    state["calibration_buffer"] = []
+                raw_left_fitx, raw_right_fitx, ploty, hood_top_y = extract_lane_splines(ll_mask, da_mask, car_center_x)
+                
+                raw_left_fitx = smooth_spline(raw_left_fitx, state["left_poly_history"])
+                raw_right_fitx = smooth_spline(raw_right_fitx, state["right_poly_history"])
+                
+                if raw_left_fitx is not None or raw_right_fitx is not None:
+                    # Taper perfectly towards a fixed vanishing point horizon (y=200 is center of 400h)
+                    HORIZON_Y = 200
+                    valid_ploty = ploty[ploty >= HORIZON_Y]
+                    ideal_lane_width = np.linspace(20, 350, num=len(valid_ploty))
                     
-                if state["calibration_frames_left"] > 0:
-                    raw_vp = extract_raw_vp(ll_mask)
-                    if raw_vp is not None:
-                        state["calibration_buffer"].append(raw_vp)
-                    state["calibration_frames_left"] -= 1
-                    
-                    if state["calibration_frames_left"] == 0:
-                        if len(state["calibration_buffer"]) >= 15:
-                            # We have enough good frames! Calculate rolling median.
-                            med_vp_x = np.median([c["vp_x"] for c in state["calibration_buffer"]])
-                            med_vp_y = np.median([c["vp_y"] for c in state["calibration_buffer"]])
-                            med_m1 = np.median([c["m1"] for c in state["calibration_buffer"]])
-                            med_b1 = np.median([c["b1"] for c in state["calibration_buffer"]])
-                            med_m2 = np.median([c["m2"] for c in state["calibration_buffer"]])
-                            med_b2 = np.median([c["b2"] for c in state["calibration_buffer"]])
-                            
-                            # Gently enforce symmetry towards camera optical center
-                            target_center_x = w / 2
-                            med_vp_x = med_vp_x * 0.5 + target_center_x * 0.5
-                            
-                            # Calculate extended horizon for deeper draw distance (shrink into horizon)
-                            bottom_y = h
-                            top_y = med_vp_y + 15
-                            
-                            src = np.float32([
-                                [med_m1 * bottom_y + med_b1, bottom_y],
-                                [med_m2 * bottom_y + med_b2, bottom_y],
-                                [med_m2 * top_y + med_b2, top_y],
-                                [med_m1 * top_y + med_b1, top_y]
-                            ])
-                            
-                            margin_x = w * 0.25
-                            dst = np.float32([
-                                [margin_x, h],
-                                [w - margin_x, h],
-                                [w - margin_x, 0],
-                                [margin_x, 0]
-                            ])
-                            
-                            M = cv2.getPerspectiveTransform(src, dst)
-                            Minv = cv2.getPerspectiveTransform(dst, src)
-                            
-                            state["calibration"] = {"M": M, "Minv": Minv, "top_y": int(top_y)}
-                            
-                            os.makedirs('models', exist_ok=True)
-                            with open('models/calibration.json', 'w') as f:
-                                json.dump({
-                                    "M": M.tolist(), 
-                                    "Minv": Minv.tolist(),
-                                    "top_y": int(top_y)
-                                }, f)
-                            print("[INFO] Robust IPM Calibration Successful and Saved!", flush=True)
-                        else:
-                            print("[ERROR] Too much noise during calibration phase. Try again on a straighter road.", flush=True)
-                    
-                if state["calibration"] is not None:
-                    # --- BIRD'S EYE VIEW PERCEPTION PIPELINE ---
-                    M = state["calibration"]["M"]
-                    Minv = state["calibration"]["Minv"]
-                    
-                    raw_left_fitx, raw_right_fitx, ploty = extract_lane_bev(ll_mask, M)
-                    
-                    raw_left_fitx = smooth_spline(raw_left_fitx, state["left_poly_history"])
-                    raw_right_fitx = smooth_spline(raw_right_fitx, state["right_poly_history"])
-                    
-                    if raw_left_fitx is not None or raw_right_fitx is not None:
-                        ideal_lane_width = w * 0.45 # Constant physical width in BEV
+                    # We only care about coordinates below the horizon
+                    if raw_left_fitx is not None and raw_right_fitx is not None:
+                        center_fitx = (raw_left_fitx[ploty >= HORIZON_Y] + raw_right_fitx[ploty >= HORIZON_Y]) / 2.0
+                    elif raw_left_fitx is not None:
+                        center_fitx = raw_left_fitx[ploty >= HORIZON_Y] + ideal_lane_width / 2.0
+                    else:
+                        center_fitx = raw_right_fitx[ploty >= HORIZON_Y] - ideal_lane_width / 2.0
                         
-                        if raw_left_fitx is not None and raw_right_fitx is not None:
-                            center_fitx = (raw_left_fitx + raw_right_fitx) / 2.0
-                        elif raw_left_fitx is not None:
-                            center_fitx = raw_left_fitx + ideal_lane_width / 2.0
-                        else:
-                            center_fitx = raw_right_fitx - ideal_lane_width / 2.0
-                            
-                        left_fitx = center_fitx - ideal_lane_width / 2.0
-                        right_fitx = center_fitx + ideal_lane_width / 2.0
-                        
-                        lane_width = ideal_lane_width
-                        lane_center_x = center_fitx[-1]
-                        drift = car_center_x - lane_center_x
-                        
-                        dist_left = car_center_x - left_fitx[-1]
-                        dist_right = right_fitx[-1] - car_center_x
+                    left_fitx = center_fitx - ideal_lane_width / 2.0
+                    right_fitx = center_fitx + ideal_lane_width / 2.0
+                    
+                    lane_bottom_y = hood_top_y
+                    left_bottom_x = left_fitx[-1]
+                    right_bottom_x = right_fitx[-1]
+                    
+                    lane_width = right_bottom_x - left_bottom_x
+                    lane_center_x = (left_bottom_x + right_bottom_x) / 2
+                    drift = car_center_x - lane_center_x
+                    
+                    if lane_width > 0:
+                        dist_left = car_center_x - left_bottom_x
+                        dist_right = right_bottom_x - car_center_x
                         
                         ratio_left = dist_left / lane_width
                         ratio_right = dist_right / lane_width
                         
                         # Dynamic color grading
-                        if ratio_left < 0.1:
-                            left_color, ldw_triggered = (0, 0, 255), True
+                        if ratio_left < 0.1: left_color, ldw_triggered = (0, 0, 255), True
                         elif ratio_left < 0.25: left_color = (0, 165, 255)
                         else: left_color = (0, 255, 0)
                             
-                        if ratio_right < 0.1:
-                            right_color, ldw_triggered = (0, 0, 255), True
+                        if ratio_right < 0.1: right_color, ldw_triggered = (0, 0, 255), True
                         elif ratio_right < 0.25: right_color = (0, 165, 255)
                         else: right_color = (0, 255, 0)
                             
-                        fill_color = (0, 0, 255) if ldw_triggered else (0, 255, 0)
-                        alpha = 0.5 if ldw_triggered else 0.35
-                        
-                        # Draw in BEV Canvas
-                        bev_canvas = np.zeros_like(im_infer)
-                        pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
-                        pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])))])
+                        min_ratio = min(ratio_left, ratio_right)
+                        if min_ratio < 0.1: fill_color = (0, 0, 255)
+                        elif min_ratio < 0.25: fill_color = (0, 165, 255)
+                        else: fill_color = (0, 255, 0)
+                            
+                        pts_left = np.array([np.transpose(np.vstack([left_fitx, valid_ploty]))]).astype(np.int32)
+                        pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, valid_ploty])))]).astype(np.int32)
                         pts = np.hstack((pts_left, pts_right))
                         
-                        cv2.fillPoly(bev_canvas, np.int_([pts]), fill_color)
-                        cv2.polylines(bev_canvas, np.int_([pts_left]), False, left_color, thickness=10)
-                        cv2.polylines(bev_canvas, np.int_([pts_right]), False, right_color, thickness=10)
+                        overlay = np.zeros_like(im_infer)
+                        cv2.fillPoly(overlay, [pts], fill_color)
                         
-                        # Warp back to perspective perfectly
-                        perspective_overlay = cv2.warpPerspective(bev_canvas, Minv, (w, h))
+                        cv2.polylines(overlay, [pts_left[0]], False, left_color, thickness=6)
+                        cv2.polylines(overlay, [pts_right[0]], False, right_color, thickness=6)
                         
-                        mask_indices = np.any(perspective_overlay != 0, axis=-1)
-                        im_infer[mask_indices] = cv2.addWeighted(im_infer[mask_indices], 1.0 - alpha, perspective_overlay[mask_indices], alpha, 0)
+                        alpha = 0.5 if ldw_triggered else 0.35
+                        mask_indices = np.any(overlay != 0, axis=-1)
+                        im_infer[mask_indices] = cv2.addWeighted(im_infer[mask_indices], 1.0 - alpha, overlay[mask_indices], alpha, 0)
+                        
+                        cv2.circle(im_infer, (int(lane_center_x), lane_bottom_y - 20), 8, (255, 255, 255), -1)
                         
                         if ldw_triggered:
                             direction = "RIGHT" if drift > 0 else "LEFT"
                             cv2.putText(im_infer, f"LANE DEPARTURE: {direction}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
-
-                else:
-                    # --- FALLBACK PERSPECTIVE PIPELINE ---
-                    raw_left_fitx, raw_right_fitx, ploty, hood_top_y = extract_lane_splines(ll_mask, da_mask, car_center_x)
-                    
-                    # Apply temporal smoothing to the RAW tracks to completely eliminate frame-to-frame jitter
-                    raw_left_fitx = smooth_spline(raw_left_fitx, state["left_poly_history"])
-                    raw_right_fitx = smooth_spline(raw_right_fitx, state["right_poly_history"])
-                    
-                    if raw_left_fitx is not None or raw_right_fitx is not None:
-                        # --- UNIFIED PREDICTED PATH ALGORITHM ---
-                        # Default perspective parameters for ghosting (wide at hood, narrow at horizon)
-                        ideal_lane_width = np.linspace(20, 350, num=len(ploty))
-                        
-                        if raw_left_fitx is not None and raw_right_fitx is not None:
-                            # We have both lines! Calculate the true center driving path.
-                            center_fitx = (raw_left_fitx + raw_right_fitx) / 2.0
-                            
-                            # Dynamically calculate the perspective taper from the actual tracked lines
-                            bottom_width = raw_right_fitx[-1] - raw_left_fitx[-1]
-                            top_width = raw_right_fitx[0] - raw_left_fitx[0]
-                            # Ensure realistic bounds just in case of noise
-                            bottom_width = max(100, min(500, bottom_width))
-                            top_width = max(5, min(100, top_width))
-                            
-                            ideal_lane_width = np.linspace(top_width, bottom_width, num=len(ploty))
-                            
-                        elif raw_left_fitx is not None:
-                            # Left line only! Infer center and "ghost" the right line.
-                            center_fitx = raw_left_fitx + ideal_lane_width / 2.0
-                        else:
-                            # Right line only! Infer center and "ghost" the left line.
-                            center_fitx = raw_right_fitx - ideal_lane_width / 2.0
-                            
-                        # Project the perfect, mathematically symmetrical predicted path!
-                        left_fitx = center_fitx - ideal_lane_width / 2.0
-                        right_fitx = center_fitx + ideal_lane_width / 2.0
-                        
-                        # Compute vehicle deviation at the hood line (the closest visible point to the car)
-                        lane_bottom_y = hood_top_y
-                        left_bottom_x = left_fitx[-1]
-                        right_bottom_x = right_fitx[-1]
-                        
-                        lane_width = right_bottom_x - left_bottom_x
-                        lane_center_x = (left_bottom_x + right_bottom_x) / 2
-                        drift = car_center_x - lane_center_x
-                        
-                        if lane_width > 0:
-                            dist_left = car_center_x - left_bottom_x
-                            dist_right = right_bottom_x - car_center_x
-                            
-                            ratio_left = dist_left / lane_width
-                            ratio_right = dist_right / lane_width
-                            
-                            # Dynamic color grading logic (BGR format)
-                            # Left Line
-                            if ratio_left < 0.1:
-                                left_color = (0, 0, 255) # Red
-                                ldw_triggered = True
-                            elif ratio_left < 0.25:
-                                left_color = (0, 165, 255) # Orange
-                            else:
-                                left_color = (0, 255, 0) # Green
-                                
-                            # Right Line
-                            if ratio_right < 0.1:
-                                right_color = (0, 0, 255) # Red
-                                ldw_triggered = True
-                            elif ratio_right < 0.25:
-                                right_color = (0, 165, 255) # Orange
-                            else:
-                                right_color = (0, 255, 0) # Green
-                                
-                            # Polygon fill matches the most dangerous side
-                            min_ratio = min(ratio_left, ratio_right)
-                            if min_ratio < 0.1:
-                                fill_color = (0, 0, 255)
-                                ldw_triggered = True
-                            elif min_ratio < 0.25:
-                                fill_color = (0, 165, 255)
-                            else:
-                                fill_color = (0, 255, 0)
-                                
-                            # Build the Ego Lane polygon
-                            pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))]).astype(np.int32)
-                            pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])))]).astype(np.int32)
-                            pts = np.hstack((pts_left, pts_right))
-                            
-                            overlay = np.zeros_like(im_infer)
-                            cv2.fillPoly(overlay, [pts], fill_color)
-                            
-                            # Draw the thick vectorized lane lines
-                            cv2.polylines(overlay, [pts_left[0]], False, left_color, thickness=6)
-                            cv2.polylines(overlay, [pts_right[0]], False, right_color, thickness=6)
-                            
-                            # Alpha blend ONLY the filled region for maximum speed
-                            alpha = 0.5 if ldw_triggered else 0.35
-                            mask_indices = np.any(overlay != 0, axis=-1)
-                            im_infer[mask_indices] = cv2.addWeighted(im_infer[mask_indices], 1.0 - alpha, overlay[mask_indices], alpha, 0)
-                            
-                            # Draw lane center tracking dot
-                            cv2.circle(im_infer, (int(lane_center_x), lane_bottom_y - 20), 8, (255, 255, 255), -1)
-                            
-                            if ldw_triggered:
-                                direction = "RIGHT" if drift > 0 else "LEFT"
-                                cv2.putText(im_infer, f"LANE DEPARTURE: {direction}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
 
         # Update global state for UI alerts
         state["fcw_warning"] = fcw_triggered
@@ -815,11 +512,6 @@ def api_toggle_adas():
     state["adas_enabled"] = data.get('enabled', False)
     return jsonify({"adas_enabled": state["adas_enabled"]})
 
-@app.route('/api/calibrate', methods=['POST'])
-def api_calibrate():
-    global state
-    state["calibrate_requested"] = True
-    return jsonify({"status": "calibrating"})
 
 if __name__ == '__main__':
     print("=" * 50, flush=True)
