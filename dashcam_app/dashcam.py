@@ -164,6 +164,12 @@ def inference_loop():
         if not has_frame:
             time.sleep(0.01)
             continue
+            
+        # Ensure im0 is strictly 3-channel BGR
+        if len(im0.shape) == 2:
+            im0 = cv2.cvtColor(im0, cv2.COLOR_GRAY2BGR)
+        elif len(im0.shape) == 3 and im0.shape[2] == 4:
+            im0 = cv2.cvtColor(im0, cv2.COLOR_BGRA2BGR)
 
         fcw_triggered = False
         ldw_triggered = False
@@ -194,6 +200,10 @@ def inference_loop():
             da_mask, color_mask = twinlite_model.detect(im0)
             
             if da_mask is not None:
+                # Guarantee exact shape match to prevent OpenCV size mismatch errors
+                if color_mask.shape != im0.shape:
+                    color_mask = cv2.resize(color_mask, (im0.shape[1], im0.shape[0]), interpolation=cv2.INTER_NEAREST)
+                    
                 # Fast alpha blend: add weighted color_mask to the original frame
                 alpha = 0.4
                 im0 = cv2.addWeighted(im0, 1.0, color_mask, alpha, 0)
