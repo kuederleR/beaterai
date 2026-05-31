@@ -147,6 +147,51 @@ def capture_loop():
 
 
 # --- Thread 2: AI Inference and Web Encoding ---
+def extract_lane_polynomials(ll_mask, center_x):
+    """Uses a sliding window to isolate the ego lane and fit polynomials"""
+    h, w = ll_mask.shape
+    
+    bottom_half = ll_mask[int(h*0.5):, :]
+    histogram = np.sum(bottom_half, axis=0)
+    
+    leftx_base = np.argmax(histogram[:center_x]) if np.max(histogram[:center_x]) > 0 else None
+    rightx_base = np.argmax(histogram[center_x:]) + center_x if np.max(histogram[center_x:]) > 0 else None
+    
+    nwindows = 15
+    window_height = int(h / 2 / nwindows)
+    margin = 50
+    minpix = 10
+    
+    left_pts, right_pts = [], []
+    leftx_current, rightx_current = leftx_base, rightx_base
+    
+    y_indices, x_indices = np.nonzero(ll_mask)
+    
+    for window in range(nwindows):
+        win_y_low = h - (window + 1) * window_height
+        win_y_high = h - window * window_height
+        
+        if leftx_current is not None:
+            win_xleft_low, win_xleft_high = leftx_current - margin, leftx_current + margin
+            good_left_inds = ((y_indices >= win_y_low) & (y_indices < win_y_high) & 
+                              (x_indices >= win_xleft_low) & (x_indices < win_xleft_high)).nonzero()[0]
+            left_pts.extend(good_left_inds)
+            if len(good_left_inds) > minpix:
+                leftx_current = int(np.mean(x_indices[good_left_inds]))
+                
+        if rightx_current is not None:
+            win_xright_low, win_xright_high = rightx_current - margin, rightx_current + margin
+            good_right_inds = ((y_indices >= win_y_low) & (y_indices < win_y_high) & 
+                               (x_indices >= win_xright_low) & (x_indices < win_xright_high)).nonzero()[0]
+            right_pts.extend(good_right_inds)
+            if len(good_right_inds) > minpix:
+                rightx_current = int(np.mean(x_indices[good_right_inds]))
+                
+    left_poly = np.polyfit(y_indices[left_pts], x_indices[left_pts], 2) if len(left_pts) > minpix else None
+    right_poly = np.polyfit(y_indices[right_pts], x_indices[right_pts], 2) if len(right_pts) > minpix else None
+        
+    return left_poly, right_poly
+
 def inference_loop():
     global latest_web_frame, raw_frame_buffer, state
     
@@ -229,39 +274,84 @@ def inference_loop():
             # --- 2. TwinLiteNet Drivable Area & Lane Departure Warning ---
             da_mask, ll_mask = twinlite_model.detect(im_infer)
             
-            if da_mask is not None:
-                # Create a colored mask for drivable area (Green) and lane lines (Red)
-                color_mask = np.zeros_like(im_infer)
-                color_mask[da_mask == 1] = [0, 255, 0]
-                color_mask[ll_mask == 1] = [0, 0, 255]
+            if ll_mask is not None:
+                h, w = ll_mask.shape
+                car_center_x = w // 2
                 
-                # Alpha blend with the original frame
-                alpha = 0.4
-                mask_indices = np.any(color_mask != 0, axis=-1)
-                im_infer[mask_indices] = cv2.addWeighted(im_infer[mask_indices], 1.0 - alpha, color_mask[mask_indices], alpha, 0)
-
-                # LDW Logic: Check the bottom portion of the drivable area mask
-                h, w = da_mask.shape
-                check_y = int(h * 0.85) # Check at 85% height to avoid hood
-                row_mask = da_mask[check_y, :]
-                road_pixels = np.where(row_mask == 1)[0]
+                left_poly, right_poly = extract_lane_polynomials(ll_mask, car_center_x)
                 
-                if len(road_pixels) > 0:
-                    left_x = road_pixels[0]
-                    right_x = road_pixels[-1]
+                if left_poly is not None and right_poly is not None:
+                    # Generate perfectly smooth vectorized curves
+                    ploty = np.linspace(int(h*0.5), h-1, num=h//2)
+                    left_fitx = np.polyval(left_poly, ploty)
+                    right_fitx = np.polyval(right_poly, ploty)
                     
-                    lane_center = (left_x + right_x) / 2
-                    camera_center = w / 2
+                    # Compute vehicle deviation at the very bottom of the lane
+                    lane_bottom_y = h - 1
+                    left_bottom_x = np.polyval(left_poly, lane_bottom_y)
+                    right_bottom_x = np.polyval(right_poly, lane_bottom_y)
                     
-                    drift = camera_center - lane_center
+                    lane_width = right_bottom_x - left_bottom_x
+                    lane_center_x = (left_bottom_x + right_bottom_x) / 2
+                    drift = car_center_x - lane_center_x
                     
-                    # Draw center tracking dot
-                    cv2.circle(im_infer, (int(lane_center), check_y), 8, (255, 255, 255), -1)
-                    
-                    if abs(drift) > LDW_MAX_DRIFT:
-                        ldw_triggered = True
-                        direction = "RIGHT" if drift > 0 else "LEFT"
-                        cv2.putText(im_infer, f"LANE DEPARTURE: {direction}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
+                    if lane_width > 0:
+                        dist_left = car_center_x - left_bottom_x
+                        dist_right = right_bottom_x - car_center_x
+                        
+                        ratio_left = dist_left / lane_width
+                        ratio_right = dist_right / lane_width
+                        
+                        # Dynamic color grading logic (BGR format)
+                        # Left Line
+                        if ratio_left < 0.1:
+                            left_color = (0, 0, 255) # Danger Red
+                        elif ratio_left < 0.25:
+                            left_color = (0, 165, 255) # Warning Orange
+                        else:
+                            left_color = (0, 255, 0) # Safe Green
+                            
+                        # Right Line
+                        if ratio_right < 0.1:
+                            right_color = (0, 0, 255)
+                        elif ratio_right < 0.25:
+                            right_color = (0, 165, 255)
+                        else:
+                            right_color = (0, 255, 0)
+                            
+                        # Polygon fill matches the most dangerous side
+                        min_ratio = min(ratio_left, ratio_right)
+                        if min_ratio < 0.1:
+                            fill_color = (0, 0, 255)
+                            ldw_triggered = True
+                        elif min_ratio < 0.25:
+                            fill_color = (0, 165, 255)
+                        else:
+                            fill_color = (0, 255, 0)
+                            
+                        # Build the Ego Lane polygon
+                        pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))]).astype(np.int32)
+                        pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])))]).astype(np.int32)
+                        pts = np.hstack((pts_left, pts_right))
+                        
+                        overlay = np.zeros_like(im_infer)
+                        cv2.fillPoly(overlay, [pts], fill_color)
+                        
+                        # Draw the thick vectorized lane lines
+                        cv2.polylines(overlay, [pts_left[0]], False, left_color, thickness=6)
+                        cv2.polylines(overlay, [pts_right[0]], False, right_color, thickness=6)
+                        
+                        # Alpha blend ONLY the filled region for maximum speed
+                        alpha = 0.35
+                        mask_indices = np.any(overlay != 0, axis=-1)
+                        im_infer[mask_indices] = cv2.addWeighted(im_infer[mask_indices], 1.0 - alpha, overlay[mask_indices], alpha, 0)
+                        
+                        # Draw lane center tracking dot
+                        cv2.circle(im_infer, (int(lane_center_x), lane_bottom_y - 20), 8, (255, 255, 255), -1)
+                        
+                        if ldw_triggered:
+                            direction = "RIGHT" if drift > 0 else "LEFT"
+                            cv2.putText(im_infer, f"LANE DEPARTURE: {direction}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
 
         # Update global state for UI alerts
         state["fcw_warning"] = fcw_triggered
