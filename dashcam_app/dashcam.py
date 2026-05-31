@@ -5,6 +5,7 @@ import threading
 import datetime
 import cv2
 import numpy as np
+import torch
 
 # --- Fix for NVIDIA container headless OpenCV ---
 if not hasattr(cv2, 'imshow'):
@@ -170,7 +171,7 @@ def inference_loop():
         if state["adas_enabled"]:
             # --- 1. YOLOv8 Forward Collision Warning ---
             # Track objects (persist=True enables ByteTrack)
-            results = yolo_model.track(im0, persist=True, classes=[2, 5, 7], verbose=False) # Cars, buses, trucks
+            results = yolo_model.track(im0, persist=True, classes=[2, 5, 7], verbose=False, device='cuda:0' if torch.cuda.is_available() else 'cpu') # Cars, buses, trucks
             
             for r in results:
                 boxes = r.boxes
