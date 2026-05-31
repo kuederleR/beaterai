@@ -191,10 +191,10 @@ def extract_lane_splines(ll_mask, da_mask, center_x):
     if search_height < 50: # If we can't see enough road, abort
         return None, None, hood_top_y
     
-    # 2. Extract starting base using a localized histogram of the full valid road
-    # By summing the ENTIRE valid y-region, we guarantee we catch dashes of dashed lines.
-    valid_region = ll_mask[search_top:search_bottom, :]
-    histogram = np.sum(valid_region, axis=0)
+    # 2. Extract starting base using a localized histogram of ONLY the very bottom of the road
+    # By strictly scanning the bottom 40 pixels, we avoid pulling the line inwards ("bending in").
+    bottom_band = ll_mask[max(search_top, search_bottom - 40) : search_bottom, :]
+    histogram = np.sum(bottom_band, axis=0)
     
     # Ego-Band Searching: We physically restrict the base search to where the ego lane lines 
     # MUST logically exist relative to the camera center (e.g. 20 to 250 pixels away).
@@ -356,13 +356,41 @@ def inference_loop():
                 h, w = ll_mask.shape
                 car_center_x = w // 2
                 
-                left_fitx, right_fitx, ploty, hood_top_y = extract_lane_splines(ll_mask, da_mask, car_center_x)
+                raw_left_fitx, raw_right_fitx, ploty, hood_top_y = extract_lane_splines(ll_mask, da_mask, car_center_x)
                 
-                # Apply temporal smoothing to completely eliminate frame-to-frame jitter
-                left_fitx = smooth_spline(left_fitx, state["left_poly_history"])
-                right_fitx = smooth_spline(right_fitx, state["right_poly_history"])
+                # Apply temporal smoothing to the RAW tracks to completely eliminate frame-to-frame jitter
+                raw_left_fitx = smooth_spline(raw_left_fitx, state["left_poly_history"])
+                raw_right_fitx = smooth_spline(raw_right_fitx, state["right_poly_history"])
                 
-                if left_fitx is not None and right_fitx is not None:
+                if raw_left_fitx is not None or raw_right_fitx is not None:
+                    # --- UNIFIED PREDICTED PATH ALGORITHM ---
+                    # Default perspective parameters for ghosting (wide at hood, narrow at horizon)
+                    ideal_lane_width = np.linspace(20, 350, num=len(ploty))
+                    
+                    if raw_left_fitx is not None and raw_right_fitx is not None:
+                        # We have both lines! Calculate the true center driving path.
+                        center_fitx = (raw_left_fitx + raw_right_fitx) / 2.0
+                        
+                        # Dynamically calculate the perspective taper from the actual tracked lines
+                        bottom_width = raw_right_fitx[-1] - raw_left_fitx[-1]
+                        top_width = raw_right_fitx[0] - raw_left_fitx[0]
+                        # Ensure realistic bounds just in case of noise
+                        bottom_width = max(100, min(500, bottom_width))
+                        top_width = max(5, min(100, top_width))
+                        
+                        ideal_lane_width = np.linspace(top_width, bottom_width, num=len(ploty))
+                        
+                    elif raw_left_fitx is not None:
+                        # Left line only! Infer center and "ghost" the right line.
+                        center_fitx = raw_left_fitx + ideal_lane_width / 2.0
+                    else:
+                        # Right line only! Infer center and "ghost" the left line.
+                        center_fitx = raw_right_fitx - ideal_lane_width / 2.0
+                        
+                    # Project the perfect, mathematically symmetrical predicted path!
+                    left_fitx = center_fitx - ideal_lane_width / 2.0
+                    right_fitx = center_fitx + ideal_lane_width / 2.0
+                    
                     # Compute vehicle deviation at the hood line (the closest visible point to the car)
                     lane_bottom_y = hood_top_y
                     left_bottom_x = left_fitx[-1]
