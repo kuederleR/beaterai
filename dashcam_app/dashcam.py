@@ -197,16 +197,18 @@ def inference_loop():
                             cv2.putText(im0, "TOO CLOSE!", (int(x1), int(y1)-10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
 
             # --- 2. TwinLiteNet Drivable Area & Lane Departure Warning ---
-            da_mask, color_mask = twinlite_model.detect(im0)
+            da_mask, ll_mask = twinlite_model.detect(im0)
             
             if da_mask is not None:
-                # Guarantee exact shape match to prevent OpenCV size mismatch errors
-                if color_mask.shape != im0.shape:
-                    color_mask = cv2.resize(color_mask, (im0.shape[1], im0.shape[0]), interpolation=cv2.INTER_NEAREST)
-                    
-                # Fast alpha blend: add weighted color_mask to the original frame
+                # Create a colored mask for drivable area (Green) and lane lines (Red)
+                color_mask = np.zeros_like(im0)
+                color_mask[da_mask == 1] = [0, 255, 0]
+                color_mask[ll_mask == 1] = [0, 0, 255]
+                
+                # Alpha blend with the original frame
                 alpha = 0.4
-                im0 = cv2.addWeighted(im0, 1.0, color_mask, alpha, 0)
+                mask_indices = np.any(color_mask != 0, axis=-1)
+                im0[mask_indices] = cv2.addWeighted(im0[mask_indices], 1.0 - alpha, color_mask[mask_indices], alpha, 0)
 
                 # LDW Logic: Check the bottom portion of the drivable area mask
                 h, w = da_mask.shape
