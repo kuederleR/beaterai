@@ -1,7 +1,7 @@
 services:
   dashcam:
     build: .
-    runtime: nvidia
+    # runtime: nvidia
     ipc: host
     ulimits:
       memlock: -1
@@ -10,7 +10,7 @@ services:
       - "5001:5001"
     environment:
       - VIDEO_SOURCE=/dev/video0
-      - DEV_VIDEO_PATH=/home/ryan/beaterai/dashcam_app/recordings/dashcam_20260521_184341.avi # Uncomment to test with a looping recorded video
+      - DEV_VIDEO_PATH=/app/recordings/dashcam_20260521_184341.avi # Uncomment to test with a looping recorded video
       - DEVICE=0
       - PYTHONUNBUFFERED=1
     volumes:
@@ -20,6 +20,6 @@ services:
       - ./templates:/app/templates
     # WARNING: If your camera is physically UNPLUGGED, you MUST comment out the two lines below, 
     # otherwise Docker will crash trying to find /dev/video0.
-    devices:
-      - /dev/video0:/dev/video0
+    # devices:
+    #   - /dev/video0:/dev/video0
     restart: unless-stopped
