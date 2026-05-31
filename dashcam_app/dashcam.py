@@ -151,6 +151,13 @@ def extract_lane_polynomials(ll_mask, da_mask, center_x):
     """Uses a sliding window to isolate the ego lane and fit polynomials, automatically cropping out the car hood."""
     h, w = ll_mask.shape
     
+    # 0. FUSE MASKS: Physically erase all adjacent lane lines from the data
+    # We expand the ego-lane mask by ~30 pixels to cover the immediate boundaries
+    kernel = np.ones((31, 31), np.uint8)
+    da_dilated = cv2.dilate(da_mask, kernel, iterations=1)
+    # Stencil out any painted lines that don't border the ego lane!
+    ll_mask = cv2.bitwise_and(ll_mask, ll_mask, mask=da_dilated)
+    
     # 1. Automatically detect the top of the car hood using the Drivable Area (da_mask)
     # We analyze the center 1/3rd of the image from the bottom up to find where the road actually begins.
     center_da = da_mask[:, int(w*0.33):int(w*0.66)]
@@ -184,7 +191,7 @@ def extract_lane_polynomials(ll_mask, da_mask, center_x):
     
     nwindows = 15
     window_height = int(search_height / nwindows)
-    margin = 50
+    margin = 25 # Tightened from 50 to prevent horizontal drift into noise
     minpix = 10
     
     left_pts, right_pts = [], []
