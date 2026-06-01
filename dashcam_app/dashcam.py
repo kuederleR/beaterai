@@ -165,111 +165,67 @@ def smooth_spline(fitx, history, max_history=5):
         
     return np.mean(history, axis=0)
 
-def extract_lane_splines(ll_mask, da_mask, center_x):
-    """Uses a sliding window to isolate the ego lane and fit Gaussian splines, preventing perspective banana-ing."""
+def extract_lane_direct(ll_mask, car_center_x, calibrated_width=None):
     h, w = ll_mask.shape
     
-    # 1. Automatically detect the top of the car hood using the Drivable Area (da_mask)
-    # We analyze the center 1/3rd of the image from the bottom up to find where the road actually begins.
-    center_da = da_mask[:, int(w*0.33):int(w*0.66)]
-    road_pixels_per_row = np.sum(center_da, axis=1)
+    # We trace from the hood up to the horizon
+    start_y = h - 20
+    end_y = 150
     
-    hood_top_y = h - 1
-    for y in range(h-1, int(h*0.5), -1):
-        # If at least 10% of the center width is classified as drivable road, we have cleared the hood.
-        if road_pixels_per_row[y] > (w * 0.33 * 0.1): 
-            hood_top_y = y
-            break
+    y_range = np.arange(start_y, end_y - 1, -1)
+    left_x = np.full_like(y_range, np.nan, dtype=np.float32)
+    right_x = np.full_like(y_range, np.nan, dtype=np.float32)
+    
+    center = car_center_x
+    
+    for i, y in enumerate(y_range):
+        row = ll_mask[y, :]
+        
+        # Search outwards from the current center
+        left_half = row[:int(center)]
+        right_half = row[int(center):]
+        
+        l_idx = np.where(left_half > 0)[0]
+        r_idx = np.where(right_half > 0)[0]
+        
+        found_l = False
+        found_r = False
+        
+        if len(l_idx) > 0:
+            left_x[i] = l_idx[-1]
+            found_l = True
             
-    # Add a safety margin (e.g., 20 pixels) above the hood to avoid any distorted/noisy edge pixels
-    hood_top_y = max(int(h * 0.5), hood_top_y - 20)
-    
-    # Our clean road search space is strictly between the horizon (h*0.5) and the hood
-    search_top = int(h * 0.5)
-    search_bottom = hood_top_y
-    search_height = search_bottom - search_top
-    
-    if search_height < 50: # If we can't see enough road, abort
-        return None, None, hood_top_y
-    
-    # 2. Extract starting base using a localized histogram of ONLY the very bottom of the road
-    # By strictly scanning the bottom 40 pixels, we avoid pulling the line inwards ("bending in").
-    bottom_band = ll_mask[max(search_top, search_bottom - 40) : search_bottom, :]
-    histogram = np.sum(bottom_band, axis=0)
-    
-    # Ego-Band Searching: We physically restrict the base search to where the ego lane lines 
-    # MUST logically exist relative to the camera center (e.g. 20 to 250 pixels away).
-    # This completely blinds the algorithm to the outer boundaries of the highway.
-    left_search_min = max(0, center_x - 250)
-    left_search_max = max(0, center_x - 20)
-    
-    if left_search_max > left_search_min and np.max(histogram[left_search_min:left_search_max]) > 10:
-        leftx_base = np.argmax(histogram[left_search_min:left_search_max]) + left_search_min
-    else:
-        leftx_base = None
+        if len(r_idx) > 0:
+            right_x[i] = r_idx[0] + int(center)
+            found_r = True
+            
+        if found_l and found_r:
+            center = (left_x[i] + right_x[i]) / 2.0
+        elif found_l and calibrated_width is not None and y < len(calibrated_width):
+            # Ghost right
+            right_x[i] = left_x[i] + calibrated_width[y]
+            center = left_x[i] + calibrated_width[y] / 2.0
+        elif found_r and calibrated_width is not None and y < len(calibrated_width):
+            # Ghost left
+            left_x[i] = right_x[i] - calibrated_width[y]
+            center = right_x[i] - calibrated_width[y] / 2.0
+            
+    # Remove NaN values (rows where both lines were missing)
+    valid_idx = ~np.isnan(left_x) & ~np.isnan(right_x)
+    if not np.any(valid_idx):
+        return None, None, None, start_y
         
-    right_search_min = min(w, center_x + 20)
-    right_search_max = min(w, center_x + 250)
+    valid_y = y_range[valid_idx]
+    valid_left = left_x[valid_idx]
+    valid_right = right_x[valid_idx]
     
-    if right_search_max > right_search_min and np.max(histogram[right_search_min:right_search_max]) > 10:
-        rightx_base = np.argmax(histogram[right_search_min:right_search_max]) + right_search_min
-    else:
-        rightx_base = None
-    
-    nwindows = 15
-    window_height = int(search_height / nwindows)
-    margin = 40 # Increased slightly to track curved dashed lines reliably
-    minpix = 15
-    
-    left_x_pts, left_y_pts = [], []
-    right_x_pts, right_y_pts = [], []
-    
-    leftx_current, rightx_current = leftx_base, rightx_base
-    
-    y_indices, x_indices = np.nonzero(ll_mask)
-    
-    for window in range(nwindows):
-        win_y_low = search_bottom - (window + 1) * window_height
-        win_y_high = search_bottom - window * window_height
-        win_y_center = (win_y_low + win_y_high) // 2
+    # Smooth the extracted path to remove pixel jitters
+    if len(valid_y) > 5:
+        from scipy.ndimage import gaussian_filter1d
+        valid_left = gaussian_filter1d(valid_left, sigma=3.0)
+        valid_right = gaussian_filter1d(valid_right, sigma=3.0)
         
-        if leftx_current is not None:
-            win_xleft_low, win_xleft_high = leftx_current - margin, leftx_current + margin
-            good_left_inds = ((y_indices >= win_y_low) & (y_indices < win_y_high) & 
-                              (x_indices >= win_xleft_low) & (x_indices < win_xleft_high)).nonzero()[0]
-            if len(good_left_inds) > minpix:
-                leftx_current = int(np.mean(x_indices[good_left_inds]))
-            left_x_pts.append(leftx_current)
-            left_y_pts.append(win_y_center)
-                
-        if rightx_current is not None:
-            win_xright_low, win_xright_high = rightx_current - margin, rightx_current + margin
-            good_right_inds = ((y_indices >= win_y_low) & (y_indices < win_y_high) & 
-                               (x_indices >= win_xright_low) & (x_indices < win_xright_high)).nonzero()[0]
-            if len(good_right_inds) > minpix:
-                rightx_current = int(np.mean(x_indices[good_right_inds]))
-            right_x_pts.append(rightx_current)
-            right_y_pts.append(win_y_center)
-                
-    # 3. Robust Gaussian Spline Generation
-    # We replace rigid parabolic equations with fluid vector splines that perfectly match perspective view curves.
-    ploty = np.linspace(int(h*0.5), hood_top_y, num=h//2)
-    left_fitx, right_fitx = None, None
-    
-    if len(left_x_pts) == nwindows:
-        # Interpolate requires strictly increasing x-axis (our y coordinates in image space)
-        ly = np.array(left_y_pts)[::-1]
-        lx = np.array(left_x_pts)[::-1]
-        raw_fitx = np.interp(ploty, ly, lx)
-        left_fitx = gaussian_filter1d(raw_fitx, sigma=8.0)
-        
-    if len(right_x_pts) == nwindows:
-        ry = np.array(right_y_pts)[::-1]
-        rx = np.array(right_x_pts)[::-1]
-        raw_fitx = np.interp(ploty, ry, rx)
-        right_fitx = gaussian_filter1d(raw_fitx, sigma=8.0)
-        
-    return left_fitx, right_fitx, ploty, hood_top_y
+    return valid_left, valid_right, valid_y, start_y
 
 def inference_loop():
     global latest_web_frame, raw_frame_buffer, state
@@ -364,31 +320,88 @@ def inference_loop():
                 h, w = ll_mask.shape
                 car_center_x = w // 2
                 
-                raw_left_fitx, raw_right_fitx, ploty, hood_top_y = extract_lane_splines(ll_mask, da_mask, car_center_x)
+                if state.get("calibrate_requested"):
+                    print("[INFO] Starting Lens Perspective Calibration...", flush=True)
+                    state["calibrate_requested"] = False
+                    state["calibration_frames_left"] = 30
+                    state["calib_left_history"] = []
+                    state["calib_right_history"] = []
+                    
+                if state["calibration_frames_left"] > 0:
+                    l_x, r_x, v_y, _ = extract_lane_direct(ll_mask, car_center_x, None)
+                    if l_x is not None and len(v_y) > 50: # Ensure we got a good, long highway read
+                        # Normalize to full height array
+                        full_l = np.full(h, np.nan)
+                        full_r = np.full(h, np.nan)
+                        full_l[v_y] = l_x
+                        full_r[v_y] = r_x
+                        state["calib_left_history"].append(full_l)
+                        state["calib_right_history"].append(full_r)
+                        
+                    state["calibration_frames_left"] -= 1
+                    
+                    if state["calibration_frames_left"] == 0:
+                        if len(state["calib_left_history"]) >= 15:
+                            # We have enough frames! Calculate the perfect perspective taper
+                            all_l = np.nanmedian(state["calib_left_history"], axis=0)
+                            all_r = np.nanmedian(state["calib_right_history"], axis=0)
+                            
+                            valid_rows = ~np.isnan(all_l) & ~np.isnan(all_r)
+                            y_vals = np.arange(h)[valid_rows]
+                            widths = all_r[valid_rows] - all_l[valid_rows]
+                            
+                            # Fit a parabola to the width to perfectly capture barrel distortion taper
+                            w_poly = np.polyfit(y_vals, widths, 2)
+                            
+                            calibrated_width = np.zeros(h, dtype=np.float32)
+                            for y in range(h):
+                                w = w_poly[0]*y**2 + w_poly[1]*y + w_poly[2]
+                                calibrated_width[y] = max(0, w) # Width can't be negative
+                                
+                            # Find Vanishing Point Y (where width approaches 0)
+                            vp_y = h
+                            for y in range(h-1, -1, -1):
+                                if calibrated_width[y] <= 5:
+                                    vp_y = y
+                                    break
+                                    
+                            # Find VP X (center at VP Y)
+                            c_poly = np.polyfit(y_vals, (all_l[valid_rows] + all_r[valid_rows])/2.0, 2)
+                            vp_x = c_poly[0]*vp_y**2 + c_poly[1]*vp_y + c_poly[2]
+                            
+                            # Save calibration
+                            state["calibration"] = {
+                                "calibrated_width": calibrated_width.tolist(),
+                                "vp_x": float(vp_x),
+                                "vp_y": int(vp_y)
+                            }
+                            os.makedirs('models', exist_ok=True)
+                            with open('models/calibration.json', 'w') as f:
+                                json.dump(state["calibration"], f)
+                            print(f"[INFO] Lens Calibration Successful! VP: ({vp_x:.1f}, {vp_y})", flush=True)
+                        else:
+                            print("[ERROR] Lens Calibration Failed: Not enough clean lane lines.", flush=True)
+                            
+                # Normal Inference
+                cw = None
+                if state["calibration"] is not None:
+                    cw = state["calibration"]["calibrated_width"]
+                    
+                raw_left_fitx, raw_right_fitx, valid_ploty, hood_top_y = extract_lane_direct(ll_mask, car_center_x, cw)
                 
+                # Apply temporal smoothing to the RAW tracks to completely eliminate frame-to-frame jitter
                 raw_left_fitx = smooth_spline(raw_left_fitx, state["left_poly_history"])
                 raw_right_fitx = smooth_spline(raw_right_fitx, state["right_poly_history"])
                 
-                if raw_left_fitx is not None or raw_right_fitx is not None:
-                    # Taper perfectly towards a fixed vanishing point horizon (y=200 is center of 400h)
-                    HORIZON_Y = 200
-                    valid_ploty = ploty[ploty >= HORIZON_Y]
-                    ideal_lane_width = np.linspace(20, 350, num=len(valid_ploty))
+                if raw_left_fitx is not None and raw_right_fitx is not None:
                     
-                    # We only care about coordinates below the horizon
-                    if raw_left_fitx is not None and raw_right_fitx is not None:
-                        center_fitx = (raw_left_fitx[ploty >= HORIZON_Y] + raw_right_fitx[ploty >= HORIZON_Y]) / 2.0
-                    elif raw_left_fitx is not None:
-                        center_fitx = raw_left_fitx[ploty >= HORIZON_Y] + ideal_lane_width / 2.0
-                    else:
-                        center_fitx = raw_right_fitx[ploty >= HORIZON_Y] - ideal_lane_width / 2.0
-                        
-                    left_fitx = center_fitx - ideal_lane_width / 2.0
-                    right_fitx = center_fitx + ideal_lane_width / 2.0
+                    left_fitx = raw_left_fitx
+                    right_fitx = raw_right_fitx
                     
+                    # Compute vehicle deviation at the hood line (the closest visible point to the car)
                     lane_bottom_y = hood_top_y
-                    left_bottom_x = left_fitx[-1]
-                    right_bottom_x = right_fitx[-1]
+                    left_bottom_x = left_fitx[0] # valid_ploty is descending
+                    right_bottom_x = right_fitx[0]
                     
                     lane_width = right_bottom_x - left_bottom_x
                     lane_center_x = (left_bottom_x + right_bottom_x) / 2
@@ -401,7 +414,6 @@ def inference_loop():
                         ratio_left = dist_left / lane_width
                         ratio_right = dist_right / lane_width
                         
-                        # Dynamic color grading
                         if ratio_left < 0.1: left_color, ldw_triggered = (0, 0, 255), True
                         elif ratio_left < 0.25: left_color = (0, 165, 255)
                         else: left_color = (0, 255, 0)
@@ -415,8 +427,24 @@ def inference_loop():
                         elif min_ratio < 0.25: fill_color = (0, 165, 255)
                         else: fill_color = (0, 255, 0)
                             
-                        pts_left = np.array([np.transpose(np.vstack([left_fitx, valid_ploty]))]).astype(np.int32)
-                        pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, valid_ploty])))]).astype(np.int32)
+                        # Connect the top of the tracked lanes perfectly to the calibrated vanishing point
+                        vp_x = w // 2
+                        vp_y = 180
+                        if state["calibration"] is not None:
+                            vp_x = state["calibration"]["vp_x"]
+                            vp_y = state["calibration"]["vp_y"]
+                            
+                        # Append the VP to the points!
+                        left_pts = np.vstack([left_fitx, valid_ploty]).T
+                        right_pts = np.vstack([right_fitx, valid_ploty]).T
+                        
+                        # Only extend if the neural net didn't already draw up to the horizon
+                        if valid_ploty[-1] > vp_y + 10:
+                            left_pts = np.vstack([left_pts, [vp_x, vp_y]])
+                            right_pts = np.vstack([right_pts, [vp_x, vp_y]])
+                        
+                        pts_left = np.array([left_pts]).astype(np.int32)
+                        pts_right = np.array([np.flipud(right_pts)]).astype(np.int32)
                         pts = np.hstack((pts_left, pts_right))
                         
                         overlay = np.zeros_like(im_infer)
@@ -512,6 +540,13 @@ def api_toggle_adas():
     state["adas_enabled"] = data.get('enabled', False)
     return jsonify({"adas_enabled": state["adas_enabled"]})
 
+
+
+@app.route('/api/calibrate', methods=['POST'])
+def api_calibrate():
+    global state
+    state["calibrate_requested"] = True
+    return jsonify({"status": "calibrating"})
 
 if __name__ == '__main__':
     print("=" * 50, flush=True)
