@@ -74,6 +74,8 @@ state = {
     "right_miny_history": [],
     "left_maxy_history": [],
     "right_maxy_history": [],
+    "last_left_x": None,
+    "last_right_x": None,
     "calibrate_requested": False,
     "calibration_frames_left": 0,
     "calib_left_history": [],
@@ -189,11 +191,10 @@ def smooth_scalar(val, history, max_history=5):
         history.pop(0)
     return np.mean(history)
 
-def extract_window_points(ll_mask, car_center_x):
+def extract_window_points(ll_mask, car_center_x, prev_l_x=None, prev_r_x=None):
     h, w = ll_mask.shape
     
     nwindows = 15
-    window_height = int((h*0.4) / nwindows)
     margin = 40
     minpix = 15
     
@@ -211,16 +212,22 @@ def extract_window_points(ll_mask, car_center_x):
         
     window_height = int(search_height / nwindows)
     
-    leftx_current = None
-    rightx_current = None
+    leftx_current = prev_l_x
+    rightx_current = prev_r_x
     
-    bottom_band = ll_mask[start_y - 40:start_y + 1, :]
-    histogram = np.sum(bottom_band, axis=0)
-    
-    if np.max(histogram[:int(car_center_x)]) > 0:
-        leftx_current = np.argmax(histogram[:int(car_center_x)])
-    if np.max(histogram[int(car_center_x):]) > 0:
-        rightx_current = np.argmax(histogram[int(car_center_x):]) + int(car_center_x)
+    if leftx_current is None or rightx_current is None:
+        bottom_band = ll_mask[start_y - 40:start_y + 1, :]
+        histogram = np.sum(bottom_band, axis=0)
+        
+        if leftx_current is None and np.max(histogram[:int(car_center_x)]) > 0:
+            search_max = min(int(car_center_x), w//2 + 50)
+            if np.max(histogram[:search_max]) > 0:
+                leftx_current = np.argmax(histogram[:search_max])
+                
+        if rightx_current is None and np.max(histogram[int(car_center_x):]) > 0:
+            search_min = max(int(car_center_x), w//2 - 50)
+            if np.max(histogram[search_min:]) > 0:
+                rightx_current = np.argmax(histogram[search_min:]) + search_min
         
     left_x_pts = []
     left_y_pts = []
