@@ -388,72 +388,116 @@ def inference_loop():
                 ll_mask[state["hood_y_detected"]:, :] = 0
             
             if ll_mask is not None and da_mask is not None:
-                # 1. Plot drivable area (translucent green overlay)
+                # New approach: Segment drivable area into lanes using lane lines as dividers
+                car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
+                h_im, w_im = im_infer.shape[:2]
+                
+                # Step 1: Extend/interpolate lane lines to fully segment the drivable area
+                ll_extended = ll_mask.copy()
+                
+                # For each column, if there are lane line pixels, extend them through the drivable area
+                for x in range(w_im):
+                    col_ll = ll_mask[:, x]
+                    col_da = da_mask[:, x]
+                    
+                    if np.any(col_ll > 0) and np.any(col_da > 0):
+                        # Find lane line pixels in this column
+                        ll_ys = np.where(col_ll > 0)[0]
+                        da_ys = np.where(col_da > 0)[0]
+                        
+                        if len(ll_ys) > 0 and len(da_ys) > 0:
+                            # Extend lane line through the full drivable area in this column
+                            da_min = np.min(da_ys)
+                            da_max = np.max(da_ys)
+                            ll_extended[da_min:da_max+1, x] = 255
+                
+                # Step 2: Create segmentation mask by dividing drivable area with lane lines
+                # Start with drivable area, then subtract lane lines to create boundaries
+                segmentation_base = da_mask.copy().astype(np.uint8)
+                segmentation_base[ll_extended > 0] = 0  # Lane lines become boundaries
+                
+                # Step 3: Label connected regions (each lane segment gets a unique ID)
+                num_labels, labels = cv2.connectedComponents(segmentation_base)
+                
+                # Step 4: Find which segment contains the car center (bottom-center of image)
+                car_bottom_y = h_im - 20
+                car_label = labels[car_bottom_y, car_center_x] if labels[car_bottom_y, car_center_x] > 0 else 0
+                
+                # Step 5: Color each segment differently
+                # Create a colored overlay
+                overlay = np.zeros_like(im_infer)
+                
+                # Define colors for different segments
+                colors = [
+                    (0, 255, 0),      # Green - current lane
+                    (0, 180, 255),    # Orange - adjacent lanes
+                    (180, 180, 0),    # Cyan - other lanes
+                    (180, 0, 180),    # Magenta
+                    (255, 180, 0),    # Light blue
+                ]
+                
+                # Color each segment
+                for label_id in range(1, num_labels):
+                    mask = labels == label_id
+                    if np.any(mask):
+                        if label_id == car_label:
+                            # Current lane gets bright green
+                            overlay[mask] = (0, 255, 0)
+                        else:
+                            # Other lanes get different colors
+                            color_idx = (label_id - 1) % len(colors)
+                            overlay[mask] = colors[color_idx]
+                
+                # Blend overlay with original image
                 da_indices = da_mask > 0
                 if np.any(da_indices):
-                    overlay = np.zeros_like(im_infer)
-                    overlay[da_indices] = (0, 255, 0)
                     alpha = 0.35
-                    im_infer[da_indices] = cv2.addWeighted(im_infer[da_indices], 1.0 - alpha, overlay[da_indices], alpha, 0)
+                    im_infer[da_indices] = cv2.addWeighted(
+                        im_infer[da_indices], 1.0 - alpha, 
+                        overlay[da_indices], alpha, 0
+                    )
                 
-                # 2. Plot lane lines (solid yellow)
+                # Step 6: Draw lane line boundaries in yellow (for visibility)
                 ll_indices = ll_mask > 0
                 if np.any(ll_indices):
                     im_infer[ll_indices] = (0, 255, 255)
-
-                # 3. Find current lane boundaries by detecting edges of drivable area
-                # This works on both lined and unlined roads
-                car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
-                h_im = im_infer.shape[0]
                 
-                left_poly = None
-                right_poly = None
-                
-                # Process drivable area to find left and right lane boundaries
-                if np.any(da_mask > 0):
-                    # For each row, find the leftmost and rightmost drivable pixels
-                    # Focus on bottom 60% of image (where lane detection matters)
-                    start_y = int(h_im * 0.4)
-                    end_y = h_im
+                # Step 7: Find and draw the boundaries of the current lane in blue
+                if car_label > 0:
+                    current_lane_mask = (labels == car_label).astype(np.uint8) * 255
                     
+                    # Find left and right edges of current lane
                     left_edge_x = []
                     left_edge_y = []
                     right_edge_x = []
                     right_edge_y = []
                     
-                    for y in range(start_y, end_y, 2):  # Sample every 2 rows for speed
-                        row = da_mask[y, :]
+                    start_y = int(h_im * 0.4)
+                    for y in range(start_y, h_im, 2):
+                        row = current_lane_mask[y, :]
                         if np.any(row > 0):
-                            # Find all drivable pixels in this row
-                            drivable_xs = np.where(row > 0)[0]
-                            
-                            if len(drivable_xs) > 0:
-                                # Split drivable region by car center
-                                left_side = drivable_xs[drivable_xs < car_center_x]
-                                right_side = drivable_xs[drivable_xs >= car_center_x]
+                            lane_xs = np.where(row > 0)[0]
+                            if len(lane_xs) > 0:
+                                left_boundary = np.min(lane_xs)
+                                right_boundary = np.max(lane_xs)
                                 
-                                # Left boundary: rightmost point on left side (inner edge)
-                                if len(left_side) > 0:
-                                    left_boundary = np.max(left_side)
+                                # Only add if reasonably on the correct side
+                                if left_boundary < car_center_x:
                                     left_edge_x.append(left_boundary)
                                     left_edge_y.append(y)
-                                
-                                # Right boundary: leftmost point on right side (inner edge)
-                                if len(right_side) > 0:
-                                    right_boundary = np.min(right_side)
+                                if right_boundary > car_center_x:
                                     right_edge_x.append(right_boundary)
                                     right_edge_y.append(y)
                     
-                    # Fit polynomials to the detected edges
+                    # Fit and draw smooth polynomials for lane boundaries
+                    left_poly = None
+                    right_poly = None
+                    
                     if len(left_edge_x) >= 30:
                         left_edge_x = np.array(left_edge_x)
                         left_edge_y = np.array(left_edge_y)
-                        
-                        # Weight bottom pixels more (exponential decay from bottom)
                         weights = np.exp((left_edge_y - h_im) / 60.0)
-                        
                         try:
-                            # Use 2nd order polynomial for smooth curves
                             left_poly = np.polyfit(left_edge_y, left_edge_x, 2, w=weights)
                         except:
                             pass
@@ -461,63 +505,58 @@ def inference_loop():
                     if len(right_edge_x) >= 30:
                         right_edge_x = np.array(right_edge_x)
                         right_edge_y = np.array(right_edge_y)
-                        
-                        # Weight bottom pixels more
                         weights = np.exp((right_edge_y - h_im) / 60.0)
-                        
                         try:
                             right_poly = np.polyfit(right_edge_y, right_edge_x, 2, w=weights)
                         except:
                             pass
-                
-                # Temporal smoothing of polynomials (critical for stability)
-                if left_poly is not None:
-                    left_poly_sm = smooth_path(left_poly, state['left_poly_history'], max_history=10)
-                else:
-                    # If we lose the lane, keep using the smoothed history for a few frames
-                    if len(state['left_poly_history']) > 0:
-                        left_poly_sm = np.mean(state['left_poly_history'], axis=0)
-                    else:
-                        left_poly_sm = None
                     
-                if right_poly is not None:
-                    right_poly_sm = smooth_path(right_poly, state['right_poly_history'], max_history=10)
-                else:
-                    if len(state['right_poly_history']) > 0:
-                        right_poly_sm = np.mean(state['right_poly_history'], axis=0)
+                    # Temporal smoothing of polynomials (critical for stability)
+                    if left_poly is not None:
+                        left_poly_sm = smooth_path(left_poly, state['left_poly_history'], max_history=10)
                     else:
-                        right_poly_sm = None
+                        # If we lose the lane, keep using the smoothed history for a few frames
+                        if len(state['left_poly_history']) > 0:
+                            left_poly_sm = np.mean(state['left_poly_history'], axis=0)
+                        else:
+                            left_poly_sm = None
+                        
+                    if right_poly is not None:
+                        right_poly_sm = smooth_path(right_poly, state['right_poly_history'], max_history=10)
+                    else:
+                        if len(state['right_poly_history']) > 0:
+                            right_poly_sm = np.mean(state['right_poly_history'], axis=0)
+                        else:
+                            right_poly_sm = None
 
-                # Draw smoothed lane boundaries (blue lines)
-                plot_y = np.linspace(int(h_im * 0.4), h_im - 1, num=150).astype(np.int32)
-                
-                if left_poly_sm is not None:
-                    left_plot_x = np.polyval(left_poly_sm, plot_y)
-                    # Clip to image bounds
-                    left_plot_x = np.clip(left_plot_x, 0, INFER_WIDTH - 1)
-                    left_pts = np.array([np.vstack([left_plot_x, plot_y]).T], dtype=np.int32)
-                    cv2.polylines(im_infer, left_pts, isClosed=False, color=(255, 0, 0), thickness=5)
-                
-                if right_poly_sm is not None:
-                    right_plot_x = np.polyval(right_poly_sm, plot_y)
-                    # Clip to image bounds
-                    right_plot_x = np.clip(right_plot_x, 0, INFER_WIDTH - 1)
-                    right_pts = np.array([np.vstack([right_plot_x, plot_y]).T], dtype=np.int32)
-                    cv2.polylines(im_infer, right_pts, isClosed=False, color=(255, 0, 0), thickness=5)
-
-                # Lane Departure Warning: check if car is drifting from lane center
-                ldw_triggered = False
-                if left_poly_sm is not None and right_poly_sm is not None:
-                    # Evaluate lane boundaries at bottom of frame
-                    eval_y = h_im - 50
-                    left_x_bottom = np.polyval(left_poly_sm, eval_y)
-                    right_x_bottom = np.polyval(right_poly_sm, eval_y)
-                    lane_center = (left_x_bottom + right_x_bottom) / 2
+                    # Draw smoothed lane boundaries (thick blue lines)
+                    plot_y = np.linspace(int(h_im * 0.4), h_im - 1, num=150).astype(np.int32)
                     
-                    # Check drift from current car center
-                    drift = abs(car_center_x - lane_center)
-                    if drift > LDW_MAX_DRIFT:
-                        ldw_triggered = True
+                    if left_poly_sm is not None:
+                        left_plot_x = np.polyval(left_poly_sm, plot_y)
+                        left_plot_x = np.clip(left_plot_x, 0, INFER_WIDTH - 1)
+                        left_pts = np.array([np.vstack([left_plot_x, plot_y]).T], dtype=np.int32)
+                        cv2.polylines(im_infer, left_pts, isClosed=False, color=(255, 0, 0), thickness=6)
+                    
+                    if right_poly_sm is not None:
+                        right_plot_x = np.polyval(right_poly_sm, plot_y)
+                        right_plot_x = np.clip(right_plot_x, 0, INFER_WIDTH - 1)
+                        right_pts = np.array([np.vstack([right_plot_x, plot_y]).T], dtype=np.int32)
+                        cv2.polylines(im_infer, right_pts, isClosed=False, color=(255, 0, 0), thickness=6)
+
+                    # Lane Departure Warning: check if car is drifting from lane center
+                    ldw_triggered = False
+                    if left_poly_sm is not None and right_poly_sm is not None:
+                        # Evaluate lane boundaries at bottom of frame
+                        eval_y = h_im - 50
+                        left_x_bottom = np.polyval(left_poly_sm, eval_y)
+                        right_x_bottom = np.polyval(right_poly_sm, eval_y)
+                        lane_center = (left_x_bottom + right_x_bottom) / 2
+                        
+                        # Check drift from current car center
+                        drift = abs(car_center_x - lane_center)
+                        if drift > LDW_MAX_DRIFT:
+                            ldw_triggered = True
 
         # Update global state for UI alerts
         state["fcw_warning"] = fcw_triggered
