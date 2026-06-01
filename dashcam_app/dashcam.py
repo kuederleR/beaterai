@@ -536,11 +536,78 @@ def inference_loop():
                     alpha = 0.35
                     im_infer[da_indices] = cv2.addWeighted(im_infer[da_indices], 1.0 - alpha, overlay[da_indices], alpha, 0)
                 
-                # 2. Plot lane lines (solid yellow)
+                # 2. Plot lane lines (solid yellow) and compute smooth lane boundaries
                 ll_indices = ll_mask > 0
                 if np.any(ll_indices):
                     im_infer[ll_indices] = (0, 255, 255)
-                
+
+                # Attempt to compute lane boundary polynomials using radial tracing
+                left_pts, right_pts = find_lane_boundaries_radial(da_mask, ll_mask)
+                left_poly = None
+                right_poly = None
+
+                # Fit quadratic x = f(y) if we have enough points
+                if len(left_pts) >= 5:
+                    lx = np.array([p[0] for p in left_pts])
+                    ly = np.array([p[1] for p in left_pts])
+                    try:
+                        left_poly = np.polyfit(ly, lx, 2)
+                    except Exception:
+                        left_poly = None
+
+                if len(right_pts) >= 5:
+                    rx = np.array([p[0] for p in right_pts])
+                    ry = np.array([p[1] for p in right_pts])
+                    try:
+                        right_poly = np.polyfit(ry, rx, 2)
+                    except Exception:
+                        right_poly = None
+
+                # Fallback: use sliding window point extraction if polynomials missing
+                if left_poly is None or right_poly is None:
+                    prev_lx = state.get('last_left_x')
+                    prev_rx = state.get('last_right_x')
+                    l_x_pts, l_y_pts, r_x_pts, r_y_pts = extract_window_points(
+                        ll_mask, state.get('car_center_x', INFER_WIDTH // 2), prev_lx, prev_rx)
+                    if left_poly is None and len(l_x_pts) >= 4:
+                        try:
+                            left_poly = np.polyfit(np.array(l_y_pts), np.array(l_x_pts), 2)
+                        except Exception:
+                            left_poly = None
+                    if right_poly is None and len(r_x_pts) >= 4:
+                        try:
+                            right_poly = np.polyfit(np.array(r_y_pts), np.array(r_x_pts), 2)
+                        except Exception:
+                            right_poly = None
+
+                # Smooth polynomials using history buffers
+                if left_poly is not None:
+                    left_poly_sm = smooth_path(left_poly, state['left_poly_history'], max_history=5)
+                else:
+                    left_poly_sm = None
+                if right_poly is not None:
+                    right_poly_sm = smooth_path(right_poly, state['right_poly_history'], max_history=5)
+                else:
+                    right_poly_sm = None
+
+                # Draw smoothed lane boundary polylines (blue)
+                h_im = im_infer.shape[0]
+                ys = np.linspace(int(h_im * 0.4), h_im - 1, num=100).astype(np.int32)
+                if left_poly_sm is not None:
+                    xs = np.polyval(left_poly_sm, ys)
+                    pts = np.stack([xs, ys], axis=1).astype(np.int32)
+                    pts = pts[(pts[:, 0] >= 0) & (pts[:, 0] < im_infer.shape[1])]
+                    if len(pts) > 1:
+                        cv2.polylines(im_infer, [pts.reshape(-1, 1, 2)], isClosed=False, color=(255, 0, 0), thickness=3)
+                        state['last_left_x'] = int(np.mean(pts[-5:, 0])) if len(pts) >= 5 else int(pts[-1, 0])
+                if right_poly_sm is not None:
+                    xs = np.polyval(right_poly_sm, ys)
+                    pts = np.stack([xs, ys], axis=1).astype(np.int32)
+                    pts = pts[(pts[:, 0] >= 0) & (pts[:, 0] < im_infer.shape[1])]
+                    if len(pts) > 1:
+                        cv2.polylines(im_infer, [pts.reshape(-1, 1, 2)], isClosed=False, color=(255, 0, 0), thickness=3)
+                        state['last_right_x'] = int(np.mean(pts[-5:, 0])) if len(pts) >= 5 else int(pts[-1, 0])
+
                 ldw_triggered = False
 
         # Update global state for UI alerts
