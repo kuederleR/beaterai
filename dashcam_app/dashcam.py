@@ -459,6 +459,16 @@ def inference_loop():
                 h, w = ll_mask.shape
                 car_center_x = state.get("car_center_x", w // 2)
                 
+                # Dynamic road center from drivable area at the bottom rows
+                da_center_x = w // 2
+                da_nonzero = da_mask.nonzero()
+                if len(da_nonzero[0]) > 0:
+                    da_hood_y = min(int(np.max(da_nonzero[0])), state["hood_y_detected"] if state["hood_y_detected"] is not None else h - 20)
+                    bottom_y_min = max(0, da_hood_y - 40)
+                    bottom_da_pts = da_mask[bottom_y_min:da_hood_y + 1, :].nonzero()
+                    if len(bottom_da_pts[1]) > 0:
+                        da_center_x = int(np.median(bottom_da_pts[1]))
+                
                 if state.get("calibrate_requested"):
                     print("[INFO] Starting Stable VP Calibration...", flush=True)
                     state["calibrate_requested"] = False
@@ -472,7 +482,7 @@ def inference_loop():
                     state["calibration_center_frames_left"] = 150
                     state["calib_center_history"] = []
                     
-                l_x, l_y, r_x, r_y = extract_window_points(ll_mask, w // 2)
+                l_x, l_y, r_x, r_y = extract_window_points(ll_mask, da_center_x)
                 
                 # --- Lens Calibration (Stable VP) ---
                 if state["calibration_frames_left"] > 0:
