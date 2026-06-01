@@ -80,7 +80,10 @@ state = {
     "calibration_frames_left": 0,
     "calib_left_history": [],
     "calib_right_history": [],
-    "calibration": None
+    "calibration": None,
+    "hood_y_detected": None,
+    "hood_detection_frames": [],
+    "hood_detection_done": False
 }
 
 if os.path.exists('models/calibration.json'):
@@ -90,6 +93,17 @@ if os.path.exists('models/calibration.json'):
             print("[INFO] Successfully loaded Stable VP Calibration.", flush=True)
     except Exception as e:
         print(f"[ERROR] Failed to load calibration matrix: {e}", flush=True)
+
+if os.path.exists('models/hood_line.json'):
+    try:
+        with open('models/hood_line.json', 'r') as f:
+            hood_data = json.load(f)
+            state["hood_y_detected"] = hood_data["hood_y"]
+            state["hood_detection_done"] = True
+            print(f"[INFO] Loaded hood line from cache: y={state['hood_y_detected']}", flush=True)
+    except Exception as e:
+        print(f"[ERROR] Failed to load hood line: {e}", flush=True)
+
 video_writer = None
 
 def make_error_frame(message):
@@ -190,6 +204,53 @@ def smooth_scalar(val, history, max_history=5):
     if len(history) > max_history:
         history.pop(0)
     return np.mean(history)
+
+def detect_hood_line(frame):
+    """
+    Detect the top edge of the car hood using horizontal gradient analysis.
+    The hood creates a strong, wide horizontal edge in the bottom portion of the frame.
+    Returns the y-coordinate of the hood line, or None if not detected.
+    """
+    h, w = frame.shape[:2]
+    
+    # Only search the bottom 40% of the frame
+    search_top = int(h * 0.6)
+    bottom_region = frame[search_top:, :]
+    
+    # Convert to grayscale
+    if len(bottom_region.shape) == 3:
+        gray = cv2.cvtColor(bottom_region, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = bottom_region
+    
+    # Apply slight blur to reduce noise
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    # Compute horizontal edges using Sobel (vertical gradient)
+    sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    abs_sobel = np.abs(sobel_y)
+    
+    # Sum gradient magnitude across each row (strong horizontal edges will have high sums)
+    row_gradient_sum = np.sum(abs_sobel, axis=1)
+    
+    # Normalize by width so the threshold is resolution-independent
+    row_gradient_avg = row_gradient_sum / w
+    
+    # Find the first strong horizontal edge from the top of the search region
+    # The hood edge is typically the strongest horizontal feature
+    threshold = np.max(row_gradient_avg) * 0.4
+    
+    # Look for a sustained strong edge (at least a few consecutive rows above threshold)
+    candidates = np.where(row_gradient_avg > threshold)[0]
+    
+    if len(candidates) == 0:
+        return None
+    
+    # The hood line is the first strong edge encountered
+    hood_y_in_region = candidates[0]
+    hood_y_absolute = search_top + hood_y_in_region
+    
+    return hood_y_absolute
 
 def extract_window_points(ll_mask, car_center_x, prev_l_x=None, prev_r_x=None):
     h, w = ll_mask.shape
@@ -338,8 +399,9 @@ def inference_loop():
                     # Draw box
                     cv2.rectangle(im_infer, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
                     
-                    # Ignore the ego-vehicle hood/dash which touches the bottom 20 pixels
-                    if y2 > INFER_HEIGHT - 20:
+                    # Ignore the ego-vehicle hood/dash
+                    yolo_hood_y = state["hood_y_detected"] if state["hood_y_detected"] is not None else INFER_HEIGHT - 20
+                    if y2 > yolo_hood_y:
                         continue
                         
                     # FCW Logic: If vehicle is in the center lane and box width is very large (close)
@@ -349,8 +411,30 @@ def inference_loop():
                             cv2.rectangle(im_infer, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 4)
                             cv2.putText(im_infer, "TOO CLOSE!", (int(x1), int(y1)-10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
 
+            # --- Hood Detection (first 10 frames) ---
+            if not state["hood_detection_done"]:
+                detected_y = detect_hood_line(im_infer)
+                if detected_y is not None:
+                    state["hood_detection_frames"].append(detected_y)
+                
+                if len(state["hood_detection_frames"]) >= 10:
+                    hood_y_final = int(np.median(state["hood_detection_frames"]))
+                    state["hood_y_detected"] = hood_y_final
+                    state["hood_detection_done"] = True
+                    
+                    # Persist to disk
+                    os.makedirs('models', exist_ok=True)
+                    with open('models/hood_line.json', 'w') as f:
+                        json.dump({"hood_y": hood_y_final}, f)
+                    print(f"[INFO] Hood line detected and saved: y={hood_y_final} (of {INFER_HEIGHT})", flush=True)
+
             # --- 2. TwinLiteNet Drivable Area & Lane Departure Warning ---
             da_mask, ll_mask = twinlite_model.detect(im_infer)
+            
+            # Mask out everything below the detected hood line
+            if state["hood_y_detected"] is not None and da_mask is not None and ll_mask is not None:
+                da_mask[state["hood_y_detected"]:, :] = 0
+                ll_mask[state["hood_y_detected"]:, :] = 0
             
             if ll_mask is not None and da_mask is not None:
                 h, w = ll_mask.shape
@@ -405,6 +489,10 @@ def inference_loop():
                 else:
                     horizon_y = 180
                     hood_y = h - 20
+                    
+                # Clamp hood_y to the detected hood line
+                if state["hood_y_detected"] is not None:
+                    hood_y = min(hood_y, state["hood_y_detected"])
                     
                 l_path = np.full(h, np.nan)
                 if len(l_x) >= 2:
