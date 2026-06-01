@@ -167,18 +167,21 @@ def capture_loop():
 
 
 # --- Thread 2: AI Inference and Web Encoding ---
-def smooth_spline(fitx, history, max_history=5):
-    """Applies a moving average to smooth out lane splines across frames."""
-    if fitx is None:
-        if len(history) > 0:
-            return np.mean(history, axis=0)
+def smooth_spline(poly_coeffs, history, max_history=5):
+    if poly_coeffs is None:
         return None
-        
-    history.append(fitx)
+    history.append(poly_coeffs)
     if len(history) > max_history:
         history.pop(0)
-        
     return np.mean(history, axis=0)
+
+def smooth_scalar(val, history, max_history=5):
+    if val is None:
+        return None
+    history.append(val)
+    if len(history) > max_history:
+        history.pop(0)
+    return np.mean(history)
 
 def extract_window_points(ll_mask, car_center_x):
     h, w = ll_mask.shape
