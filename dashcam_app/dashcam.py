@@ -408,33 +408,61 @@ def inference_loop():
                 # Step 3: Label connected regions (each lane segment gets a unique ID)
                 num_labels, labels = cv2.connectedComponents(segmentation_base)
                 
-                # Step 4: Find which segment contains the car center (bottom-center of image)
-                car_bottom_y = h_im - 20
-                car_label = labels[car_bottom_y, car_center_x] if labels[car_bottom_y, car_center_x] > 0 else 0
+                # Step 4: Find the centermost lane (closest to image center horizontally)
+                image_center_x = w_im // 2
+                lane_centers = {}
                 
-                # Step 5: Color each segment differently
-                overlay = np.zeros_like(im_infer)
-                
-                # Define colors for different segments
-                colors = [
-                    (0, 200, 255),    # Orange - adjacent lanes
-                    (200, 200, 0),    # Cyan - other lanes  
-                    (200, 0, 200),    # Magenta
-                    (255, 200, 0),    # Light blue
-                    (0, 255, 200),    # Yellow-green
-                ]
-                
-                # Color each segment
                 for label_id in range(1, num_labels):
                     mask = labels == label_id
                     if np.any(mask):
-                        if label_id == car_label:
-                            # Current lane gets bright green
-                            overlay[mask] = (0, 255, 0)
-                        else:
-                            # Other lanes get different colors based on their position
-                            color_idx = (label_id - 1) % len(colors)
-                            overlay[mask] = colors[color_idx]
+                        # Find horizontal center of this lane segment
+                        ys, xs = np.where(mask)
+                        lane_center_x = np.mean(xs)
+                        lane_centers[label_id] = lane_center_x
+                
+                # Find centermost lane
+                center_lane_id = None
+                min_dist = float('inf')
+                for label_id, lane_x in lane_centers.items():
+                    dist = abs(lane_x - image_center_x)
+                    if dist < min_dist:
+                        min_dist = dist
+                        center_lane_id = label_id
+                
+                # Step 5: Color each segment based on distance from center lane
+                overlay = np.zeros_like(im_infer)
+                
+                # Define colors by distance (0=center, 1=adjacent, 2=further, 3=furthest)
+                distance_colors = [
+                    (0, 255, 0),      # 0: Green - center lane
+                    (0, 255, 255),    # 1: Yellow - adjacent lanes
+                    (0, 165, 255),    # 2: Orange - further lanes
+                    (0, 0, 255),      # 3+: Red - furthest lanes
+                ]
+                
+                # Calculate center lane position
+                center_lane_x = lane_centers.get(center_lane_id, image_center_x) if center_lane_id else image_center_x
+                
+                # Color each segment based on horizontal distance from center
+                for label_id, lane_x in lane_centers.items():
+                    mask = labels == label_id
+                    
+                    if label_id == center_lane_id:
+                        # Center lane is always green
+                        color = distance_colors[0]
+                    else:
+                        # Calculate approximate lane distance
+                        # Assume average lane width of ~80-100 pixels
+                        avg_lane_width = 90
+                        distance_from_center = abs(lane_x - center_lane_x) / avg_lane_width
+                        distance_idx = min(int(round(distance_from_center)), len(distance_colors) - 1)
+                        color = distance_colors[distance_idx]
+                    
+                    overlay[mask] = color
+                
+                # Store which lane the car is actually in for boundary detection
+                car_bottom_y = h_im - 20
+                car_label = labels[car_bottom_y, car_center_x] if labels[car_bottom_y, car_center_x] > 0 else 0
                 
                 # Blend overlay with original image
                 da_indices = da_mask > 0
