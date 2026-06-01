@@ -72,6 +72,8 @@ state = {
     "right_poly_history": [],
     "left_miny_history": [],
     "right_miny_history": [],
+    "left_maxy_history": [],
+    "right_maxy_history": [],
     "calibrate_requested": False,
     "calibration_frames_left": 0,
     "calib_left_history": [],
@@ -385,20 +387,32 @@ def inference_loop():
                             print("[ERROR] Calibration Failed: Not enough clean lane lines.", flush=True)
                             
                 # --- INFERENCE ---
-                raw_pl, raw_min_yl = None, None
+                da_nonzero = da_mask.nonzero()
+                if len(da_nonzero[0]) > 0:
+                    horizon_y = int(np.min(da_nonzero[0]))
+                    hood_y = int(np.max(da_nonzero[0]))
+                else:
+                    horizon_y = 180
+                    hood_y = h - 20
+                    
+                raw_pl, raw_min_yl, raw_max_yl = None, None, None
                 if len(l_x) >= 3:
                     raw_pl = np.polyfit(l_y, l_x, 2)
                     raw_min_yl = min(l_y)
+                    raw_max_yl = max(l_y)
                     
-                raw_pr, raw_min_yr = None, None
+                raw_pr, raw_min_yr, raw_max_yr = None, None, None
                 if len(r_x) >= 3:
                     raw_pr = np.polyfit(r_y, r_x, 2)
                     raw_min_yr = min(r_y)
+                    raw_max_yr = max(r_y)
                     
                 pl = smooth_spline(raw_pl, state["left_poly_history"])
                 min_yl = smooth_scalar(raw_min_yl, state["left_miny_history"])
+                max_yl = smooth_scalar(raw_max_yl, state["left_maxy_history"])
                 pr = smooth_spline(raw_pr, state["right_poly_history"])
                 min_yr = smooth_scalar(raw_min_yr, state["right_miny_history"])
+                max_yr = smooth_scalar(raw_max_yr, state["right_maxy_history"])
                 
                 if pl is not None or pr is not None:
                     vp_x = w // 2
@@ -407,85 +421,117 @@ def inference_loop():
                         vp_x = state["calibration"]["vp_x"]
                         vp_y = state["calibration"]["vp_y"]
                         
-                    lane_bottom_y = h - 20
+                    lane_bottom_y = hood_y
                     
                     def get_ideal_width(y):
                         # Pinhole perspective geometric taper (max 400px at bottom, 0 at vp)
                         return 400 * (y - vp_y) / (h - vp_y)
                         
-                    if pl is not None and pr is not None:
-                        ploty_l = np.arange(int(min_yl), h)
-                        left_fitx = pl[0]*ploty_l**2 + pl[1]*ploty_l + pl[2]
+                    def project_line(poly, min_y, max_y):
+                        min_y = int(max(min_y, horizon_y))
+                        max_y = int(min(max_y, hood_y))
+                        if min_y > max_y:
+                            return np.array([]), np.array([])
+                            
+                        # Evaluate strictly bounded polynomial
+                        poly_y = np.arange(min_y, max_y + 1)
+                        poly_x = poly[0]*poly_y**2 + poly[1]*poly_y + poly[2]
                         
-                        ploty_r = np.arange(int(min_yr), h)
-                        right_fitx = pr[0]*ploty_r**2 + pr[1]*ploty_r + pr[2]
+                        # Top perspective projection to horizon
+                        y0 = min_y
+                        x0 = poly_x[0]
+                        top_y = np.arange(horizon_y, min_y)
+                        if len(top_y) > 0:
+                            if y0 != vp_y:
+                                top_x = vp_x + (x0 - vp_x) * (top_y - vp_y) / (y0 - vp_y)
+                            else:
+                                top_x = np.full_like(top_y, x0)
+                        else:
+                            top_x = np.array([])
+                            
+                        # Bottom perspective projection to hood
+                        y1 = max_y
+                        x1 = poly_x[-1]
+                        bot_y = np.arange(max_y + 1, hood_y + 1)
+                        if len(bot_y) > 0:
+                            if y1 != vp_y:
+                                bot_x = vp_x + (x1 - vp_x) * (bot_y - vp_y) / (y1 - vp_y)
+                            else:
+                                bot_x = np.full_like(bot_y, x1)
+                        else:
+                            bot_x = np.array([])
+                            
+                        final_x = np.concatenate([top_x, poly_x, bot_x])
+                        final_y = np.concatenate([top_y, poly_y, bot_y])
+                        return final_x, final_y
+                        
+                    if pl is not None and pr is not None:
+                        left_fitx, ploty_l = project_line(pl, min_yl, max_yl)
+                        right_fitx, ploty_r = project_line(pr, min_yr, max_yr)
                         
                     elif pl is not None:
-                        ploty_l = np.arange(int(min_yl), h)
-                        left_fitx = pl[0]*ploty_l**2 + pl[1]*ploty_l + pl[2]
+                        left_fitx, ploty_l = project_line(pl, min_yl, max_yl)
                         ploty_r = ploty_l
                         right_fitx = left_fitx + get_ideal_width(ploty_r)
                         
                     else:
-                        ploty_r = np.arange(int(min_yr), h)
-                        right_fitx = pr[0]*ploty_r**2 + pr[1]*ploty_r + pr[2]
+                        right_fitx, ploty_r = project_line(pr, min_yr, max_yr)
                         ploty_l = ploty_r
                         left_fitx = right_fitx - get_ideal_width(ploty_l)
                         
-                    # Geometry construction
-                    left_pts = np.vstack([left_fitx, ploty_l]).T
-                    left_pts = np.vstack([[[vp_x, vp_y]], left_pts]) # Add VP to top
-                    
-                    right_pts = np.vstack([right_fitx, ploty_r]).T
-                    right_pts = np.vstack([[[vp_x, vp_y]], right_pts])
-                    
-                    left_bottom_x = left_fitx[-1]
-                    right_bottom_x = right_fitx[-1]
-                    
-                    lane_width = right_bottom_x - left_bottom_x
-                    lane_center_x = (left_bottom_x + right_bottom_x) / 2
-                    drift = car_center_x - lane_center_x
-                    
-                    if lane_width > 0:
-                        dist_left = car_center_x - left_bottom_x
-                        dist_right = right_bottom_x - car_center_x
+                    # Only proceed if we generated valid geometry
+                    if len(left_fitx) > 0 and len(right_fitx) > 0:
+                        # Geometry construction
+                        left_pts = np.vstack([left_fitx, ploty_l]).T
+                        right_pts = np.vstack([right_fitx, ploty_r]).T
                         
-                        ratio_left = dist_left / lane_width
-                        ratio_right = dist_right / lane_width
+                        left_bottom_x = left_fitx[-1]
+                        right_bottom_x = right_fitx[-1]
                         
-                        ldw_triggered = False
-                        if ratio_left < 0.1: left_color, ldw_triggered = (0, 0, 255), True
-                        elif ratio_left < 0.25: left_color = (0, 165, 255)
-                        else: left_color = (0, 255, 0)
+                        lane_width = right_bottom_x - left_bottom_x
+                        lane_center_x = (left_bottom_x + right_bottom_x) / 2
+                        drift = car_center_x - lane_center_x
+                        
+                        if lane_width > 0:
+                            dist_left = car_center_x - left_bottom_x
+                            dist_right = right_bottom_x - car_center_x
                             
-                        if ratio_right < 0.1: right_color, ldw_triggered = (0, 0, 255), True
-                        elif ratio_right < 0.25: right_color = (0, 165, 255)
-                        else: right_color = (0, 255, 0)
+                            ratio_left = dist_left / lane_width
+                            ratio_right = dist_right / lane_width
                             
-                        min_ratio = min(ratio_left, ratio_right)
-                        if min_ratio < 0.1: fill_color = (0, 0, 255)
-                        elif min_ratio < 0.25: fill_color = (0, 165, 255)
-                        else: fill_color = (0, 255, 0)
+                            ldw_triggered = False
+                            if ratio_left < 0.1: left_color, ldw_triggered = (0, 0, 255), True
+                            elif ratio_left < 0.25: left_color = (0, 165, 255)
+                            else: left_color = (0, 255, 0)
+                                
+                            if ratio_right < 0.1: right_color, ldw_triggered = (0, 0, 255), True
+                            elif ratio_right < 0.25: right_color = (0, 165, 255)
+                            else: right_color = (0, 255, 0)
+                                
+                            min_ratio = min(ratio_left, ratio_right)
+                            if min_ratio < 0.1: fill_color = (0, 0, 255)
+                            elif min_ratio < 0.25: fill_color = (0, 165, 255)
+                            else: fill_color = (0, 255, 0)
+                                
+                            pts_left = np.array([left_pts]).astype(np.int32)
+                            pts_right = np.array([np.flipud(right_pts)]).astype(np.int32)
+                            pts = np.hstack((pts_left, pts_right))
                             
-                        pts_left = np.array([left_pts]).astype(np.int32)
-                        pts_right = np.array([np.flipud(right_pts)]).astype(np.int32)
-                        pts = np.hstack((pts_left, pts_right))
-                        
-                        overlay = np.zeros_like(im_infer)
-                        cv2.fillPoly(overlay, [pts], fill_color)
-                        
-                        cv2.polylines(overlay, [pts_left[0]], False, left_color, thickness=6)
-                        cv2.polylines(overlay, [pts_right[0]], False, right_color, thickness=6)
-                        
-                        alpha = 0.5 if ldw_triggered else 0.35
-                        mask_indices = np.any(overlay != 0, axis=-1)
-                        im_infer[mask_indices] = cv2.addWeighted(im_infer[mask_indices], 1.0 - alpha, overlay[mask_indices], alpha, 0)
-                        
-                        cv2.circle(im_infer, (int(lane_center_x), lane_bottom_y - 20), 8, (255, 255, 255), -1)
-                        
-                        if ldw_triggered:
-                            direction = "RIGHT" if drift > 0 else "LEFT"
-                            cv2.putText(im_infer, f"LANE DEPARTURE: {direction}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
+                            overlay = np.zeros_like(im_infer)
+                            cv2.fillPoly(overlay, [pts], fill_color)
+                            
+                            cv2.polylines(overlay, [pts_left[0]], False, left_color, thickness=6)
+                            cv2.polylines(overlay, [pts_right[0]], False, right_color, thickness=6)
+                            
+                            alpha = 0.5 if ldw_triggered else 0.35
+                            mask_indices = np.any(overlay != 0, axis=-1)
+                            im_infer[mask_indices] = cv2.addWeighted(im_infer[mask_indices], 1.0 - alpha, overlay[mask_indices], alpha, 0)
+                            
+                            cv2.circle(im_infer, (int(lane_center_x), lane_bottom_y - 20), 8, (255, 255, 255), -1)
+                            
+                            if ldw_triggered:
+                                direction = "RIGHT" if drift > 0 else "LEFT"
+                                cv2.putText(im_infer, f"LANE DEPARTURE: {direction}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
 
         # Update global state for UI alerts
         state["fcw_warning"] = fcw_triggered
