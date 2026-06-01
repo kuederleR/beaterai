@@ -81,9 +81,6 @@ state = {
     "calib_left_history": [],
     "calib_right_history": [],
     "calibration": None,
-    "hood_y_detected": None,
-    "hood_detection_frames": [],
-    "hood_detection_done": False,
     "car_center_x": 320,
     "calibrate_center_requested": False,
     "calibration_center_frames_left": 0,
@@ -102,16 +99,6 @@ if os.path.exists('models/calibration.json'):
                 print(f"[INFO] Loaded calibrated car center: x={state['car_center_x']}", flush=True)
     except Exception as e:
         print(f"[ERROR] Failed to load calibration matrix: {e}", flush=True)
-
-if os.path.exists('models/hood_line.json'):
-    try:
-        with open('models/hood_line.json', 'r') as f:
-            hood_data = json.load(f)
-            state["hood_y_detected"] = hood_data["hood_y"]
-            state["hood_detection_done"] = True
-            print(f"[INFO] Loaded hood line from cache: y={state['hood_y_detected']}", flush=True)
-    except Exception as e:
-        print(f"[ERROR] Failed to load hood line: {e}", flush=True)
 
 video_writer = None
 
@@ -214,64 +201,6 @@ def smooth_scalar(val, history, max_history=5):
         history.pop(0)
     return np.mean(history)
 
-def detect_hood_from_frame(frame):
-    """
-    Detect the hood boundary by color-matching from the bottom of the frame upward.
-    
-    The bottom rows are always hood/dash. For each column in the center strip,
-    we scan upward until the color clearly differs from the bottom reference.
-    This finds the hood's upper edge — faint reflections above the hood are
-    never reached because we stop at the first strong color transition.
-    
-    Returns the y-coordinate of the hood line, or None if detection fails.
-    """
-    h, w = frame.shape[:2]
-    
-    # Work in grayscale
-    if len(frame.shape) == 3:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    else:
-        gray = frame.astype(np.float32)
-    
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
-    
-    # The bottom 8 rows are guaranteed hood — use as per-column color reference
-    hood_ref = np.mean(gray[h-8:h, :], axis=0)  # shape [w]
-    
-    # Adaptive threshold: must exceed hood's own variance by a clear margin
-    hood_std = np.mean(np.std(gray[h-8:h, :], axis=0))
-    threshold = max(hood_std * 4, 25)
-    
-    # Per-pixel difference from that column's hood reference
-    diff = np.abs(gray - hood_ref[np.newaxis, :])
-    
-    # Only scan the center 50% of frame width (avoid side mirrors, edges)
-    center_l = w // 4
-    center_r = 3 * w // 4
-    
-    boundaries = []
-    for x in range(center_l, center_r, 2):  # Every other column for speed
-        consecutive = 0
-        for y in range(h - 9, int(h * 0.3), -1):
-            if diff[y, x] > threshold:
-                consecutive += 1
-                if consecutive >= 3:  # Need 3+ consecutive non-hood pixels
-                    boundaries.append(y + consecutive)
-                    break
-            else:
-                consecutive = 0
-    
-    if len(boundaries) < 20:
-        return None
-    
-    hood_y = int(np.median(boundaries))
-    
-    # Sanity: hood must be in the bottom half of the frame
-    if hood_y < h // 2:
-        return None
-    
-    return hood_y
-
 def inference_loop():
     global latest_web_frame, raw_frame_buffer, state
     
@@ -347,11 +276,6 @@ def inference_loop():
                     # Draw box
                     cv2.rectangle(im_infer, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
                     
-                    # Ignore the ego-vehicle hood/dash
-                    yolo_hood_y = state["hood_y_detected"] if state["hood_y_detected"] is not None else INFER_HEIGHT - 20
-                    if y2 > yolo_hood_y:
-                        continue
-                        
                     # FCW Logic: If vehicle is in the center lane and box width is very large (close)
                     current_center_x = state.get("car_center_x", INFER_WIDTH // 2)
                     center_lane_min = current_center_x - (INFER_WIDTH // 6)
@@ -362,30 +286,8 @@ def inference_loop():
                             cv2.rectangle(im_infer, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 4)
                             cv2.putText(im_infer, "TOO CLOSE!", (int(x1), int(y1)-10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
 
-            # --- Hood Detection (first 15 frames, bottom-up color scan) ---
-            if not state["hood_detection_done"]:
-                detected_y = detect_hood_from_frame(im_infer)
-                if detected_y is not None:
-                    state["hood_detection_frames"].append(detected_y)
-                
-                if len(state["hood_detection_frames"]) >= 15:
-                    hood_y_final = int(np.median(state["hood_detection_frames"]))
-                    state["hood_y_detected"] = hood_y_final
-                    state["hood_detection_done"] = True
-                    
-                    # Persist to disk
-                    os.makedirs('models', exist_ok=True)
-                    with open('models/hood_line.json', 'w') as f:
-                        json.dump({"hood_y": hood_y_final}, f)
-                    print(f"[INFO] Hood line detected (color scan) and saved: y={hood_y_final} (of {INFER_HEIGHT})", flush=True)
-
             # --- 2. TwinLiteNet Drivable Area & Lane Departure Warning ---
             da_mask, ll_mask = twinlite_model.detect(im_infer)
-            
-            # Mask out everything below the detected hood line
-            if state["hood_y_detected"] is not None and da_mask is not None and ll_mask is not None:
-                da_mask[state["hood_y_detected"]:, :] = 0
-                ll_mask[state["hood_y_detected"]:, :] = 0
             
             if ll_mask is not None and da_mask is not None:
                 # New approach: Segment drivable area into lanes using lane lines as dividers
