@@ -169,13 +169,17 @@ def capture_loop():
 
 
 # --- Thread 2: AI Inference and Web Encoding ---
-def smooth_spline(poly_coeffs, history, max_history=5):
-    if poly_coeffs is None:
+import warnings
+
+def smooth_path(path, history, max_history=10):
+    if path is None:
         return None
-    history.append(poly_coeffs)
+    history.append(path)
     if len(history) > max_history:
         history.pop(0)
-    return np.mean(history, axis=0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        return np.nanmean(history, axis=0)
 
 def smooth_scalar(val, history, max_history=5):
     if val is None:
@@ -395,26 +399,28 @@ def inference_loop():
                     horizon_y = 180
                     hood_y = h - 20
                     
-                raw_pl, raw_min_yl, raw_max_yl = None, None, None
-                if len(l_x) >= 3:
-                    raw_pl = np.polyfit(l_y, l_x, 2)
-                    raw_min_yl = min(l_y)
-                    raw_max_yl = max(l_y)
+                l_path = np.full(h, np.nan)
+                if len(l_x) >= 2:
+                    valid_y = np.arange(min(l_y), max(l_y) + 1)
+                    l_path[valid_y] = np.interp(valid_y, l_y[::-1], l_x[::-1])
                     
-                raw_pr, raw_min_yr, raw_max_yr = None, None, None
-                if len(r_x) >= 3:
-                    raw_pr = np.polyfit(r_y, r_x, 2)
-                    raw_min_yr = min(r_y)
-                    raw_max_yr = max(r_y)
+                r_path = np.full(h, np.nan)
+                if len(r_x) >= 2:
+                    valid_y = np.arange(min(r_y), max(r_y) + 1)
+                    r_path[valid_y] = np.interp(valid_y, r_y[::-1], r_x[::-1])
                     
-                pl = smooth_spline(raw_pl, state["left_poly_history"])
-                min_yl = smooth_scalar(raw_min_yl, state["left_miny_history"])
-                max_yl = smooth_scalar(raw_max_yl, state["left_maxy_history"])
-                pr = smooth_spline(raw_pr, state["right_poly_history"])
-                min_yr = smooth_scalar(raw_min_yr, state["right_miny_history"])
-                max_yr = smooth_scalar(raw_max_yr, state["right_maxy_history"])
+                smoothed_l = smooth_path(l_path, state["left_poly_history"])
+                smoothed_r = smooth_path(r_path, state["right_poly_history"])
                 
-                if pl is not None or pr is not None:
+                if smoothed_l is not None or smoothed_r is not None:
+                    valid_l = ~np.isnan(smoothed_l) if smoothed_l is not None else np.zeros(h, dtype=bool)
+                    if np.any(valid_l):
+                        smoothed_l[valid_l] = gaussian_filter1d(smoothed_l[valid_l], sigma=5)
+                        
+                    valid_r = ~np.isnan(smoothed_r) if smoothed_r is not None else np.zeros(h, dtype=bool)
+                    if np.any(valid_r):
+                        smoothed_r[valid_r] = gaussian_filter1d(smoothed_r[valid_r], sigma=5)
+                        
                     vp_x = w // 2
                     vp_y = 180
                     if state["calibration"] is not None:
@@ -424,23 +430,28 @@ def inference_loop():
                     lane_bottom_y = hood_y
                     
                     def get_ideal_width(y):
-                        # Pinhole perspective geometric taper (max 400px at bottom, 0 at vp)
+                        # Pinhole perspective geometric taper
                         return 400 * (y - vp_y) / (h - vp_y)
                         
-                    def project_line(poly, min_y, max_y):
-                        min_y = int(max(min_y, horizon_y))
-                        max_y = int(min(max_y, hood_y))
+                    def project_path(path_arr, min_bound, max_bound):
+                        valid_mask = ~np.isnan(path_arr)
+                        if not np.any(valid_mask):
+                            return np.array([]), np.array([])
+                            
+                        y_indices = np.where(valid_mask)[0]
+                        min_y = max(np.min(y_indices), min_bound)
+                        max_y = min(np.max(y_indices), max_bound)
+                        
                         if min_y > max_y:
                             return np.array([]), np.array([])
                             
-                        # Evaluate strictly bounded polynomial
                         poly_y = np.arange(min_y, max_y + 1)
-                        poly_x = poly[0]*poly_y**2 + poly[1]*poly_y + poly[2]
+                        poly_x = path_arr[poly_y]
                         
                         # Top perspective projection to horizon
                         y0 = min_y
                         x0 = poly_x[0]
-                        top_y = np.arange(horizon_y, min_y)
+                        top_y = np.arange(min_bound, min_y)
                         if len(top_y) > 0:
                             if y0 != vp_y:
                                 top_x = vp_x + (x0 - vp_x) * (top_y - vp_y) / (y0 - vp_y)
@@ -452,7 +463,7 @@ def inference_loop():
                         # Bottom perspective projection to hood
                         y1 = max_y
                         x1 = poly_x[-1]
-                        bot_y = np.arange(max_y + 1, hood_y + 1)
+                        bot_y = np.arange(max_y + 1, max_bound + 1)
                         if len(bot_y) > 0:
                             if y1 != vp_y:
                                 bot_x = vp_x + (x1 - vp_x) * (bot_y - vp_y) / (y1 - vp_y)
@@ -465,23 +476,28 @@ def inference_loop():
                         final_y = np.concatenate([top_y, poly_y, bot_y])
                         return final_x, final_y
                         
-                    if pl is not None and pr is not None:
-                        left_fitx, ploty_l = project_line(pl, min_yl, max_yl)
-                        right_fitx, ploty_r = project_line(pr, min_yr, max_yr)
+                    has_l = np.any(valid_l)
+                    has_r = np.any(valid_r)
+                    
+                    if has_l and has_r:
+                        left_fitx, ploty_l = project_path(smoothed_l, horizon_y, hood_y)
+                        right_fitx, ploty_r = project_path(smoothed_r, horizon_y, hood_y)
                         
-                    elif pl is not None:
-                        left_fitx, ploty_l = project_line(pl, min_yl, max_yl)
+                    elif has_l:
+                        left_fitx, ploty_l = project_path(smoothed_l, horizon_y, hood_y)
                         ploty_r = ploty_l
                         right_fitx = left_fitx + get_ideal_width(ploty_r)
                         
-                    else:
-                        right_fitx, ploty_r = project_line(pr, min_yr, max_yr)
+                    elif has_r:
+                        right_fitx, ploty_r = project_path(smoothed_r, horizon_y, hood_y)
                         ploty_l = ploty_r
                         left_fitx = right_fitx - get_ideal_width(ploty_l)
                         
-                    # Only proceed if we generated valid geometry
+                    else:
+                        left_fitx = np.array([])
+                        right_fitx = np.array([])
+                        
                     if len(left_fitx) > 0 and len(right_fitx) > 0:
-                        # Geometry construction
                         left_pts = np.vstack([left_fitx, ploty_l]).T
                         right_pts = np.vstack([right_fitx, ploty_r]).T
                         
