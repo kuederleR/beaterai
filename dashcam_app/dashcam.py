@@ -340,6 +340,78 @@ def extract_window_points(ll_mask, car_center_x, prev_l_x=None, prev_r_x=None):
                 
     return left_x_pts, left_y_pts, right_x_pts, right_y_pts
 
+def find_lane_boundaries_radial(da_mask, ll_mask):
+    """
+    Find left and right lane line boundaries by tracing rays radiating outward
+    from the bottom center of the drivable area.
+    """
+    h, w = da_mask.shape
+    
+    # Start point (cx, cy): bottom center of drivable area
+    da_nonzero = da_mask.nonzero()
+    if len(da_nonzero[0]) == 0:
+        return [], []
+        
+    cy = int(np.max(da_nonzero[0])) # Bottom of drivable area
+    # Center of the drivable area at the bottom rows
+    bottom_y_min = max(0, cy - 20)
+    bottom_da_pts = da_mask[bottom_y_min:cy + 1, :].nonzero()
+    if len(bottom_da_pts[1]) > 0:
+        cx = int(np.median(bottom_da_pts[1]))
+    else:
+        cx = w // 2
+        
+    left_points = []
+    right_points = []
+    
+    max_dist = int(np.sqrt(h**2 + w**2))
+    
+    # Trace left rays (95 to 195 degrees, every 3 degrees)
+    for angle_deg in range(95, 195, 3):
+        theta = np.deg2rad(angle_deg)
+        cos_t = np.cos(theta)
+        sin_t = np.sin(theta)
+        
+        for r in range(5, max_dist, 3):
+            px = int(cx + r * cos_t)
+            py = int(cy - r * sin_t) # y-axis goes down in image coordinates
+            
+            if px < 0 or px >= w or py < 0 or py >= h:
+                break
+                
+            # Stop if we exit the drivable area
+            if da_mask[py, px] == 0:
+                break
+                
+            # If we hit a lane line pixel, record and stop
+            if ll_mask[py, px] > 0:
+                left_points.append((px, py))
+                break
+                
+    # Trace right rays (85 to -15 degrees, every 3 degrees)
+    for angle_deg in range(85, -15, -3):
+        theta = np.deg2rad(angle_deg)
+        cos_t = np.cos(theta)
+        sin_t = np.sin(theta)
+        
+        for r in range(5, max_dist, 3):
+            px = int(cx + r * cos_t)
+            py = int(cy - r * sin_t)
+            
+            if px < 0 or px >= w or py < 0 or py >= h:
+                break
+                
+            # Stop if we exit the drivable area
+            if da_mask[py, px] == 0:
+                break
+                
+            # If we hit a lane line pixel, record and stop
+            if ll_mask[py, px] > 0:
+                right_points.append((px, py))
+                break
+                
+    return left_points, right_points
+
 def inference_loop():
     global latest_web_frame, raw_frame_buffer, state
     
