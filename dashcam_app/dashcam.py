@@ -195,15 +195,25 @@ def extract_window_points(ll_mask, car_center_x):
     nonzeroy = np.array(nonzero[0])
     nonzerox = np.array(nonzero[1])
     
+    if len(nonzeroy) == 0:
+        return [], [], [], []
+        
+    start_y = np.max(nonzeroy)
+    search_height = start_y - 150
+    if search_height < 50:
+        return [], [], [], []
+        
+    window_height = int(search_height / nwindows)
+    
     leftx_current = None
     rightx_current = None
     
-    bottom_band = ll_mask[h - 40:h, :]
+    bottom_band = ll_mask[start_y - 40:start_y + 1, :]
     histogram = np.sum(bottom_band, axis=0)
     
-    if np.max(histogram[:int(car_center_x)]) > 5:
+    if np.max(histogram[:int(car_center_x)]) > 0:
         leftx_current = np.argmax(histogram[:int(car_center_x)])
-    if np.max(histogram[int(car_center_x):]) > 5:
+    if np.max(histogram[int(car_center_x):]) > 0:
         rightx_current = np.argmax(histogram[int(car_center_x):]) + int(car_center_x)
         
     left_x_pts = []
@@ -212,8 +222,8 @@ def extract_window_points(ll_mask, car_center_x):
     right_y_pts = []
     
     for window in range(nwindows):
-        win_y_low = h - (window + 1) * window_height
-        win_y_high = h - window * window_height
+        win_y_low = start_y - (window + 1) * window_height
+        win_y_high = start_y - window * window_height
         win_y_center = (win_y_low + win_y_high) // 2
         
         if leftx_current is not None:
