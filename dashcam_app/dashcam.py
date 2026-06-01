@@ -392,29 +392,18 @@ def inference_loop():
                 car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
                 h_im, w_im = im_infer.shape[:2]
                 
-                # Step 1: Extend/interpolate lane lines to fully segment the drivable area
-                ll_extended = ll_mask.copy()
+                # Step 1: Connect broken lane line segments using morphological operations
+                # Use vertical kernel to connect gaps in lane lines
+                kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
+                ll_closed = cv2.morphologyEx(ll_mask, cv2.MORPH_CLOSE, kernel_vertical)
                 
-                # For each column, if there are lane line pixels, extend them through the drivable area
-                for x in range(w_im):
-                    col_ll = ll_mask[:, x]
-                    col_da = da_mask[:, x]
-                    
-                    if np.any(col_ll > 0) and np.any(col_da > 0):
-                        # Find lane line pixels in this column
-                        ll_ys = np.where(col_ll > 0)[0]
-                        da_ys = np.where(col_da > 0)[0]
-                        
-                        if len(ll_ys) > 0 and len(da_ys) > 0:
-                            # Extend lane line through the full drivable area in this column
-                            da_min = np.min(da_ys)
-                            da_max = np.max(da_ys)
-                            ll_extended[da_min:da_max+1, x] = 255
+                # Dilate slightly to make lane lines act as better dividers
+                kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+                ll_dividers = cv2.dilate(ll_closed, kernel_dilate, iterations=1)
                 
-                # Step 2: Create segmentation mask by dividing drivable area with lane lines
-                # Start with drivable area, then subtract lane lines to create boundaries
+                # Step 2: Create segmentation by subtracting lane line dividers from drivable area
                 segmentation_base = da_mask.copy().astype(np.uint8)
-                segmentation_base[ll_extended > 0] = 0  # Lane lines become boundaries
+                segmentation_base[ll_dividers > 0] = 0  # Lane lines become boundaries
                 
                 # Step 3: Label connected regions (each lane segment gets a unique ID)
                 num_labels, labels = cv2.connectedComponents(segmentation_base)
@@ -424,16 +413,15 @@ def inference_loop():
                 car_label = labels[car_bottom_y, car_center_x] if labels[car_bottom_y, car_center_x] > 0 else 0
                 
                 # Step 5: Color each segment differently
-                # Create a colored overlay
                 overlay = np.zeros_like(im_infer)
                 
                 # Define colors for different segments
                 colors = [
-                    (0, 255, 0),      # Green - current lane
-                    (0, 180, 255),    # Orange - adjacent lanes
-                    (180, 180, 0),    # Cyan - other lanes
-                    (180, 0, 180),    # Magenta
-                    (255, 180, 0),    # Light blue
+                    (0, 200, 255),    # Orange - adjacent lanes
+                    (200, 200, 0),    # Cyan - other lanes  
+                    (200, 0, 200),    # Magenta
+                    (255, 200, 0),    # Light blue
+                    (0, 255, 200),    # Yellow-green
                 ]
                 
                 # Color each segment
@@ -444,7 +432,7 @@ def inference_loop():
                             # Current lane gets bright green
                             overlay[mask] = (0, 255, 0)
                         else:
-                            # Other lanes get different colors
+                            # Other lanes get different colors based on their position
                             color_idx = (label_id - 1) % len(colors)
                             overlay[mask] = colors[color_idx]
                 
@@ -457,12 +445,15 @@ def inference_loop():
                         overlay[da_indices], alpha, 0
                     )
                 
-                # Step 6: Draw lane line boundaries in yellow (for visibility)
+                # Step 6: Draw original lane lines in yellow (for visibility)
                 ll_indices = ll_mask > 0
                 if np.any(ll_indices):
                     im_infer[ll_indices] = (0, 255, 255)
                 
                 # Step 7: Find and draw the boundaries of the current lane in blue
+                left_poly = None
+                right_poly = None
+                
                 if car_label > 0:
                     current_lane_mask = (labels == car_label).astype(np.uint8) * 255
                     
@@ -489,10 +480,7 @@ def inference_loop():
                                     right_edge_x.append(right_boundary)
                                     right_edge_y.append(y)
                     
-                    # Fit and draw smooth polynomials for lane boundaries
-                    left_poly = None
-                    right_poly = None
-                    
+                    # Fit smooth polynomials for lane boundaries
                     if len(left_edge_x) >= 30:
                         left_edge_x = np.array(left_edge_x)
                         left_edge_y = np.array(left_edge_y)
