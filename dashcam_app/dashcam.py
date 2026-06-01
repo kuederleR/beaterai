@@ -472,7 +472,7 @@ def inference_loop():
                     state["calibration_center_frames_left"] = 150
                     state["calib_center_history"] = []
                     
-                l_x, l_y, r_x, r_y = extract_window_points(ll_mask, car_center_x)
+                l_x, l_y, r_x, r_y = extract_window_points(ll_mask, w // 2)
                 
                 # --- Lens Calibration (Stable VP) ---
                 if state["calibration_frames_left"] > 0:
