@@ -82,8 +82,7 @@ state = {
     "calib_right_history": [],
     "calibration": None,
     "hood_y_detected": None,
-    "hood_da_accumulator": None,
-    "hood_da_frame_count": 0,
+    "hood_detection_frames": [],
     "hood_detection_done": False
 }
 
@@ -206,47 +205,59 @@ def smooth_scalar(val, history, max_history=5):
         history.pop(0)
     return np.mean(history)
 
-def detect_hood_from_da_accumulator(da_accumulator, frame_count):
+def detect_hood_from_frame(frame):
     """
-    Detect the hood line from temporally-averaged drivable area segmentation masks.
+    Detect the hood boundary by color-matching from the bottom of the frame upward.
     
-    By averaging TwinLiteNet's DA mask over many frames, road pixels converge to ~1.0
-    and hood pixels converge to ~0.0. We find the boundary between them in the bottom
-    half of the frame to locate the hood line.
+    The bottom rows are always hood/dash. For each column in the center strip,
+    we scan upward until the color clearly differs from the bottom reference.
+    This finds the hood's upper edge — faint reflections above the hood are
+    never reached because we stop at the first strong color transition.
     
     Returns the y-coordinate of the hood line, or None if detection fails.
     """
-    h, w = da_accumulator.shape
+    h, w = frame.shape[:2]
     
-    # Compute the probability that each pixel is drivable
-    prob_map = da_accumulator / frame_count
+    # Work in grayscale
+    if len(frame.shape) == 3:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    else:
+        gray = frame.astype(np.float32)
     
-    # Threshold: pixels drivable in >50% of frames are "road"
-    stable_road = (prob_map > 0.5).astype(np.uint8)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
     
-    # Only look at the center 50% of the frame width to avoid edge artifacts
-    # (parked cars, guardrails, etc.)
-    center_left = w // 4
-    center_right = 3 * w // 4
-    center_strip = stable_road[:, center_left:center_right]
+    # The bottom 8 rows are guaranteed hood — use as per-column color reference
+    hood_ref = np.mean(gray[h-8:h, :], axis=0)  # shape [w]
     
-    # For each column in the center strip, find the lowest row classified as road
-    col_max_road_y = np.full(center_strip.shape[1], 0, dtype=np.int32)
-    for x in range(center_strip.shape[1]):
-        road_rows = np.where(center_strip[:, x] > 0)[0]
-        if len(road_rows) > 0:
-            col_max_road_y[x] = np.max(road_rows)
+    # Adaptive threshold: must exceed hood's own variance by a clear margin
+    hood_std = np.mean(np.std(gray[h-8:h, :], axis=0))
+    threshold = max(hood_std * 4, 25)
     
-    # Filter out columns with no road detected
-    valid = col_max_road_y > 0
-    if np.sum(valid) < center_strip.shape[1] * 0.3:
-        # Less than 30% of center columns have road — detection unreliable
+    # Per-pixel difference from that column's hood reference
+    diff = np.abs(gray - hood_ref[np.newaxis, :])
+    
+    # Only scan the center 50% of frame width (avoid side mirrors, edges)
+    center_l = w // 4
+    center_r = 3 * w // 4
+    
+    boundaries = []
+    for x in range(center_l, center_r, 2):  # Every other column for speed
+        consecutive = 0
+        for y in range(h - 9, int(h * 0.3), -1):
+            if diff[y, x] > threshold:
+                consecutive += 1
+                if consecutive >= 3:  # Need 3+ consecutive non-hood pixels
+                    boundaries.append(y + consecutive)
+                    break
+            else:
+                consecutive = 0
+    
+    if len(boundaries) < 20:
         return None
     
-    # Take the median of valid columns as the hood line
-    hood_y = int(np.median(col_max_road_y[valid]))
+    hood_y = int(np.median(boundaries))
     
-    # Sanity check: hood should be in the bottom half of the frame
+    # Sanity: hood must be in the bottom half of the frame
     if hood_y < h // 2:
         return None
     
@@ -411,40 +422,25 @@ def inference_loop():
                             cv2.rectangle(im_infer, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 4)
                             cv2.putText(im_infer, "TOO CLOSE!", (int(x1), int(y1)-10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
 
+            # --- Hood Detection (first 15 frames, bottom-up color scan) ---
+            if not state["hood_detection_done"]:
+                detected_y = detect_hood_from_frame(im_infer)
+                if detected_y is not None:
+                    state["hood_detection_frames"].append(detected_y)
+                
+                if len(state["hood_detection_frames"]) >= 15:
+                    hood_y_final = int(np.median(state["hood_detection_frames"]))
+                    state["hood_y_detected"] = hood_y_final
+                    state["hood_detection_done"] = True
+                    
+                    # Persist to disk
+                    os.makedirs('models', exist_ok=True)
+                    with open('models/hood_line.json', 'w') as f:
+                        json.dump({"hood_y": hood_y_final}, f)
+                    print(f"[INFO] Hood line detected (color scan) and saved: y={hood_y_final} (of {INFER_HEIGHT})", flush=True)
+
             # --- 2. TwinLiteNet Drivable Area & Lane Departure Warning ---
             da_mask, ll_mask = twinlite_model.detect(im_infer)
-            
-            # --- Hood Detection via DA mask accumulation (first 30 frames) ---
-            if not state["hood_detection_done"] and da_mask is not None:
-                if state["hood_da_accumulator"] is None:
-                    state["hood_da_accumulator"] = np.zeros_like(da_mask, dtype=np.float32)
-                
-                state["hood_da_accumulator"] += da_mask.astype(np.float32)
-                state["hood_da_frame_count"] += 1
-                
-                if state["hood_da_frame_count"] >= 30:
-                    hood_y_final = detect_hood_from_da_accumulator(
-                        state["hood_da_accumulator"], state["hood_da_frame_count"]
-                    )
-                    
-                    if hood_y_final is not None:
-                        state["hood_y_detected"] = hood_y_final
-                        state["hood_detection_done"] = True
-                        
-                        # Persist to disk
-                        os.makedirs('models', exist_ok=True)
-                        with open('models/hood_line.json', 'w') as f:
-                            json.dump({"hood_y": hood_y_final}, f)
-                        print(f"[INFO] Hood line detected via DA segmentation and saved: y={hood_y_final} (of {INFER_HEIGHT})", flush=True)
-                    else:
-                        # Reset and try again with more frames
-                        print("[WARNING] Hood detection inconclusive, collecting more frames...", flush=True)
-                        state["hood_da_accumulator"] = None
-                        state["hood_da_frame_count"] = 0
-                    
-                    # Free the accumulator memory once done
-                    if state["hood_detection_done"]:
-                        state["hood_da_accumulator"] = None
             
             # Mask out everything below the detected hood line
             if state["hood_y_detected"] is not None and da_mask is not None and ll_mask is not None:
