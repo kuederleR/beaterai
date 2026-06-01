@@ -224,14 +224,25 @@ def extract_lane_direct(ll_mask, car_center_x, calibrated_width=None):
             left_x[i] = right_x[i] - calibrated_width[y]
             center = right_x[i] - calibrated_width[y] / 2.0
             
-    # Remove NaN values (rows where both lines were missing)
+    # Remove NaN values by interpolating across the gaps
     valid_idx = ~np.isnan(left_x) & ~np.isnan(right_x)
     if not np.any(valid_idx):
         return None, None, None, start_y
         
-    valid_y = y_range[valid_idx]
-    valid_left = left_x[valid_idx]
-    valid_right = right_x[valid_idx]
+    if not np.all(valid_idx):
+        # np.interp requires monotonically increasing x-coordinates
+        y_inc = y_range[::-1]
+        valid_y_inc = y_range[valid_idx][::-1]
+        
+        left_x_inc = np.interp(y_inc, valid_y_inc, left_x[valid_idx][::-1])
+        right_x_inc = np.interp(y_inc, valid_y_inc, right_x[valid_idx][::-1])
+        
+        left_x = left_x_inc[::-1]
+        right_x = right_x_inc[::-1]
+        
+    valid_y = y_range
+    valid_left = left_x
+    valid_right = right_x
     
     # Smooth the extracted path to remove pixel jitters
     if len(valid_y) > 5:
