@@ -70,6 +70,8 @@ state = {
     "twinlite_device": "Unknown",
     "left_poly_history": [],
     "right_poly_history": [],
+    "left_miny_history": [],
+    "right_miny_history": [],
     "calibrate_requested": False,
     "calibration_frames_left": 0,
     "calib_left_history": [],
@@ -81,8 +83,7 @@ if os.path.exists('models/calibration.json'):
     try:
         with open('models/calibration.json', 'r') as f:
             state["calibration"] = json.load(f)
-            state["calibration"]["calibrated_width"] = np.array(state["calibration"]["calibrated_width"], dtype=np.float32)
-            print("[INFO] Successfully loaded Perspective Taper Calibration.", flush=True)
+            print("[INFO] Successfully loaded Stable VP Calibration.", flush=True)
     except Exception as e:
         print(f"[ERROR] Failed to load calibration matrix: {e}", flush=True)
 video_writer = None
@@ -179,78 +180,62 @@ def smooth_spline(fitx, history, max_history=5):
         
     return np.mean(history, axis=0)
 
-def extract_lane_direct(ll_mask, car_center_x, calibrated_width=None):
+def extract_window_points(ll_mask, car_center_x):
     h, w = ll_mask.shape
     
-    # We trace from the hood up to the horizon
-    start_y = h - 20
-    end_y = 150
+    nwindows = 15
+    window_height = int((h*0.4) / nwindows)
+    margin = 40
+    minpix = 15
     
-    y_range = np.arange(start_y, end_y - 1, -1)
-    left_x = np.full_like(y_range, np.nan, dtype=np.float32)
-    right_x = np.full_like(y_range, np.nan, dtype=np.float32)
+    nonzero = ll_mask.nonzero()
+    nonzeroy = np.array(nonzero[0])
+    nonzerox = np.array(nonzero[1])
     
-    center = car_center_x
+    leftx_current = None
+    rightx_current = None
     
-    for i, y in enumerate(y_range):
-        row = ll_mask[y, :]
-        
-        # Search outwards from the current center
-        left_half = row[:int(center)]
-        right_half = row[int(center):]
-        
-        l_idx = np.where(left_half > 0)[0]
-        r_idx = np.where(right_half > 0)[0]
-        
-        found_l = False
-        found_r = False
-        
-        if len(l_idx) > 0:
-            left_x[i] = l_idx[-1]
-            found_l = True
-            
-        if len(r_idx) > 0:
-            right_x[i] = r_idx[0] + int(center)
-            found_r = True
-            
-        if found_l and found_r:
-            center = (left_x[i] + right_x[i]) / 2.0
-        elif found_l and calibrated_width is not None and y < len(calibrated_width):
-            # Ghost right
-            right_x[i] = left_x[i] + calibrated_width[y]
-            center = left_x[i] + calibrated_width[y] / 2.0
-        elif found_r and calibrated_width is not None and y < len(calibrated_width):
-            # Ghost left
-            left_x[i] = right_x[i] - calibrated_width[y]
-            center = right_x[i] - calibrated_width[y] / 2.0
-            
-    # Remove NaN values by interpolating across the gaps
-    valid_idx = ~np.isnan(left_x) & ~np.isnan(right_x)
-    if not np.any(valid_idx):
-        return None, None, None, start_y
-        
-    if not np.all(valid_idx):
-        # np.interp requires monotonically increasing x-coordinates
-        y_inc = y_range[::-1]
-        valid_y_inc = y_range[valid_idx][::-1]
-        
-        left_x_inc = np.interp(y_inc, valid_y_inc, left_x[valid_idx][::-1])
-        right_x_inc = np.interp(y_inc, valid_y_inc, right_x[valid_idx][::-1])
-        
-        left_x = left_x_inc[::-1]
-        right_x = right_x_inc[::-1]
-        
-    valid_y = y_range
-    valid_left = left_x
-    valid_right = right_x
+    bottom_band = ll_mask[h - 40:h, :]
+    histogram = np.sum(bottom_band, axis=0)
     
-    # Smooth the extracted path to remove pixel jitters
-    if len(valid_y) > 5:
-        from scipy.ndimage import gaussian_filter1d
-        valid_left = gaussian_filter1d(valid_left, sigma=3.0)
-        valid_right = gaussian_filter1d(valid_right, sigma=3.0)
+    if np.max(histogram[:int(car_center_x)]) > 5:
+        leftx_current = np.argmax(histogram[:int(car_center_x)])
+    if np.max(histogram[int(car_center_x):]) > 5:
+        rightx_current = np.argmax(histogram[int(car_center_x):]) + int(car_center_x)
         
-    return valid_left, valid_right, valid_y, start_y
+    left_x_pts = []
+    left_y_pts = []
+    right_x_pts = []
+    right_y_pts = []
+    
+    for window in range(nwindows):
+        win_y_low = h - (window + 1) * window_height
+        win_y_high = h - window * window_height
+        win_y_center = (win_y_low + win_y_high) // 2
+        
+        if leftx_current is not None:
+            win_xleft_low, win_xleft_high = leftx_current - margin, leftx_current + margin
+            good_left = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & 
+                         (nonzerox >= win_xleft_low) & (nonzerox < win_xleft_high)).nonzero()[0]
+            if len(good_left) > minpix:
+                leftx_current = int(np.mean(nonzerox[good_left]))
+                left_x_pts.append(leftx_current)
+                left_y_pts.append(win_y_center)
+            else:
+                leftx_current = None # Stop tracking to prevent jumping
+                
+        if rightx_current is not None:
+            win_xright_low, win_xright_high = rightx_current - margin, rightx_current + margin
+            good_right = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & 
+                          (nonzerox >= win_xright_low) & (nonzerox < win_xright_high)).nonzero()[0]
+            if len(good_right) > minpix:
+                rightx_current = int(np.mean(nonzerox[good_right]))
+                right_x_pts.append(rightx_current)
+                right_y_pts.append(win_y_center)
+            else:
+                rightx_current = None
+                
+    return left_x_pts, left_y_pts, right_x_pts, right_y_pts
 
 def inference_loop():
     global latest_web_frame, raw_frame_buffer, state
@@ -346,87 +331,103 @@ def inference_loop():
                 car_center_x = w // 2
                 
                 if state.get("calibrate_requested"):
-                    print("[INFO] Starting Lens Perspective Calibration...", flush=True)
+                    print("[INFO] Starting Stable VP Calibration...", flush=True)
                     state["calibrate_requested"] = False
                     state["calibration_frames_left"] = 30
                     state["calib_left_history"] = []
                     state["calib_right_history"] = []
                     
+                l_x, l_y, r_x, r_y = extract_window_points(ll_mask, car_center_x)
+                
                 if state["calibration_frames_left"] > 0:
-                    l_x, r_x, v_y, _ = extract_lane_direct(ll_mask, car_center_x, None)
-                    if l_x is not None and len(v_y) > 50: # Ensure we got a good, long highway read
-                        # Normalize to full height array
-                        full_l = np.full(h, np.nan)
-                        full_r = np.full(h, np.nan)
-                        full_l[v_y] = l_x
-                        full_r[v_y] = r_x
-                        state["calib_left_history"].append(full_l)
-                        state["calib_right_history"].append(full_r)
+                    if len(l_x) >= 6:
+                        # Top half of line is least distorted
+                        half = len(l_x) // 2
+                        p_l = np.polyfit(l_y[half:], l_x[half:], 1)
+                        state["calib_left_history"].append(p_l)
+                    if len(r_x) >= 6:
+                        half = len(r_x) // 2
+                        p_r = np.polyfit(r_y[half:], r_x[half:], 1)
+                        state["calib_right_history"].append(p_r)
                         
                     state["calibration_frames_left"] -= 1
                     
                     if state["calibration_frames_left"] == 0:
-                        if len(state["calib_left_history"]) >= 15:
-                            # We have enough frames! Calculate the perfect perspective taper
-                            all_l = np.nanmedian(state["calib_left_history"], axis=0)
-                            all_r = np.nanmedian(state["calib_right_history"], axis=0)
+                        if len(state["calib_left_history"]) >= 15 and len(state["calib_right_history"]) >= 15:
+                            avg_pl = np.mean(state["calib_left_history"], axis=0)
+                            avg_pr = np.mean(state["calib_right_history"], axis=0)
                             
-                            valid_rows = ~np.isnan(all_l) & ~np.isnan(all_r)
-                            y_vals = np.arange(h)[valid_rows]
-                            widths = all_r[valid_rows] - all_l[valid_rows]
+                            m1, b1 = avg_pl
+                            m2, b2 = avg_pr
                             
-                            # Fit a parabola to the width to perfectly capture barrel distortion taper
-                            w_poly = np.polyfit(y_vals, widths, 2)
+                            vp_y = (b2 - b1) / (m1 - m2)
+                            vp_x = m1 * vp_y + b1
                             
-                            calibrated_width = np.zeros(h, dtype=np.float32)
-                            for y in range(h):
-                                w = w_poly[0]*y**2 + w_poly[1]*y + w_poly[2]
-                                calibrated_width[y] = max(0, w) # Width can't be negative
-                                
-                            # Find Vanishing Point Y (where width approaches 0)
-                            vp_y = h
-                            for y in range(h-1, -1, -1):
-                                if calibrated_width[y] <= 5:
-                                    vp_y = y
-                                    break
-                                    
-                            # Find VP X (center at VP Y)
-                            c_poly = np.polyfit(y_vals, (all_l[valid_rows] + all_r[valid_rows])/2.0, 2)
-                            vp_x = c_poly[0]*vp_y**2 + c_poly[1]*vp_y + c_poly[2]
-                            
-                            # Save calibration
-                            state["calibration"] = {
-                                "calibrated_width": calibrated_width.tolist(),
-                                "vp_x": float(vp_x),
-                                "vp_y": int(vp_y)
-                            }
+                            state["calibration"] = {"vp_x": float(vp_x), "vp_y": int(vp_y)}
                             os.makedirs('models', exist_ok=True)
                             with open('models/calibration.json', 'w') as f:
                                 json.dump(state["calibration"], f)
-                            print(f"[INFO] Lens Calibration Successful! VP: ({vp_x:.1f}, {vp_y})", flush=True)
+                            print(f"[INFO] Stable VP Calibration Successful! VP: ({vp_x:.1f}, {vp_y})", flush=True)
                         else:
-                            print("[ERROR] Lens Calibration Failed: Not enough clean lane lines.", flush=True)
+                            print("[ERROR] Calibration Failed: Not enough clean lane lines.", flush=True)
                             
-                # Normal Inference
-                cw = None
-                if state["calibration"] is not None:
-                    cw = state["calibration"]["calibrated_width"]
+                # --- INFERENCE ---
+                raw_pl, raw_min_yl = None, None
+                if len(l_x) >= 3:
+                    raw_pl = np.polyfit(l_y, l_x, 2)
+                    raw_min_yl = min(l_y)
                     
-                raw_left_fitx, raw_right_fitx, valid_ploty, hood_top_y = extract_lane_direct(ll_mask, car_center_x, cw)
+                raw_pr, raw_min_yr = None, None
+                if len(r_x) >= 3:
+                    raw_pr = np.polyfit(r_y, r_x, 2)
+                    raw_min_yr = min(r_y)
+                    
+                pl = smooth_spline(raw_pl, state["left_poly_history"])
+                min_yl = smooth_scalar(raw_min_yl, state["left_miny_history"])
+                pr = smooth_spline(raw_pr, state["right_poly_history"])
+                min_yr = smooth_scalar(raw_min_yr, state["right_miny_history"])
                 
-                # Apply temporal smoothing to the RAW tracks to completely eliminate frame-to-frame jitter
-                raw_left_fitx = smooth_spline(raw_left_fitx, state["left_poly_history"])
-                raw_right_fitx = smooth_spline(raw_right_fitx, state["right_poly_history"])
-                
-                if raw_left_fitx is not None and raw_right_fitx is not None:
+                if pl is not None or pr is not None:
+                    vp_x = w // 2
+                    vp_y = 180
+                    if state["calibration"] is not None:
+                        vp_x = state["calibration"]["vp_x"]
+                        vp_y = state["calibration"]["vp_y"]
+                        
+                    lane_bottom_y = h - 20
                     
-                    left_fitx = raw_left_fitx
-                    right_fitx = raw_right_fitx
+                    def get_ideal_width(y):
+                        # Pinhole perspective geometric taper (max 400px at bottom, 0 at vp)
+                        return 400 * (y - vp_y) / (h - vp_y)
+                        
+                    if pl is not None and pr is not None:
+                        ploty_l = np.arange(int(min_yl), h)
+                        left_fitx = pl[0]*ploty_l**2 + pl[1]*ploty_l + pl[2]
+                        
+                        ploty_r = np.arange(int(min_yr), h)
+                        right_fitx = pr[0]*ploty_r**2 + pr[1]*ploty_r + pr[2]
+                        
+                    elif pl is not None:
+                        ploty_l = np.arange(int(min_yl), h)
+                        left_fitx = pl[0]*ploty_l**2 + pl[1]*ploty_l + pl[2]
+                        ploty_r = ploty_l
+                        right_fitx = left_fitx + get_ideal_width(ploty_r)
+                        
+                    else:
+                        ploty_r = np.arange(int(min_yr), h)
+                        right_fitx = pr[0]*ploty_r**2 + pr[1]*ploty_r + pr[2]
+                        ploty_l = ploty_r
+                        left_fitx = right_fitx - get_ideal_width(ploty_l)
+                        
+                    # Geometry construction
+                    left_pts = np.vstack([left_fitx, ploty_l]).T
+                    left_pts = np.vstack([[[vp_x, vp_y]], left_pts]) # Add VP to top
                     
-                    # Compute vehicle deviation at the hood line (the closest visible point to the car)
-                    lane_bottom_y = hood_top_y
-                    left_bottom_x = left_fitx[0] # valid_ploty is descending
-                    right_bottom_x = right_fitx[0]
+                    right_pts = np.vstack([right_fitx, ploty_r]).T
+                    right_pts = np.vstack([[[vp_x, vp_y]], right_pts])
+                    
+                    left_bottom_x = left_fitx[-1]
+                    right_bottom_x = right_fitx[-1]
                     
                     lane_width = right_bottom_x - left_bottom_x
                     lane_center_x = (left_bottom_x + right_bottom_x) / 2
@@ -439,6 +440,7 @@ def inference_loop():
                         ratio_left = dist_left / lane_width
                         ratio_right = dist_right / lane_width
                         
+                        ldw_triggered = False
                         if ratio_left < 0.1: left_color, ldw_triggered = (0, 0, 255), True
                         elif ratio_left < 0.25: left_color = (0, 165, 255)
                         else: left_color = (0, 255, 0)
@@ -452,22 +454,6 @@ def inference_loop():
                         elif min_ratio < 0.25: fill_color = (0, 165, 255)
                         else: fill_color = (0, 255, 0)
                             
-                        # Connect the top of the tracked lanes perfectly to the calibrated vanishing point
-                        vp_x = w // 2
-                        vp_y = 180
-                        if state["calibration"] is not None:
-                            vp_x = state["calibration"]["vp_x"]
-                            vp_y = state["calibration"]["vp_y"]
-                            
-                        # Append the VP to the points!
-                        left_pts = np.vstack([left_fitx, valid_ploty]).T
-                        right_pts = np.vstack([right_fitx, valid_ploty]).T
-                        
-                        # Only extend if the neural net didn't already draw up to the horizon
-                        if valid_ploty[-1] > vp_y + 10:
-                            left_pts = np.vstack([left_pts, [vp_x, vp_y]])
-                            right_pts = np.vstack([right_pts, [vp_x, vp_y]])
-                        
                         pts_left = np.array([left_pts]).astype(np.int32)
                         pts_right = np.array([np.flipud(right_pts)]).astype(np.int32)
                         pts = np.hstack((pts_left, pts_right))
