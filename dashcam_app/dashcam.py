@@ -401,79 +401,74 @@ def inference_loop():
                 if np.any(ll_indices):
                     im_infer[ll_indices] = (0, 255, 255)
 
-                # 3. Find current lane boundaries using histogram + proximity selection
+                # 3. Find current lane boundaries by detecting edges of drivable area
+                # This works on both lined and unlined roads
                 car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
                 h_im = im_infer.shape[0]
-                
-                # Combine lane lines with drivable area to filter out distant/irrelevant markings
-                # Only keep yellow pixels that are inside or very close to the drivable area
-                da_dilated = cv2.dilate(da_mask, np.ones((5, 5), np.uint8), iterations=2)
-                relevant_ll = np.bitwise_and(ll_mask, da_dilated)
-                
-                # Get lane line pixel coordinates
-                nonzero = relevant_ll.nonzero()
-                nonzeroy = np.array(nonzero[0])
-                nonzerox = np.array(nonzero[1])
                 
                 left_poly = None
                 right_poly = None
                 
-                if len(nonzeroy) > 0:
-                    # Use bottom 1/3 of image to find lane peaks (most reliable area)
-                    bottom_third_y = int(h_im * 0.67)
-                    bottom_mask = nonzeroy >= bottom_third_y
+                # Process drivable area to find left and right lane boundaries
+                if np.any(da_mask > 0):
+                    # For each row, find the leftmost and rightmost drivable pixels
+                    # Focus on bottom 60% of image (where lane detection matters)
+                    start_y = int(h_im * 0.4)
+                    end_y = h_im
                     
-                    if np.sum(bottom_mask) > 20:
-                        # Create histogram of bottom lane pixels
-                        histogram = np.zeros(INFER_WIDTH, dtype=np.int32)
-                        for x, y in zip(nonzerox[bottom_mask], nonzeroy[bottom_mask]):
-                            histogram[x] += 1
+                    left_edge_x = []
+                    left_edge_y = []
+                    right_edge_x = []
+                    right_edge_y = []
+                    
+                    for y in range(start_y, end_y, 2):  # Sample every 2 rows for speed
+                        row = da_mask[y, :]
+                        if np.any(row > 0):
+                            # Find all drivable pixels in this row
+                            drivable_xs = np.where(row > 0)[0]
+                            
+                            if len(drivable_xs) > 0:
+                                # Split drivable region by car center
+                                left_side = drivable_xs[drivable_xs < car_center_x]
+                                right_side = drivable_xs[drivable_xs >= car_center_x]
+                                
+                                # Left boundary: rightmost point on left side (inner edge)
+                                if len(left_side) > 0:
+                                    left_boundary = np.max(left_side)
+                                    left_edge_x.append(left_boundary)
+                                    left_edge_y.append(y)
+                                
+                                # Right boundary: leftmost point on right side (inner edge)
+                                if len(right_side) > 0:
+                                    right_boundary = np.min(right_side)
+                                    right_edge_x.append(right_boundary)
+                                    right_edge_y.append(y)
+                    
+                    # Fit polynomials to the detected edges
+                    if len(left_edge_x) >= 30:
+                        left_edge_x = np.array(left_edge_x)
+                        left_edge_y = np.array(left_edge_y)
                         
-                        # Find left lane peak (left of car center)
-                        left_half = histogram[:car_center_x]
-                        if np.max(left_half) > 5:
-                            left_peak = np.argmax(left_half)
-                            
-                            # Select pixels within margin of left peak
-                            margin = 80
-                            left_lane_inds = (nonzerox >= left_peak - margin) & \
-                                           (nonzerox <= left_peak + margin) & \
-                                           (nonzerox < car_center_x)
-                            
-                            if np.sum(left_lane_inds) >= 30:
-                                leftx = nonzerox[left_lane_inds]
-                                lefty = nonzeroy[left_lane_inds]
-                                
-                                # Weight bottom pixels exponentially more
-                                weights = np.exp((lefty - h_im) / 80.0)
-                                
-                                try:
-                                    left_poly = np.polyfit(lefty, leftx, 2, w=weights)
-                                except:
-                                    pass
+                        # Weight bottom pixels more (exponential decay from bottom)
+                        weights = np.exp((left_edge_y - h_im) / 60.0)
                         
-                        # Find right lane peak (right of car center)
-                        right_half = histogram[car_center_x:]
-                        if np.max(right_half) > 5:
-                            right_peak = np.argmax(right_half) + car_center_x
-                            
-                            # Select pixels within margin of right peak
-                            margin = 80
-                            right_lane_inds = (nonzerox >= right_peak - margin) & \
-                                            (nonzerox <= right_peak + margin) & \
-                                            (nonzerox >= car_center_x)
-                            
-                            if np.sum(right_lane_inds) >= 30:
-                                rightx = nonzerox[right_lane_inds]
-                                righty = nonzeroy[right_lane_inds]
-                                
-                                # Weight bottom pixels exponentially more
-                                weights = np.exp((righty - h_im) / 80.0)
-                                
-                                try:
-                                    right_poly = np.polyfit(righty, rightx, 2, w=weights)
-                                except:
-                                    pass
+                        try:
+                            # Use 2nd order polynomial for smooth curves
+                            left_poly = np.polyfit(left_edge_y, left_edge_x, 2, w=weights)
+                        except:
+                            pass
+                    
+                    if len(right_edge_x) >= 30:
+                        right_edge_x = np.array(right_edge_x)
+                        right_edge_y = np.array(right_edge_y)
+                        
+                        # Weight bottom pixels more
+                        weights = np.exp((right_edge_y - h_im) / 60.0)
+                        
+                        try:
+                            right_poly = np.polyfit(right_edge_y, right_edge_x, 2, w=weights)
+                        except:
+                            pass
                 
                 # Temporal smoothing of polynomials (critical for stability)
                 if left_poly is not None:
