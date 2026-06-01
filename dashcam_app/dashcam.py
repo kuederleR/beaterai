@@ -272,74 +272,6 @@ def detect_hood_from_frame(frame):
     
     return hood_y
 
-def extract_window_points(ll_mask, car_center_x, prev_l_x=None, prev_r_x=None):
-    h, w = ll_mask.shape
-    
-    nwindows = 15
-    margin = 40
-    minpix = 15
-    
-    nonzero = ll_mask.nonzero()
-    nonzeroy = np.array(nonzero[0])
-    nonzerox = np.array(nonzero[1])
-    
-    if len(nonzeroy) == 0:
-        return [], [], [], []
-        
-    start_y = np.max(nonzeroy)
-    search_height = start_y - 150
-    if search_height < 50:
-        return [], [], [], []
-        
-    window_height = int(search_height / nwindows)
-    
-    leftx_current = prev_l_x
-    rightx_current = prev_r_x
-    
-    if leftx_current is None or rightx_current is None:
-        bottom_band = ll_mask[start_y - 40:start_y + 1, :]
-        histogram = np.sum(bottom_band, axis=0)
-        
-        if leftx_current is None and np.max(histogram[:int(car_center_x)]) > 0:
-            leftx_current = np.argmax(histogram[:int(car_center_x)])
-                
-        if rightx_current is None and np.max(histogram[int(car_center_x):]) > 0:
-            rightx_current = np.argmax(histogram[int(car_center_x):]) + int(car_center_x)
-        
-    left_x_pts = []
-    left_y_pts = []
-    right_x_pts = []
-    right_y_pts = []
-    
-    for window in range(nwindows):
-        win_y_low = start_y - (window + 1) * window_height
-        win_y_high = start_y - window * window_height
-        win_y_center = (win_y_low + win_y_high) // 2
-        
-        if leftx_current is not None:
-            win_xleft_low, win_xleft_high = leftx_current - margin, leftx_current + margin
-            good_left = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & 
-                         (nonzerox >= win_xleft_low) & (nonzerox < win_xleft_high)).nonzero()[0]
-            if len(good_left) > minpix:
-                leftx_current = int(np.mean(nonzerox[good_left]))
-                left_x_pts.append(leftx_current)
-                left_y_pts.append(win_y_center)
-            else:
-                leftx_current = None # Stop tracking to prevent jumping
-                
-        if rightx_current is not None:
-            win_xright_low, win_xright_high = rightx_current - margin, rightx_current + margin
-            good_right = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & 
-                          (nonzerox >= win_xright_low) & (nonzerox < win_xright_high)).nonzero()[0]
-            if len(good_right) > minpix:
-                rightx_current = int(np.mean(nonzerox[good_right]))
-                right_x_pts.append(rightx_current)
-                right_y_pts.append(win_y_center)
-            else:
-                rightx_current = None
-                
-    return left_x_pts, left_y_pts, right_x_pts, right_y_pts
-
 def inference_loop():
     global latest_web_frame, raw_frame_buffer, state
     
@@ -469,80 +401,83 @@ def inference_loop():
                 if np.any(ll_indices):
                     im_infer[ll_indices] = (0, 255, 255)
 
-                # 3. Robust lane boundary detection using sliding windows
+                # 3. Direct polynomial fitting to lane pixels (state-of-the-art approach)
                 car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
-                left_x_pts, left_y_pts, right_x_pts, right_y_pts = extract_window_points(
-                    ll_mask, car_center_x, 
-                    prev_l_x=state.get('last_left_x'), 
-                    prev_r_x=state.get('last_right_x')
-                )
+                h_im = im_infer.shape[0]
+                
+                # Get all lane line pixel coordinates
+                nonzero = ll_mask.nonzero()
+                nonzeroy = np.array(nonzero[0])
+                nonzerox = np.array(nonzero[1])
                 
                 left_poly = None
                 right_poly = None
                 
-                # Fit polynomial to left lane boundary
-                if len(left_x_pts) >= 6:
-                    try:
-                        left_x_arr = np.array(left_x_pts)
-                        left_y_arr = np.array(left_y_pts)
-                        # Weight bottom points more heavily for stability
-                        weights = (left_y_arr - np.min(left_y_arr) + 1) / (np.max(left_y_arr) - np.min(left_y_arr) + 1)
-                        left_poly = np.polyfit(left_y_arr, left_x_arr, 2, w=weights)
-                        state['last_left_x'] = int(left_x_arr[-1])
-                    except Exception as e:
-                        pass
+                if len(nonzeroy) > 0:
+                    # Split lane pixels into left and right based on car center
+                    left_lane_inds = nonzerox < car_center_x
+                    right_lane_inds = nonzerox >= car_center_x
+                    
+                    # Fit left lane
+                    if np.sum(left_lane_inds) >= 50:  # Need at least 50 pixels
+                        leftx = nonzerox[left_lane_inds]
+                        lefty = nonzeroy[left_lane_inds]
+                        
+                        # Weight bottom pixels more (closer to car = more important)
+                        weights = np.exp((lefty - h_im) / 100.0)  # Exponential weighting
+                        
+                        try:
+                            left_poly = np.polyfit(lefty, leftx, 2, w=weights)
+                        except:
+                            pass
+                    
+                    # Fit right lane
+                    if np.sum(right_lane_inds) >= 50:  # Need at least 50 pixels
+                        rightx = nonzerox[right_lane_inds]
+                        righty = nonzeroy[right_lane_inds]
+                        
+                        # Weight bottom pixels more
+                        weights = np.exp((righty - h_im) / 100.0)
+                        
+                        try:
+                            right_poly = np.polyfit(righty, rightx, 2, w=weights)
+                        except:
+                            pass
                 
-                # Fit polynomial to right lane boundary
-                if len(right_x_pts) >= 6:
-                    try:
-                        right_x_arr = np.array(right_x_pts)
-                        right_y_arr = np.array(right_y_pts)
-                        weights = (right_y_arr - np.min(right_y_arr) + 1) / (np.max(right_y_arr) - np.min(right_y_arr) + 1)
-                        right_poly = np.polyfit(right_y_arr, right_x_arr, 2, w=weights)
-                        state['last_right_x'] = int(right_x_arr[-1])
-                    except Exception as e:
-                        pass
-
-                # Temporal smoothing of polynomials
+                # Temporal smoothing of polynomials (critical for stability)
                 if left_poly is not None:
-                    left_poly_sm = smooth_path(left_poly, state['left_poly_history'], max_history=8)
+                    left_poly_sm = smooth_path(left_poly, state['left_poly_history'], max_history=10)
                 else:
-                    left_poly_sm = None
+                    # If we lose the lane, keep using the smoothed history for a few frames
+                    if len(state['left_poly_history']) > 0:
+                        left_poly_sm = np.mean(state['left_poly_history'], axis=0)
+                    else:
+                        left_poly_sm = None
                     
                 if right_poly is not None:
-                    right_poly_sm = smooth_path(right_poly, state['right_poly_history'], max_history=8)
+                    right_poly_sm = smooth_path(right_poly, state['right_poly_history'], max_history=10)
                 else:
-                    right_poly_sm = None
+                    if len(state['right_poly_history']) > 0:
+                        right_poly_sm = np.mean(state['right_poly_history'], axis=0)
+                    else:
+                        right_poly_sm = None
 
                 # Draw smoothed lane boundaries (blue lines)
-                h_im = im_infer.shape[0]
-                plot_y = np.linspace(int(h_im * 0.5), h_im - 1, num=100).astype(np.int32)
+                plot_y = np.linspace(int(h_im * 0.4), h_im - 1, num=150).astype(np.int32)
                 
                 if left_poly_sm is not None:
                     left_plot_x = np.polyval(left_poly_sm, plot_y)
+                    # Clip to image bounds
+                    left_plot_x = np.clip(left_plot_x, 0, INFER_WIDTH - 1)
                     left_pts = np.array([np.vstack([left_plot_x, plot_y]).T], dtype=np.int32)
-                    # Filter points to stay within bounds and inside drivable area
-                    valid_pts = []
-                    for x, y in left_pts[0]:
-                        if 0 <= x < INFER_WIDTH and 0 <= y < INFER_HEIGHT:
-                            if da_mask[y, x] > 0:
-                                valid_pts.append([x, y])
-                    if len(valid_pts) > 2:
-                        valid_pts = np.array([valid_pts], dtype=np.int32)
-                        cv2.polylines(im_infer, valid_pts, isClosed=False, color=(255, 0, 0), thickness=4)
+                    cv2.polylines(im_infer, left_pts, isClosed=False, color=(255, 0, 0), thickness=5)
                 
                 if right_poly_sm is not None:
                     right_plot_x = np.polyval(right_poly_sm, plot_y)
+                    # Clip to image bounds
+                    right_plot_x = np.clip(right_plot_x, 0, INFER_WIDTH - 1)
                     right_pts = np.array([np.vstack([right_plot_x, plot_y]).T], dtype=np.int32)
-                    # Filter points to stay within bounds and inside drivable area
-                    valid_pts = []
-                    for x, y in right_pts[0]:
-                        if 0 <= x < INFER_WIDTH and 0 <= y < INFER_HEIGHT:
-                            if da_mask[y, x] > 0:
-                                valid_pts.append([x, y])
-                    if len(valid_pts) > 2:
-                        valid_pts = np.array([valid_pts], dtype=np.int32)
-                        cv2.polylines(im_infer, valid_pts, isClosed=False, color=(255, 0, 0), thickness=4)
+                    cv2.polylines(im_infer, right_pts, isClosed=False, color=(255, 0, 0), thickness=5)
 
                 # Lane Departure Warning: check if car is drifting from lane center
                 ldw_triggered = False
