@@ -83,14 +83,23 @@ state = {
     "calibration": None,
     "hood_y_detected": None,
     "hood_detection_frames": [],
-    "hood_detection_done": False
+    "hood_detection_done": False,
+    "car_center_x": 320,
+    "calibrate_center_requested": False,
+    "calibration_center_frames_left": 0,
+    "calib_center_history": []
 }
 
 if os.path.exists('models/calibration.json'):
     try:
         with open('models/calibration.json', 'r') as f:
-            state["calibration"] = json.load(f)
-            print("[INFO] Successfully loaded Stable VP Calibration.", flush=True)
+            calib_data = json.load(f)
+            if "vp_x" in calib_data and "vp_y" in calib_data:
+                state["calibration"] = {"vp_x": calib_data["vp_x"], "vp_y": calib_data["vp_y"]}
+                print("[INFO] Successfully loaded Stable VP Calibration.", flush=True)
+            if "car_center_x" in calib_data:
+                state["car_center_x"] = calib_data["car_center_x"]
+                print(f"[INFO] Loaded calibrated car center: x={state['car_center_x']}", flush=True)
     except Exception as e:
         print(f"[ERROR] Failed to load calibration matrix: {e}", flush=True)
 
@@ -292,14 +301,10 @@ def extract_window_points(ll_mask, car_center_x, prev_l_x=None, prev_r_x=None):
         histogram = np.sum(bottom_band, axis=0)
         
         if leftx_current is None and np.max(histogram[:int(car_center_x)]) > 0:
-            search_max = min(int(car_center_x), w//2 + 50)
-            if np.max(histogram[:search_max]) > 0:
-                leftx_current = np.argmax(histogram[:search_max])
+            leftx_current = np.argmax(histogram[:int(car_center_x)])
                 
         if rightx_current is None and np.max(histogram[int(car_center_x):]) > 0:
-            search_min = max(int(car_center_x), w//2 - 50)
-            if np.max(histogram[search_min:]) > 0:
-                rightx_current = np.argmax(histogram[search_min:]) + search_min
+            rightx_current = np.argmax(histogram[int(car_center_x):]) + int(car_center_x)
         
     left_x_pts = []
     left_y_pts = []
@@ -416,7 +421,10 @@ def inference_loop():
                         continue
                         
                     # FCW Logic: If vehicle is in the center lane and box width is very large (close)
-                    if CENTER_LANE_X_MIN < cx < CENTER_LANE_X_MAX:
+                    current_center_x = state.get("car_center_x", INFER_WIDTH // 2)
+                    center_lane_min = current_center_x - (INFER_WIDTH // 6)
+                    center_lane_max = current_center_x + (INFER_WIDTH // 6)
+                    if center_lane_min < cx < center_lane_max:
                         if w > FCW_WARNING_WIDTH:
                             fcw_triggered = True
                             cv2.rectangle(im_infer, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 4)
@@ -449,7 +457,7 @@ def inference_loop():
             
             if ll_mask is not None and da_mask is not None:
                 h, w = ll_mask.shape
-                car_center_x = w // 2
+                car_center_x = state.get("car_center_x", w // 2)
                 
                 if state.get("calibrate_requested"):
                     print("[INFO] Starting Stable VP Calibration...", flush=True)
@@ -458,8 +466,15 @@ def inference_loop():
                     state["calib_left_history"] = []
                     state["calib_right_history"] = []
                     
+                if state.get("calibrate_center_requested"):
+                    print("[INFO] Starting Car Center Calibration...", flush=True)
+                    state["calibrate_center_requested"] = False
+                    state["calibration_center_frames_left"] = 150
+                    state["calib_center_history"] = []
+                    
                 l_x, l_y, r_x, r_y = extract_window_points(ll_mask, car_center_x)
                 
+                # --- Lens Calibration (Stable VP) ---
                 if state["calibration_frames_left"] > 0:
                     if len(l_x) >= 6:
                         # Top half of line is least distorted
@@ -485,12 +500,56 @@ def inference_loop():
                             vp_x = m1 * vp_y + b1
                             
                             state["calibration"] = {"vp_x": float(vp_x), "vp_y": int(vp_y)}
+                            
+                            # Merge with existing calibration data
+                            calib_data = {}
+                            if os.path.exists('models/calibration.json'):
+                                try:
+                                    with open('models/calibration.json', 'r') as f:
+                                        calib_data = json.load(f)
+                                except:
+                                    pass
+                            calib_data["vp_x"] = float(vp_x)
+                            calib_data["vp_y"] = int(vp_y)
+                            
                             os.makedirs('models', exist_ok=True)
                             with open('models/calibration.json', 'w') as f:
-                                json.dump(state["calibration"], f)
+                                json.dump(calib_data, f)
                             print(f"[INFO] Stable VP Calibration Successful! VP: ({vp_x:.1f}, {vp_y})", flush=True)
                         else:
                             print("[ERROR] Calibration Failed: Not enough clean lane lines.", flush=True)
+                            
+                # --- Car Center Calibration ---
+                if state["calibration_center_frames_left"] > 0:
+                    if len(l_x) >= 2 and len(r_x) >= 2:
+                        left_bottom_x = l_x[0]
+                        right_bottom_x = r_x[0]
+                        lane_center = (left_bottom_x + right_bottom_x) / 2
+                        state["calib_center_history"].append(lane_center)
+                        
+                    state["calibration_center_frames_left"] -= 1
+                    
+                    if state["calibration_center_frames_left"] == 0:
+                        if len(state["calib_center_history"]) >= 50:
+                            new_center = int(np.median(state["calib_center_history"]))
+                            state["car_center_x"] = new_center
+                            
+                            # Merge with existing calibration file
+                            calib_data = {}
+                            if os.path.exists('models/calibration.json'):
+                                try:
+                                    with open('models/calibration.json', 'r') as f:
+                                        calib_data = json.load(f)
+                                except:
+                                    pass
+                            calib_data["car_center_x"] = new_center
+                            os.makedirs('models', exist_ok=True)
+                            with open('models/calibration.json', 'w') as f:
+                                json.dump(calib_data, f)
+                                
+                            print(f"[INFO] Car Center Calibration Successful! New center X: {new_center}", flush=True)
+                        else:
+                            print("[ERROR] Car Center Calibration Failed: Not enough clean lane detections.", flush=True)
                             
                 # --- INFERENCE ---
                 da_nonzero = da_mask.nonzero()
@@ -527,7 +586,7 @@ def inference_loop():
                     if np.any(valid_r):
                         smoothed_r[valid_r] = gaussian_filter1d(smoothed_r[valid_r], sigma=5)
                         
-                    vp_x = w // 2
+                    vp_x = car_center_x
                     vp_y = 180
                     if state["calibration"] is not None:
                         vp_x = state["calibration"]["vp_x"]
@@ -716,7 +775,10 @@ def status():
         "cuda_available": state["cuda_available"],
         "gpu_device_name": state["gpu_device_name"],
         "yolo_device": state["yolo_device"],
-        "twinlite_device": state["twinlite_device"]
+        "twinlite_device": state["twinlite_device"],
+        "car_center_x": state["car_center_x"],
+        "calibrating_center": state["calibration_center_frames_left"] > 0,
+        "calibration_center_progress": 150 - state["calibration_center_frames_left"]
     })
 
 @app.route('/api/toggle_recording', methods=['POST'])
@@ -738,6 +800,12 @@ def api_toggle_adas():
 def api_calibrate():
     global state
     state["calibrate_requested"] = True
+    return jsonify({"status": "calibrating"})
+
+@app.route('/api/calibrate_center', methods=['POST'])
+def api_calibrate_center():
+    global state
+    state["calibrate_center_requested"] = True
     return jsonify({"status": "calibrating"})
 
 if __name__ == '__main__':

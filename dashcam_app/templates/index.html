@@ -341,9 +341,10 @@
     <div class="video-container">
         <div class="stats-overlay">
             <div id="fpsDisplay">FPS: --</div>
+            <div id="centerDisplay">Car Center X: --</div>
             <div id="durationDisplay" style="display:none; color: #fca5a5;">REC: 00:00</div>
         </div>
-        <img src="/video_feed" class="video-feed" alt="Camera Feed" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjgwIiBoZWlnaHQ9IjgwMCI+PHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsbD0iIzIyMiIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LWZhbWlseT0iYXJpYWwiIGZvbnQtc2l6ZT0iMjQiIGZpbGw9IiM2NjYiIGRvbWluYW50LWJhc2VsaW5lPSJtaWRkbGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkNhbWVyYSBPZmZsaW5lPC90ZXh0Pjwvc3ZnPg=='" />
+        <img src="/video_feed" class="video-feed" alt="Camera Feed" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjgwIiBoZWlnaHQ9IjgwMCI+PHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsbD0i/#222\"/><text x=\"50%\" y=\"50%\" font-family=\"arial\" font-size=\"24\" fill=\"#666\" dominant-baseline=\"middle\" text-anchor=\"middle\">Camera Offline</text></svg>'" />
     </div>
 
     <div class="controls">
@@ -365,6 +366,18 @@
             </button>
             <div style="font-size: 12px; color: var(--text-secondary); text-align: center; margin-top: 8px;">
                 Drive straight and click to learn perspective taper.
+            </div>
+        </div>
+
+        <div class="control-card">
+            <button class="record-btn" id="calibrateCenterBtn" onclick="requestCenterCalibration()">
+                <div class="record-icon" style="border-color: var(--accent-yellow);">
+                    <div class="record-inner" style="background-color: var(--accent-yellow); border-radius: 50%; transform: scale(0.4);"></div>
+                </div>
+                <span class="record-label" id="calibrateCenterLabel">Calibrate Center</span>
+            </button>
+            <div style="font-size: 12px; color: var(--text-secondary); text-align: center; margin-top: 8px;">
+                Drive centered in lane and click to find physical car center.
             </div>
         </div>
 
@@ -391,12 +404,15 @@
         const mainStatus = document.getElementById('mainStatus');
         const statusText = document.getElementById('statusText');
         const fpsDisplay = document.getElementById('fpsDisplay');
+        const centerDisplay = document.getElementById('centerDisplay');
         const durationDisplay = document.getElementById('durationDisplay');
         const recordBtn = document.getElementById('recordBtn');
         const recordLabel = document.getElementById('recordLabel');
         const adasToggle = document.getElementById('adasToggle');
         const errorBanner = document.getElementById('errorBanner');
         const warningBanner = document.getElementById('warningBanner');
+        const calibrateCenterBtn = document.getElementById('calibrateCenterBtn');
+        const calibrateCenterLabel = document.getElementById('calibrateCenterLabel');
 
         function formatDuration(seconds) {
             const m = Math.floor(seconds / 60).toString().padStart(2, '0');
@@ -431,6 +447,11 @@
                 // Update FPS
                 fpsDisplay.innerText = `Capture: ${data.capture_fps} FPS | Web: ${data.web_fps} FPS`;
 
+                // Update Car Center
+                if (data.car_center_x !== undefined) {
+                    centerDisplay.innerText = `Car Center X: ${data.car_center_x}px`;
+                }
+
                 // Update Recording UI based on server state
                 if (data.recording !== isRecording) {
                     isRecording = data.recording;
@@ -455,10 +476,21 @@
                     adasToggle.checked = isAdasEnabled;
                 }
 
+                // Update Car Center Calibration UI
+                if (data.calibrating_center) {
+                    calibrateCenterBtn.style.opacity = '0.5';
+                    const progressPercent = Math.min(100, Math.round((data.calibration_center_progress / 150) * 100));
+                    calibrateCenterLabel.innerText = `Calibrating (${progressPercent}%)`;
+                } else {
+                    calibrateCenterBtn.style.opacity = '1';
+                    calibrateCenterLabel.innerText = 'Calibrate Center';
+                }
+
             } catch (err) {
                 mainStatus.className = 'status-badge';
                 statusText.innerText = 'Disconnected';
                 fpsDisplay.innerText = `FPS: --`;
+                centerDisplay.innerText = `Car Center X: --`;
                 warningBanner.className = 'warning-banner';
             }
         }
@@ -532,7 +564,17 @@
             }
         }
         
-
+        async function requestCenterCalibration() {
+            calibrateCenterBtn.style.opacity = '0.5';
+            calibrateCenterLabel.innerText = 'Calibrating (0%)';
+            
+            try {
+                await fetch('/api/calibrate_center', { method: 'POST' });
+            } catch(e) {
+                calibrateCenterBtn.style.opacity = '1';
+                calibrateCenterLabel.innerText = 'Calibration Failed';
+            }
+        }
 
         // Poll status every 0.5s for faster warning response
         setInterval(fetchStatus, 500);
