@@ -69,8 +69,22 @@ state = {
     "yolo_device": "Unknown",
     "twinlite_device": "Unknown",
     "left_poly_history": [],
-    "right_poly_history": []
+    "right_poly_history": [],
+    "calibrate_requested": False,
+    "calibration_frames_left": 0,
+    "calib_left_history": [],
+    "calib_right_history": [],
+    "calibration": None
 }
+
+if os.path.exists('models/calibration.json'):
+    try:
+        with open('models/calibration.json', 'r') as f:
+            state["calibration"] = json.load(f)
+            state["calibration"]["calibrated_width"] = np.array(state["calibration"]["calibrated_width"], dtype=np.float32)
+            print("[INFO] Successfully loaded Perspective Taper Calibration.", flush=True)
+    except Exception as e:
+        print(f"[ERROR] Failed to load calibration matrix: {e}", flush=True)
 video_writer = None
 
 def make_error_frame(message):
