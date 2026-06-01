@@ -412,6 +412,63 @@ def find_lane_boundaries_radial(da_mask, ll_mask):
                 
     return left_points, right_points
 
+def filter_and_smooth_points(pts, max_dx=60, sigma=2):
+    """
+    Given a list of (x,y) points, enforce continuity by removing isolated
+    jumps larger than max_dx between consecutive points (sorted by y), and
+    apply light gaussian smoothing to the x coordinates.
+    Returns arrays (xs, ys) or ([],[]) if insufficient points.
+    """
+    if not pts:
+        return np.array([]), np.array([])
+    pts_arr = np.array(pts)
+    # sort by y descending (bottom to top)
+    idx = np.argsort(pts_arr[:, 1])[::-1]
+    pts_sorted = pts_arr[idx]
+    xs = pts_sorted[:, 0].astype(np.float32)
+    ys = pts_sorted[:, 1].astype(np.int32)
+
+    # Remove large jumps: keep longest contiguous subsequence where consecutive dx <= max_dx
+    if len(xs) > 1:
+        dx = np.abs(np.diff(xs))
+        good = np.ones(len(xs), dtype=bool)
+        # mark points following a large jump as potential breaks
+        for i, d in enumerate(dx):
+            if d > max_dx:
+                good[i+1] = False
+        # keep segments of at least 4 points
+        best_mask = None
+        best_count = 0
+        # find contiguous runs of True in good
+        run_start = None
+        for i in range(len(good)):
+            if good[i] and run_start is None:
+                run_start = i
+            if (not good[i] or i == len(good)-1) and run_start is not None:
+                run_end = i if good[i] else i-1
+                count = run_end - run_start + 1
+                if count > best_count:
+                    best_count = count
+                    mask = np.zeros_like(good)
+                    mask[run_start:run_end+1] = True
+                    best_mask = mask
+                run_start = None
+        if best_mask is not None and best_count >= 4:
+            xs = xs[best_mask]
+            ys = ys[best_mask]
+        # else keep original but proceed
+
+    if len(xs) < 4:
+        return np.array([]), np.array([])
+
+    # Smooth xs along the sequence to reduce zig-zag
+    try:
+        xs_sm = gaussian_filter1d(xs, sigma=sigma)
+    except Exception:
+        xs_sm = xs
+
+    return xs_sm, ys
+
 def inference_loop():
     global latest_web_frame, raw_frame_buffer, state
     
@@ -546,20 +603,20 @@ def inference_loop():
                 left_poly = None
                 right_poly = None
 
-                # Fit quadratic x = f(y) if we have enough points
-                if len(left_pts) >= 5:
-                    lx = np.array([p[0] for p in left_pts])
-                    ly = np.array([p[1] for p in left_pts])
+                # Filter and smooth raw points to ensure continuity
+                lx_sm, ly_sm = filter_and_smooth_points(left_pts, max_dx=60, sigma=2)
+                rx_sm, ry_sm = filter_and_smooth_points(right_pts, max_dx=60, sigma=2)
+
+                # Fit quadratic x = f(y) on smoothed sequences
+                if len(lx_sm) >= 4:
                     try:
-                        left_poly = np.polyfit(ly, lx, 2)
+                        left_poly = np.polyfit(ly_sm, lx_sm, 2)
                     except Exception:
                         left_poly = None
 
-                if len(right_pts) >= 5:
-                    rx = np.array([p[0] for p in right_pts])
-                    ry = np.array([p[1] for p in right_pts])
+                if len(rx_sm) >= 4:
                     try:
-                        right_poly = np.polyfit(ry, rx, 2)
+                        right_poly = np.polyfit(ry_sm, rx_sm, 2)
                     except Exception:
                         right_poly = None
 
@@ -569,14 +626,18 @@ def inference_loop():
                     prev_rx = state.get('last_right_x')
                     l_x_pts, l_y_pts, r_x_pts, r_y_pts = extract_window_points(
                         ll_mask, state.get('car_center_x', INFER_WIDTH // 2), prev_lx, prev_rx)
-                    if left_poly is None and len(l_x_pts) >= 4:
+                    l_pts_combined = list(zip(l_x_pts, l_y_pts)) if len(l_x_pts) else []
+                    r_pts_combined = list(zip(r_x_pts, r_y_pts)) if len(r_x_pts) else []
+                    lx2_sm, ly2_sm = filter_and_smooth_points(l_pts_combined, max_dx=60, sigma=2)
+                    rx2_sm, ry2_sm = filter_and_smooth_points(r_pts_combined, max_dx=60, sigma=2)
+                    if left_poly is None and len(lx2_sm) >= 4:
                         try:
-                            left_poly = np.polyfit(np.array(l_y_pts), np.array(l_x_pts), 2)
+                            left_poly = np.polyfit(ly2_sm, lx2_sm, 2)
                         except Exception:
                             left_poly = None
-                    if right_poly is None and len(r_x_pts) >= 4:
+                    if right_poly is None and len(rx2_sm) >= 4:
                         try:
-                            right_poly = np.polyfit(np.array(r_y_pts), np.array(r_x_pts), 2)
+                            right_poly = np.polyfit(ry2_sm, rx2_sm, 2)
                         except Exception:
                             right_poly = None
 
@@ -590,23 +651,54 @@ def inference_loop():
                 else:
                     right_poly_sm = None
 
-                # Draw smoothed lane boundary polylines (blue)
+                # Draw smoothed lane boundary polylines (blue), only where inside da_mask
                 h_im = im_infer.shape[0]
-                ys = np.linspace(int(h_im * 0.4), h_im - 1, num=100).astype(np.int32)
+                ys = np.linspace(int(h_im * 0.4), h_im - 1, num=200).astype(np.int32)
                 if left_poly_sm is not None:
                     xs = np.polyval(left_poly_sm, ys)
-                    pts = np.stack([xs, ys], axis=1).astype(np.int32)
-                    pts = pts[(pts[:, 0] >= 0) & (pts[:, 0] < im_infer.shape[1])]
+                    pts = []
+                    for (x, y) in zip(xs, ys):
+                        xi = int(round(x))
+                        if xi >= 0 and xi < im_infer.shape[1] and da_mask[y, xi]:
+                            pts.append((xi, int(y)))
+                        else:
+                            # try to find nearest da_mask pixel horizontally within 30px
+                            found = False
+                            for off in range(1, 31):
+                                for sign in (-1, 1):
+                                    xi2 = xi + sign * off
+                                    if 0 <= xi2 < im_infer.shape[1] and da_mask[y, xi2]:
+                                        pts.append((xi2, int(y)))
+                                        found = True
+                                        break
+                                if found:
+                                    break
                     if len(pts) > 1:
-                        cv2.polylines(im_infer, [pts.reshape(-1, 1, 2)], isClosed=False, color=(255, 0, 0), thickness=3)
-                        state['last_left_x'] = int(np.mean(pts[-5:, 0])) if len(pts) >= 5 else int(pts[-1, 0])
+                        pts_arr = np.array(pts, dtype=np.int32)
+                        cv2.polylines(im_infer, [pts_arr.reshape(-1, 1, 2)], isClosed=False, color=(255, 0, 0), thickness=3)
+                        state['last_left_x'] = int(np.mean(pts_arr[-5:, 0])) if len(pts_arr) >= 5 else int(pts_arr[-1, 0])
                 if right_poly_sm is not None:
                     xs = np.polyval(right_poly_sm, ys)
-                    pts = np.stack([xs, ys], axis=1).astype(np.int32)
-                    pts = pts[(pts[:, 0] >= 0) & (pts[:, 0] < im_infer.shape[1])]
+                    pts = []
+                    for (x, y) in zip(xs, ys):
+                        xi = int(round(x))
+                        if xi >= 0 and xi < im_infer.shape[1] and da_mask[y, xi]:
+                            pts.append((xi, int(y)))
+                        else:
+                            found = False
+                            for off in range(1, 31):
+                                for sign in (-1, 1):
+                                    xi2 = xi + sign * off
+                                    if 0 <= xi2 < im_infer.shape[1] and da_mask[y, xi2]:
+                                        pts.append((xi2, int(y)))
+                                        found = True
+                                        break
+                                if found:
+                                    break
                     if len(pts) > 1:
-                        cv2.polylines(im_infer, [pts.reshape(-1, 1, 2)], isClosed=False, color=(255, 0, 0), thickness=3)
-                        state['last_right_x'] = int(np.mean(pts[-5:, 0])) if len(pts) >= 5 else int(pts[-1, 0])
+                        pts_arr = np.array(pts, dtype=np.int32)
+                        cv2.polylines(im_infer, [pts_arr.reshape(-1, 1, 2)], isClosed=False, color=(255, 0, 0), thickness=3)
+                        state['last_right_x'] = int(np.mean(pts_arr[-5:, 0])) if len(pts_arr) >= 5 else int(pts_arr[-1, 0])
 
                 ldw_triggered = False
 
