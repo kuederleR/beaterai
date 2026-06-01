@@ -412,89 +412,107 @@ def find_lane_boundaries_radial(da_mask, ll_mask):
                 
     return left_points, right_points
 
-                # Filter and smooth raw points to ensure continuity
-                lx_sm, ly_sm = filter_and_smooth_points(left_pts, max_dx=40, sigma=2)
-                rx_sm, ry_sm = filter_and_smooth_points(right_pts, max_dx=40, sigma=2)
+def filter_and_smooth_points(pts, max_dx=60, sigma=2):
+    """
+    Given a list of (x,y) points, enforce continuity by removing isolated
+    jumps larger than max_dx between consecutive points (sorted by y), and
+    apply light gaussian smoothing to the x coordinates.
+    Returns arrays (xs, ys) or ([],[]) if insufficient points.
+    """
+    if not pts:
+        return np.array([]), np.array([])
+    pts_arr = np.array(pts)
+    # sort by y descending (bottom to top)
+    idx = np.argsort(pts_arr[:, 1])[::-1]
+    pts_sorted = pts_arr[idx]
+    xs = pts_sorted[:, 0].astype(np.float32)
+    ys = pts_sorted[:, 1].astype(np.int32)
 
-                # Helper: robust fit with weighting, outlier removal, slope clamp and bottom clamp
-                def robust_poly_fit(xs, ys, side, da_mask, prev_x=None):
-                    if len(xs) < 4:
-                        return None
-                    h_img = im_infer.shape[0]
+    # Remove large jumps: keep longest contiguous subsequence where consecutive dx <= max_dx
+    if len(xs) > 1:
+        dx = np.abs(np.diff(xs))
+        good = np.ones(len(xs), dtype=bool)
+        # mark points following a large jump as potential breaks
+        for i, d in enumerate(dx):
+            if d > max_dx:
+                good[i+1] = False
+        # keep segments of at least 4 points
+        best_mask = None
+        best_count = 0
+        # find contiguous runs of True in good
+        run_start = None
+        for i in range(len(good)):
+            if good[i] and run_start is None:
+                run_start = i
+            if (not good[i] or i == len(good)-1) and run_start is not None:
+                run_end = i if good[i] else i-1
+                count = run_end - run_start + 1
+                if count > best_count:
+                    best_count = count
+                    mask = np.zeros_like(good)
+                    mask[run_start:run_end+1] = True
+                    best_mask = mask
+                run_start = None
+        if best_mask is not None and best_count >= 4:
+            xs = xs[best_mask]
+            ys = ys[best_mask]
+        # else keep original but proceed
 
-                    # Ensure points are on correct side of car center
-                    car_cx = state.get('car_center_x', INFER_WIDTH // 2)
-                    if side == 'left':
-                        mask_side = xs < (car_cx - 10)
-                    else:
-                        mask_side = xs > (car_cx + 10)
-                    if np.sum(mask_side) < 4:
-                        return None
-                    xs = xs[mask_side]
-                    ys = ys[mask_side]
+    if len(xs) < 4:
+        return np.array([]), np.array([])
 
-                    # Weighted least squares: weight bottom rows higher to prioritise near-vehicle geometry
-                    w = (ys - np.min(ys) + 1).astype(np.float32)
-                    w = w / np.max(w)
+    # Smooth xs along the sequence to reduce zig-zag
+    try:
+        xs_sm = gaussian_filter1d(xs, sigma=sigma)
+    except Exception:
+        xs_sm = xs
 
-                    # Iterative outlier removal
-                    for _ in range(2):
-                        try:
-                            p = np.polyfit(ys, xs, 2, w=w)
-                        except Exception:
-                            return None
-                        pred = np.polyval(p, ys)
-                        resid = np.abs(pred - xs)
-                        mask_inlier = resid < 30
-                        if np.sum(mask_inlier) < 4:
-                            break
-                        if np.all(mask_inlier):
-                            break
-                        xs = xs[mask_inlier]
-                        ys = ys[mask_inlier]
-                        w = w[mask_inlier]
+    return xs_sm, ys
 
-                    if len(xs) < 4:
-                        return None
+def inference_loop():
+    global latest_web_frame, raw_frame_buffer, state
+    
+    fps_counter = 0
+    fps_start = time.time()
 
-                    try:
-                        p = np.polyfit(ys, xs, 2, w=w)
-                    except Exception:
-                        return None
+    print("[INFO] Loading YOLOv8n object detector...", flush=True)
+    os.makedirs('models', exist_ok=True)
+    yolo_model = YOLO('yolov8n.pt') # Will auto-download if missing
+    
+    state["cuda_available"] = torch.cuda.is_available()
+    state["gpu_device_name"] = torch.cuda.get_device_name(0) if state["cuda_available"] else "None"
+    
+    if state["cuda_available"]:
+        engine_path = 'models/yolov8n.engine'
+        if not os.path.exists(engine_path):
+            print("[INFO] Exporting YOLOv8n to TensorRT engine (this will take a few minutes)...", flush=True)
+            try:
+                yolo_model.export(format='engine', device='0', half=True)
+                if os.path.exists('yolov8n.engine'):
+                    os.rename('yolov8n.engine', engine_path)
+            except Exception as e:
+                print(f"[ERROR] Failed to export TensorRT: {e}", flush=True)
+                
+        if os.path.exists(engine_path):
+            print("[INFO] Loading TensorRT engine from cache...", flush=True)
+            yolo_model = YOLO(engine_path, task='detect')
+    
+    yolo_dev = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    state["yolo_device"] = yolo_dev
+    print(f"\n{'='*50}\n[DEBUG - GPU CHECK]\nCUDA Available: {state['cuda_available']}\nGPU Name: {state['gpu_device_name']}\nYOLOv8 Device Target: {yolo_dev}\n{'='*50}\n", flush=True)
+    
+    
+    print("[INFO] Loading TwinLiteNet Lane detector...", flush=True)
+    twinlite_model = TwinLiteDetector()
+    state["twinlite_device"] = str(twinlite_model.device)
 
-                    # Limit curvature: if slope at bottom too large, fall back to linear fit
-                    deriv_bottom = 2 * p[0] * (h_img - 1) + p[1]
-                    max_slope = 1.2
-                    if abs(deriv_bottom) > max_slope:
-                        try:
-                            p_lin = np.polyfit(ys, xs, 1, w=w)
-                            p = np.array([0.0, p_lin[0], p_lin[1]])
-                        except Exception:
-                            pass
-
-                    # Bottom clamp: compute bottom x and clamp near histogram estimate if available
-                    x_bottom = int(np.polyval(p, h_img - 1))
-                    bottom_band = ll_mask[max(0, h_img - 60):h_img, :]
-                    hist = np.sum(bottom_band, axis=0)
-                    if side == 'left':
-                        region = hist[:int(car_cx)]
-                    else:
-                        region = hist[int(car_cx):]
-                    if np.sum(region) > 0:
-                        peak = int(np.argmax(region) + (0 if side == 'left' else int(car_cx)))
-                        clamp_center = peak
-                        if prev_x is not None:
-                            clamp_center = int((clamp_center + prev_x) / 2)
-                        max_delta = 80
-                        if abs(x_bottom - clamp_center) > max_delta:
-                            delta = clamp_center - x_bottom
-                            p[2] += delta
-
-                    return p
-
-                # Robust fitting using continuity checks, weighting, outlier removal, and clamping
-                left_poly = robust_poly_fit(lx_sm, ly_sm, 'left', da_mask, prev_x=state.get('last_left_x'))
-                right_poly = robust_poly_fit(rx_sm, ry_sm, 'right', da_mask, prev_x=state.get('last_right_x'))
+    while True:
+        has_frame = False
+        with frame_lock:
+            if raw_frame_buffer is not None:
+                im0 = raw_frame_buffer.copy()
+                raw_frame_buffer = None
+                has_frame = True
                 
         if not has_frame:
             time.sleep(0.01)
@@ -585,43 +603,89 @@ def find_lane_boundaries_radial(da_mask, ll_mask):
                 left_poly = None
                 right_poly = None
 
-                # Filter and smooth raw points to ensure continuity
-                lx_sm, ly_sm = filter_and_smooth_points(left_pts, max_dx=60, sigma=2)
-                rx_sm, ry_sm = filter_and_smooth_points(right_pts, max_dx=60, sigma=2)
+                # Filter and smooth raw points to ensure continuity (tighter threshold)
+                lx_sm, ly_sm = filter_and_smooth_points(left_pts, max_dx=40, sigma=2)
+                rx_sm, ry_sm = filter_and_smooth_points(right_pts, max_dx=40, sigma=2)
 
-                # Fit quadratic x = f(y) on smoothed sequences
-                if len(lx_sm) >= 4:
-                    try:
-                        left_poly = np.polyfit(ly_sm, lx_sm, 2)
-                    except Exception:
-                        left_poly = None
+                # Robust fitting helper inside inference loop
+                def robust_poly_fit(xs, ys, side, ll_mask, prev_x=None):
+                    if len(xs) < 4:
+                        return None
+                    h_img = im_infer.shape[0]
 
-                if len(rx_sm) >= 4:
-                    try:
-                        right_poly = np.polyfit(ry_sm, rx_sm, 2)
-                    except Exception:
-                        right_poly = None
+                    # Ensure points are on correct side of car center
+                    car_cx = state.get('car_center_x', INFER_WIDTH // 2)
+                    if side == 'left':
+                        mask_side = xs < (car_cx - 10)
+                    else:
+                        mask_side = xs > (car_cx + 10)
+                    if np.sum(mask_side) < 4:
+                        return None
+                    xs = xs[mask_side]
+                    ys = ys[mask_side]
 
-                # Fallback: use sliding window point extraction if polynomials missing
-                if left_poly is None or right_poly is None:
-                    prev_lx = state.get('last_left_x')
-                    prev_rx = state.get('last_right_x')
-                    l_x_pts, l_y_pts, r_x_pts, r_y_pts = extract_window_points(
-                        ll_mask, state.get('car_center_x', INFER_WIDTH // 2), prev_lx, prev_rx)
-                    l_pts_combined = list(zip(l_x_pts, l_y_pts)) if len(l_x_pts) else []
-                    r_pts_combined = list(zip(r_x_pts, r_y_pts)) if len(r_x_pts) else []
-                    lx2_sm, ly2_sm = filter_and_smooth_points(l_pts_combined, max_dx=60, sigma=2)
-                    rx2_sm, ry2_sm = filter_and_smooth_points(r_pts_combined, max_dx=60, sigma=2)
-                    if left_poly is None and len(lx2_sm) >= 4:
+                    # Weight bottom rows higher
+                    w = (ys - np.min(ys) + 1).astype(np.float32)
+                    w = w / np.max(w)
+
+                    # Iterative outlier removal
+                    for _ in range(2):
                         try:
-                            left_poly = np.polyfit(ly2_sm, lx2_sm, 2)
+                            p = np.polyfit(ys, xs, 2, w=w)
                         except Exception:
-                            left_poly = None
-                    if right_poly is None and len(rx2_sm) >= 4:
+                            return None
+                        pred = np.polyval(p, ys)
+                        resid = np.abs(pred - xs)
+                        mask_inlier = resid < 30
+                        if np.sum(mask_inlier) < 4:
+                            break
+                        if np.all(mask_inlier):
+                            break
+                        xs = xs[mask_inlier]
+                        ys = ys[mask_inlier]
+                        w = w[mask_inlier]
+
+                    if len(xs) < 4:
+                        return None
+
+                    try:
+                        p = np.polyfit(ys, xs, 2, w=w)
+                    except Exception:
+                        return None
+
+                    # Limit curvature by checking derivative near bottom
+                    deriv_bottom = 2 * p[0] * (h_img - 1) + p[1]
+                    max_slope = 1.2
+                    if abs(deriv_bottom) > max_slope:
                         try:
-                            right_poly = np.polyfit(ry2_sm, rx2_sm, 2)
+                            p_lin = np.polyfit(ys, xs, 1, w=w)
+                            p = np.array([0.0, p_lin[0], p_lin[1]])
                         except Exception:
-                            right_poly = None
+                            pass
+
+                    # Bottom clamp using histogram of bottom band
+                    x_bottom = int(np.polyval(p, h_img - 1))
+                    bottom_band = ll_mask[max(0, h_img - 60):h_img, :]
+                    hist = np.sum(bottom_band, axis=0)
+                    if side == 'left':
+                        region = hist[:int(car_cx)]
+                    else:
+                        region = hist[int(car_cx):]
+                    if np.sum(region) > 0:
+                        peak = int(np.argmax(region) + (0 if side == 'left' else int(car_cx)))
+                        clamp_center = peak
+                        if prev_x is not None:
+                            clamp_center = int((clamp_center + prev_x) / 2)
+                        max_delta = 80
+                        if abs(x_bottom - clamp_center) > max_delta:
+                            delta = clamp_center - x_bottom
+                            p[2] += delta
+
+                    return p
+
+                # Apply robust fitter
+                left_poly = robust_poly_fit(lx_sm, ly_sm, 'left', ll_mask, prev_x=state.get('last_left_x'))
+                right_poly = robust_poly_fit(rx_sm, ry_sm, 'right', ll_mask, prev_x=state.get('last_right_x'))
 
                 # Smooth polynomials using history buffers
                 if left_poly is not None:
