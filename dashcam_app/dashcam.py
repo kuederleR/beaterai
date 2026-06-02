@@ -300,34 +300,42 @@ def inference_loop():
                 da_top = np.argmax(da_rows) if np.any(da_rows) else 0
                 da_bottom = len(da_rows) - 1 - np.argmax(da_rows[::-1]) if np.any(da_rows) else h_im - 1
                 
-                # Create extended lane line mask
-                ll_extended = np.zeros_like(ll_mask)
+                # First, connect existing lane line fragments vertically
+                kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 20))
+                ll_connected = cv2.morphologyEx(ll_mask, cv2.MORPH_CLOSE, kernel_vertical)
                 
-                # For each column, if it has enough lane line pixels, extend through drivable area
+                # Create extended lane line mask - only extend strong vertical structures
+                ll_extended = ll_connected.copy()
+                
+                # For each column, check if it has a strong vertical lane line structure
                 for x in range(w_im):
-                    col_ll = ll_mask[:, x]
+                    col_ll = ll_connected[:, x]
                     col_da = da_mask[:, x]
                     
-                    # Count lane line pixels in this column
-                    ll_count = np.sum(col_ll > 0)
-                    da_count = np.sum(col_da > 0)
+                    # Find the vertical extent of lane line in this column
+                    ll_ys = np.where(col_ll > 0)[0]
+                    da_ys = np.where(col_da > 0)[0]
                     
-                    # If this column has significant lane line presence (>20% of drivable area)
-                    if ll_count > 0 and da_count > 0:
-                        ll_ratio = ll_count / max(da_count, 1)
-                        if ll_ratio > 0.15:  # At least 15% lane line coverage
-                            # Extend this lane line through the full drivable area column
-                            ll_extended[da_top:da_bottom+1, x] = 255
+                    if len(ll_ys) > 0 and len(da_ys) > 0:
+                        # Check vertical span of lane line
+                        ll_span = np.max(ll_ys) - np.min(ll_ys)
+                        da_span = len(da_ys)
+                        
+                        # Only extend if lane line already spans a significant vertical distance
+                        # (at least 30% of the drivable area height in this column)
+                        if ll_span > 0 and da_span > 0:
+                            span_ratio = ll_span / da_span
+                            if span_ratio > 0.3:
+                                # This is a strong vertical lane line - extend it fully
+                                da_min = np.min(da_ys)
+                                da_max = np.max(da_ys)
+                                ll_extended[da_min:da_max+1, x] = 255
                 
-                # Connect nearby extended lane lines horizontally
-                kernel_horizontal = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))
-                ll_extended = cv2.morphologyEx(ll_extended, cv2.MORPH_CLOSE, kernel_horizontal)
+                # Apply morphological operations to create solid dividers
+                kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 15))
+                ll_dividers = cv2.morphologyEx(ll_extended, cv2.MORPH_CLOSE, kernel_close)
                 
-                # Use vertical kernel to ensure solid dividers
-                kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 30))
-                ll_dividers = cv2.morphologyEx(ll_extended, cv2.MORPH_CLOSE, kernel_vertical)
-                
-                # Dilate to make stronger boundaries
+                # Dilate to make boundaries
                 kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
                 ll_dividers = cv2.dilate(ll_dividers, kernel_dilate, iterations=1)
                 
