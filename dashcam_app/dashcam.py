@@ -201,6 +201,202 @@ def smooth_scalar(val, history, max_history=5):
         history.pop(0)
     return np.mean(history)
 
+def remove_small_lane_components(ll_mask, min_area=20, min_height=12):
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats((ll_mask > 0).astype(np.uint8), connectivity=8)
+    cleaned = np.zeros_like(ll_mask)
+    for label_id in range(1, num_labels):
+        area = stats[label_id, cv2.CC_STAT_AREA]
+        height = stats[label_id, cv2.CC_STAT_HEIGHT]
+        if area >= min_area and height >= min_height:
+            cleaned[labels == label_id] = 255
+    return cleaned
+
+def get_drivable_row_bounds(da_mask):
+    row_bounds = []
+    for y in range(da_mask.shape[0]):
+        xs = np.where(da_mask[y] > 0)[0]
+        if len(xs) > 0:
+            row_bounds.append((int(xs[0]), int(xs[-1])))
+        else:
+            row_bounds.append(None)
+    return row_bounds
+
+def extract_lane_centers(row_mask, max_gap=4, min_pixels=2):
+    xs = np.where(row_mask > 0)[0]
+    if len(xs) == 0:
+        return []
+
+    split_points = np.where(np.diff(xs) > max_gap)[0]
+    start_indices = np.concatenate(([0], split_points + 1))
+    end_indices = np.concatenate((split_points, [len(xs) - 1]))
+
+    centers = []
+    for start_idx, end_idx in zip(start_indices, end_indices):
+        cluster = xs[start_idx:end_idx + 1]
+        if len(cluster) >= min_pixels:
+            centers.append(int(round(np.mean(cluster))))
+    return centers
+
+def find_lane_seeds(lane_candidates, sample_rows, row_bounds, seed_row_idx, band_radius=2, merge_distance=18, min_hits=2):
+    seeds = []
+    start_idx = max(0, seed_row_idx - band_radius)
+    end_idx = min(len(sample_rows), seed_row_idx + band_radius + 1)
+
+    for sample_idx in range(start_idx, end_idx):
+        y = sample_rows[sample_idx]
+        bounds = row_bounds[y]
+        if bounds is None:
+            continue
+        left_bound, right_bound = bounds
+
+        for center_x in lane_candidates.get(y, []):
+            if center_x <= left_bound + 6 or center_x >= right_bound - 6:
+                continue
+
+            matched_seed = None
+            for seed in seeds:
+                seed_center = seed["x_sum"] / seed["hits"]
+                if abs(seed_center - center_x) <= merge_distance:
+                    matched_seed = seed
+                    break
+
+            if matched_seed is None:
+                seeds.append({"x_sum": float(center_x), "hits": 1})
+            else:
+                matched_seed["x_sum"] += center_x
+                matched_seed["hits"] += 1
+
+    merged_centers = []
+    for seed in sorted(seeds, key=lambda item: item["x_sum"] / item["hits"]):
+        if seed["hits"] < min_hits:
+            continue
+        center_x = int(round(seed["x_sum"] / seed["hits"]))
+        if merged_centers and abs(merged_centers[-1] - center_x) <= merge_distance:
+            merged_centers[-1] = int(round((merged_centers[-1] + center_x) / 2.0))
+        else:
+            merged_centers.append(center_x)
+
+    return merged_centers
+
+def trace_lane_line(seed_x, seed_row_idx, sample_rows, row_bounds, lane_candidates, search_radius=26, max_interp_steps=4):
+    tracked_points = [(sample_rows[seed_row_idx], float(seed_x), True)]
+
+    for direction in (-1, 1):
+        direction_points = []
+        last_x = float(seed_x)
+        last_dx = 0.0
+        interp_steps = 0
+
+        index_range = range(seed_row_idx + direction, -1, -1) if direction < 0 else range(seed_row_idx + direction, len(sample_rows))
+        for sample_idx in index_range:
+            y = sample_rows[sample_idx]
+            bounds = row_bounds[y]
+            if bounds is None:
+                continue
+
+            left_bound, right_bound = bounds
+            predicted_x = float(np.clip(last_x + last_dx, left_bound + 2, right_bound - 2))
+            candidates = lane_candidates.get(y, [])
+            best_center = None
+            best_distance = None
+            allowed_distance = search_radius + interp_steps * 6
+
+            for candidate_x in candidates:
+                distance = abs(candidate_x - predicted_x)
+                if distance <= allowed_distance and (best_distance is None or distance < best_distance):
+                    best_center = float(candidate_x)
+                    best_distance = distance
+
+            if best_center is not None:
+                detected = True
+                new_x = best_center
+                measured_dx = new_x - last_x
+                last_dx = 0.6 * last_dx + 0.4 * measured_dx
+                interp_steps = 0
+            else:
+                if interp_steps >= max_interp_steps:
+                    break
+                detected = False
+                new_x = predicted_x
+                last_dx *= 0.9
+                interp_steps += 1
+
+            if new_x <= left_bound + 1 or new_x >= right_bound - 1:
+                break
+
+            direction_points.append((y, new_x, detected))
+            last_x = new_x
+
+        if direction < 0:
+            tracked_points = list(reversed(direction_points)) + tracked_points
+        else:
+            tracked_points.extend(direction_points)
+
+    return tracked_points
+
+def build_lane_divider_mask(ll_mask, da_mask, sample_step=8):
+    h_im, w_im = ll_mask.shape[:2]
+    row_bounds = get_drivable_row_bounds(da_mask)
+    sample_rows = [y for y in range(0, h_im, sample_step) if row_bounds[y] is not None]
+    if not sample_rows:
+        return np.zeros_like(ll_mask)
+    if sample_rows[-1] != h_im - 1 and row_bounds[h_im - 1] is not None:
+        sample_rows.append(h_im - 1)
+
+    ll_clean = cv2.morphologyEx(ll_mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 9)))
+    ll_clean = remove_small_lane_components(ll_clean, min_area=24, min_height=14)
+
+    lane_candidates = {}
+    for y in sample_rows:
+        bounds = row_bounds[y]
+        if bounds is None:
+            continue
+        left_bound, right_bound = bounds
+        row_slice = np.zeros(w_im, dtype=np.uint8)
+        row_slice[left_bound:right_bound + 1] = ll_clean[y, left_bound:right_bound + 1]
+        lane_candidates[y] = extract_lane_centers(row_slice)
+
+    seed_row_idx = min(max(int(len(sample_rows) * 0.55), 0), len(sample_rows) - 1)
+    seed_centers = find_lane_seeds(lane_candidates, sample_rows, row_bounds, seed_row_idx)
+
+    divider_mask = np.zeros_like(ll_mask)
+    for seed_x in seed_centers:
+        tracked_points = trace_lane_line(seed_x, seed_row_idx, sample_rows, row_bounds, lane_candidates)
+        detected_points = [(y, x, detected) for y, x, detected in tracked_points if detected]
+        if len(detected_points) < 3:
+            continue
+
+        track_ys = np.array([y for y, _, _ in tracked_points], dtype=np.float32)
+        track_xs = np.array([x for _, x, _ in tracked_points], dtype=np.float32)
+        track_weights = np.array([1.0 if detected else 0.35 for _, _, detected in tracked_points], dtype=np.float32)
+
+        poly_degree = 2 if len(detected_points) >= 6 else 1
+        try:
+            poly = np.polyfit(track_ys, track_xs, poly_degree, w=track_weights)
+        except Exception:
+            continue
+
+        curve_points = []
+        y_min = int(track_ys.min())
+        y_max = int(track_ys.max())
+        dense_rows = range(y_min, y_max + 1, max(2, sample_step // 2))
+        for y in dense_rows:
+            bounds = row_bounds[y]
+            if bounds is None:
+                continue
+            left_bound, right_bound = bounds
+            curve_x = float(np.polyval(poly, y))
+            if curve_x <= left_bound + 1 or curve_x >= right_bound - 1:
+                continue
+            curve_points.append([int(round(curve_x)), y])
+
+        if len(curve_points) >= 2:
+            cv2.polylines(divider_mask, [np.array(curve_points, dtype=np.int32)], isClosed=False, color=255, thickness=3)
+
+    divider_mask &= (da_mask > 0).astype(np.uint8) * 255
+    divider_mask = cv2.dilate(divider_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1)
+    return divider_mask
+
 def inference_loop():
     global latest_web_frame, raw_frame_buffer, state
     
@@ -294,50 +490,9 @@ def inference_loop():
                 car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
                 h_im, w_im = im_infer.shape[:2]
                 
-                # Step 1: Intelligently extend lane lines through full drivable area height
-                # Find vertical extent of drivable area
-                da_rows = np.any(da_mask > 0, axis=1)
-                da_top = np.argmax(da_rows) if np.any(da_rows) else 0
-                da_bottom = len(da_rows) - 1 - np.argmax(da_rows[::-1]) if np.any(da_rows) else h_im - 1
-                
-                # First, connect existing lane line fragments vertically
-                kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 20))
-                ll_connected = cv2.morphologyEx(ll_mask, cv2.MORPH_CLOSE, kernel_vertical)
-                
-                # Create extended lane line mask - only extend strong vertical structures
-                ll_extended = ll_connected.copy()
-                
-                # For each column, check if it has a strong vertical lane line structure
-                for x in range(w_im):
-                    col_ll = ll_connected[:, x]
-                    col_da = da_mask[:, x]
-                    
-                    # Find the vertical extent of lane line in this column
-                    ll_ys = np.where(col_ll > 0)[0]
-                    da_ys = np.where(col_da > 0)[0]
-                    
-                    if len(ll_ys) > 0 and len(da_ys) > 0:
-                        # Check vertical span of lane line
-                        ll_span = np.max(ll_ys) - np.min(ll_ys)
-                        da_span = len(da_ys)
-                        
-                        # Only extend if lane line already spans a significant vertical distance
-                        # (at least 30% of the drivable area height in this column)
-                        if ll_span > 0 and da_span > 0:
-                            span_ratio = ll_span / da_span
-                            if span_ratio > 0.3:
-                                # This is a strong vertical lane line - extend it fully
-                                da_min = np.min(da_ys)
-                                da_max = np.max(da_ys)
-                                ll_extended[da_min:da_max+1, x] = 255
-                
-                # Apply morphological operations to create solid dividers
-                kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 15))
-                ll_dividers = cv2.morphologyEx(ll_extended, cv2.MORPH_CLOSE, kernel_close)
-                
-                # Dilate to make boundaries
-                kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-                ll_dividers = cv2.dilate(ll_dividers, kernel_dilate, iterations=1)
+                # Step 1: Follow lane-line trajectories from a reliable middle band and
+                # interpolate short gaps while the divider stays inside the drivable area.
+                ll_dividers = build_lane_divider_mask(ll_mask, da_mask)
                 
                 # Step 2: Create segmentation by subtracting lane line dividers from drivable area
                 segmentation_base = da_mask.copy().astype(np.uint8)
