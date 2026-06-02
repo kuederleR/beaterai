@@ -355,72 +355,121 @@ def finalize_ldw_calibration():
     state["error"] = None
     save_calibration_state()
 
-def fit_lane_curve(mask, row_bounds, side, degree=2):
+def smooth_track(track, history, max_history=8):
+    if track is None:
+        return None
+    if history and np.shape(history[0]) != np.shape(track):
+        history.clear()
+    history.append(track)
+    if len(history) > max_history:
+        history.pop(0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        return np.nanmean(history, axis=0)
+
+def _estimate_track_slope(sample_ys, sample_xs, use_top, window_size=10):
+    if len(sample_ys) < 2:
+        return 0.0
+    if use_top:
+        ys = sample_ys[:window_size]
+        xs = sample_xs[:window_size]
+    else:
+        ys = sample_ys[-window_size:]
+        xs = sample_xs[-window_size:]
+    if len(ys) < 2:
+        return 0.0
+    coeffs = np.polyfit(ys, xs, 1)
+    return float(coeffs[0])
+
+def build_lane_track(mask, row_bounds, side, smoothing_window=11):
     if mask is None or not np.any(mask > 0):
+        return []
+
+    track = np.full(mask.shape[0], np.nan, dtype=np.float32)
+    observed_ys = []
+    observed_xs = []
+    drivable_ys = [y for y, bounds in enumerate(row_bounds) if bounds is not None]
+    if not drivable_ys:
         return None
 
-    ys = []
-    xs = []
-    for y, bounds in enumerate(row_bounds):
-        if bounds is None:
-            continue
+    for y in drivable_ys:
         row_xs = np.where(mask[y] > 0)[0]
         if len(row_xs) == 0:
             continue
-        ys.append(float(y))
-        if side == 'left':
-            xs.append(float(np.max(row_xs)))
-        else:
-            xs.append(float(np.min(row_xs)))
+        x_val = float(np.max(row_xs)) if side == 'left' else float(np.min(row_xs))
+        observed_ys.append(y)
+        observed_xs.append(x_val)
 
-    if len(xs) < 6:
+    if len(observed_xs) < 6:
         return None
 
-    fit_degree = min(degree, len(xs) - 1)
-    ys = np.array(ys, dtype=np.float32)
-    xs = np.array(xs, dtype=np.float32)
-    weights = np.linspace(0.7, 1.3, len(ys), dtype=np.float32)
+    observed_ys = np.array(observed_ys, dtype=np.int32)
+    observed_xs = np.array(observed_xs, dtype=np.float32)
+    first_y = int(observed_ys[0])
+    last_y = int(observed_ys[-1])
 
-    try:
-        coeffs = np.polyfit(ys, xs, fit_degree, w=weights)
-    except Exception:
-        return None
+    interp_ys = np.arange(first_y, last_y + 1, dtype=np.int32)
+    interp_xs = np.interp(interp_ys, observed_ys, observed_xs)
 
-    return coeffs
+    if len(interp_xs) >= smoothing_window:
+        kernel = np.ones(smoothing_window, dtype=np.float32) / float(smoothing_window)
+        padded = np.pad(interp_xs, (smoothing_window // 2, smoothing_window // 2), mode='edge')
+        interp_xs = np.convolve(padded, kernel, mode='valid')
 
-def curve_to_points(coeffs, row_bounds):
-    if coeffs is None:
+    track[interp_ys] = interp_xs.astype(np.float32)
+
+    top_slope = _estimate_track_slope(interp_ys, interp_xs, use_top=True)
+    bottom_slope = _estimate_track_slope(interp_ys, interp_xs, use_top=False)
+
+    top_drivable_y = int(drivable_ys[0])
+    bottom_drivable_y = int(drivable_ys[-1])
+    for y in range(first_y - 1, top_drivable_y - 1, -1):
+        track[y] = float(track[y + 1] - top_slope)
+    for y in range(last_y + 1, bottom_drivable_y + 1):
+        track[y] = float(track[y - 1] + bottom_slope)
+
+    for y in drivable_ys:
+        if np.isnan(track[y]):
+            continue
+        left_bound, right_bound = row_bounds[y]
+        track[y] = float(np.clip(track[y], left_bound, right_bound))
+
+    return track
+
+def curve_to_points(track, row_bounds):
+    if track is None:
         return []
 
     points = []
     for y, bounds in enumerate(row_bounds):
-        if bounds is None:
+        if bounds is None or np.isnan(track[y]):
             continue
-        left_bound, right_bound = bounds
-        x = float(np.polyval(coeffs, y))
-        x = float(np.clip(x, left_bound, right_bound))
-        points.append([round(x, 2), int(y)])
+        points.append([round(float(track[y]), 2), int(y)])
     return points
 
 def build_lane_overlay_payload(left_mask, right_mask, da_mask, row_bounds):
     h_im, w_im = da_mask.shape[:2]
-    left_curve = fit_lane_curve(left_mask, row_bounds, 'left')
-    right_curve = fit_lane_curve(right_mask, row_bounds, 'right')
+    left_track = build_lane_track(left_mask, row_bounds, 'left')
+    right_track = build_lane_track(right_mask, row_bounds, 'right')
 
-    left_curve_sm = None
-    right_curve_sm = None
-    if left_curve is not None:
-        left_curve_sm = smooth_path(left_curve, state['left_poly_history'], max_history=8)
+    left_track_sm = None
+    right_track_sm = None
+    if left_track is not None:
+        left_track_sm = smooth_track(left_track, state['left_poly_history'], max_history=8)
     elif len(state['left_poly_history']) > 0:
-        left_curve_sm = np.nanmean(state['left_poly_history'], axis=0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            left_track_sm = np.nanmean(state['left_poly_history'], axis=0)
 
-    if right_curve is not None:
-        right_curve_sm = smooth_path(right_curve, state['right_poly_history'], max_history=8)
+    if right_track is not None:
+        right_track_sm = smooth_track(right_track, state['right_poly_history'], max_history=8)
     elif len(state['right_poly_history']) > 0:
-        right_curve_sm = np.nanmean(state['right_poly_history'], axis=0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            right_track_sm = np.nanmean(state['right_poly_history'], axis=0)
 
-    left_points = curve_to_points(left_curve_sm, row_bounds) if left_curve_sm is not None else []
-    right_points = curve_to_points(right_curve_sm, row_bounds) if right_curve_sm is not None else []
+    left_points = curve_to_points(left_track_sm, row_bounds) if left_track_sm is not None else []
+    right_points = curve_to_points(right_track_sm, row_bounds) if right_track_sm is not None else []
 
     polygon = []
     if len(left_points) >= 2 and len(right_points) >= 2:
