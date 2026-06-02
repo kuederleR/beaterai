@@ -334,12 +334,100 @@ def trace_lane_line(seed_x, seed_row_idx, sample_rows, row_bounds, lane_candidat
 
     return tracked_points
 
-def build_lane_divider_mask(ll_mask, da_mask, sample_step=8):
+def densify_lane_track(tracked_points, row_bounds, height):
+    valid_points = [(int(y), float(x), detected) for y, x, detected in tracked_points if row_bounds[int(y)] is not None]
+    if len(valid_points) < 3:
+        return None
+
+    valid_points.sort(key=lambda item: item[0])
+    sample_ys = np.array([y for y, _, _ in valid_points], dtype=np.int32)
+    sample_xs = np.array([x for _, x, _ in valid_points], dtype=np.float32)
+
+    if len(sample_xs) >= 5:
+        sample_xs = gaussian_filter1d(sample_xs, sigma=1.0, mode='nearest')
+
+    dense_track = np.full(height, np.nan, dtype=np.float32)
+    y_min = int(sample_ys[0])
+    y_max = int(sample_ys[-1])
+    dense_ys = np.arange(y_min, y_max + 1, dtype=np.int32)
+    dense_xs = np.interp(dense_ys, sample_ys, sample_xs)
+
+    for y, x in zip(dense_ys, dense_xs):
+        bounds = row_bounds[y]
+        if bounds is None:
+            continue
+        left_bound, right_bound = bounds
+        dense_track[y] = float(np.clip(x, left_bound + 2, right_bound - 2))
+
+    detected_count = sum(1 for _, _, detected in valid_points if detected)
+    coverage = detected_count / max(len(valid_points), 1)
+    return {
+        "x_by_y": dense_track,
+        "detected_count": detected_count,
+        "coverage": coverage,
+        "y_min": y_min,
+        "y_max": y_max,
+    }
+
+def average_track_distance(track_a, track_b):
+    valid_mask = ~np.isnan(track_a) & ~np.isnan(track_b)
+    if not np.any(valid_mask):
+        return None
+    return float(np.mean(np.abs(track_a[valid_mask] - track_b[valid_mask])))
+
+def filter_and_sort_lane_tracks(dense_tracks, row_bounds, min_gap=24):
+    filtered_tracks = []
+    for track in dense_tracks:
+        if track is None:
+            continue
+        span = track["y_max"] - track["y_min"]
+        if track["detected_count"] < 4 or track["coverage"] < 0.35 or span < 50:
+            continue
+
+        duplicate = False
+        for accepted in filtered_tracks:
+            avg_dist = average_track_distance(track["x_by_y"], accepted["x_by_y"])
+            if avg_dist is not None and avg_dist < min_gap * 0.6:
+                duplicate = True
+                break
+        if not duplicate:
+            filtered_tracks.append(track)
+
+    filtered_tracks.sort(key=lambda track: np.nanmedian(track["x_by_y"]))
+
+    for y in range(len(row_bounds)):
+        bounds = row_bounds[y]
+        if bounds is None:
+            continue
+
+        left_bound, right_bound = bounds
+        previous_x = left_bound + 2
+        for track in filtered_tracks:
+            x_val = track["x_by_y"][y]
+            if np.isnan(x_val):
+                continue
+            clamped_x = float(np.clip(x_val, previous_x + min_gap, right_bound - 2))
+            track["x_by_y"][y] = clamped_x
+            previous_x = clamped_x
+
+        if filtered_tracks and not np.isnan(filtered_tracks[-1]["x_by_y"][y]):
+            overflow = filtered_tracks[-1]["x_by_y"][y] - (right_bound - 2)
+            if overflow > 0:
+                for track in reversed(filtered_tracks):
+                    x_val = track["x_by_y"][y]
+                    if np.isnan(x_val):
+                        continue
+                    track["x_by_y"][y] = max(left_bound + 2, x_val - overflow)
+                    overflow = max(0.0, track["x_by_y"][y] - (right_bound - 2))
+
+    return filtered_tracks
+
+def build_lane_tracks(ll_mask, da_mask, sample_step=8):
     h_im, w_im = ll_mask.shape[:2]
     row_bounds = get_drivable_row_bounds(da_mask)
     sample_rows = [y for y in range(0, h_im, sample_step) if row_bounds[y] is not None]
     if not sample_rows:
-        return np.zeros_like(ll_mask)
+        return row_bounds, []
     if sample_rows[-1] != h_im - 1 and row_bounds[h_im - 1] is not None:
         sample_rows.append(h_im - 1)
 
@@ -359,43 +447,82 @@ def build_lane_divider_mask(ll_mask, da_mask, sample_step=8):
     seed_row_idx = min(max(int(len(sample_rows) * 0.55), 0), len(sample_rows) - 1)
     seed_centers = find_lane_seeds(lane_candidates, sample_rows, row_bounds, seed_row_idx)
 
-    divider_mask = np.zeros_like(ll_mask)
+    dense_tracks = []
     for seed_x in seed_centers:
-        tracked_points = trace_lane_line(seed_x, seed_row_idx, sample_rows, row_bounds, lane_candidates)
-        detected_points = [(y, x, detected) for y, x, detected in tracked_points if detected]
-        if len(detected_points) < 3:
-            continue
+        tracked_points = trace_lane_line(seed_x, seed_row_idx, sample_rows, row_bounds, lane_candidates, max_interp_steps=8)
+        dense_track = densify_lane_track(tracked_points, row_bounds, h_im)
+        if dense_track is not None:
+            dense_tracks.append(dense_track)
 
-        track_ys = np.array([y for y, _, _ in tracked_points], dtype=np.float32)
-        track_xs = np.array([x for _, x, _ in tracked_points], dtype=np.float32)
-        track_weights = np.array([1.0 if detected else 0.35 for _, _, detected in tracked_points], dtype=np.float32)
+    dense_tracks = filter_and_sort_lane_tracks(dense_tracks, row_bounds)
+    return row_bounds, dense_tracks
 
-        poly_degree = 2 if len(detected_points) >= 6 else 1
-        try:
-            poly = np.polyfit(track_ys, track_xs, poly_degree, w=track_weights)
-        except Exception:
-            continue
-
-        curve_points = []
-        y_min = int(track_ys.min())
-        y_max = int(track_ys.max())
-        dense_rows = range(y_min, y_max + 1, max(2, sample_step // 2))
-        for y in dense_rows:
-            bounds = row_bounds[y]
-            if bounds is None:
+def render_lane_dividers(shape, da_mask, lane_tracks, thickness=3):
+    divider_mask = np.zeros(shape, dtype=np.uint8)
+    for track in lane_tracks:
+        points = []
+        for y, x_val in enumerate(track["x_by_y"]):
+            if np.isnan(x_val):
                 continue
-            left_bound, right_bound = bounds
-            curve_x = float(np.polyval(poly, y))
-            if curve_x <= left_bound + 1 or curve_x >= right_bound - 1:
-                continue
-            curve_points.append([int(round(curve_x)), y])
+            points.append([int(round(x_val)), y])
 
-        if len(curve_points) >= 2:
-            cv2.polylines(divider_mask, [np.array(curve_points, dtype=np.int32)], isClosed=False, color=255, thickness=3)
+        if len(points) >= 2:
+            cv2.polylines(divider_mask, [np.array(points, dtype=np.int32)], isClosed=False, color=255, thickness=thickness)
 
     divider_mask &= (da_mask > 0).astype(np.uint8) * 255
-    divider_mask = cv2.dilate(divider_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=1)
     return divider_mask
+
+def segment_lane_regions(da_mask, row_bounds, lane_tracks):
+    h_im, w_im = da_mask.shape[:2]
+    lane_slots = np.zeros((h_im, w_im), dtype=np.int32)
+
+    for y in range(h_im):
+        bounds = row_bounds[y]
+        if bounds is None:
+            continue
+
+        left_bound, right_bound = bounds
+        divider_xs = []
+        for track in lane_tracks:
+            x_val = track["x_by_y"][y]
+            if np.isnan(x_val):
+                continue
+            x_int = int(round(x_val))
+            if left_bound + 3 <= x_int <= right_bound - 3:
+                divider_xs.append(x_int)
+
+        divider_xs.sort()
+        merged_dividers = []
+        for x_int in divider_xs:
+            if not merged_dividers or x_int - merged_dividers[-1] >= 18:
+                merged_dividers.append(x_int)
+
+        segment_left = left_bound
+        lane_id = 1
+        for divider_x in merged_dividers:
+            segment_right = max(segment_left, divider_x - 2)
+            if segment_right >= segment_left:
+                lane_slots[y, segment_left:segment_right + 1] = lane_id
+            segment_left = min(right_bound, divider_x + 2)
+            lane_id += 1
+
+        if segment_left <= right_bound:
+            lane_slots[y, segment_left:right_bound + 1] = lane_id
+
+    lane_slots[da_mask == 0] = 0
+    return lane_slots
+
+def find_reference_lane_id(lane_slots, reference_x, fallback_x):
+    h_im, w_im = lane_slots.shape[:2]
+    scan_rows = range(h_im - 1, max(-1, h_im - 120), -1)
+    probe_points = [int(np.clip(reference_x, 0, w_im - 1)), int(np.clip(fallback_x, 0, w_im - 1)), w_im // 2]
+
+    for y in scan_rows:
+        for probe_x in probe_points:
+            lane_id = int(lane_slots[y, probe_x])
+            if lane_id > 0:
+                return lane_id
+    return 0
 
 def inference_loop():
     global latest_web_frame, raw_frame_buffer, state
@@ -489,40 +616,19 @@ def inference_loop():
                 # New approach: Segment drivable area into lanes using lane lines as dividers
                 car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
                 h_im, w_im = im_infer.shape[:2]
-                
-                # Step 1: Follow lane-line trajectories from a reliable middle band and
-                # interpolate short gaps while the divider stays inside the drivable area.
-                ll_dividers = build_lane_divider_mask(ll_mask, da_mask)
-                
-                # Step 2: Create segmentation by subtracting lane line dividers from drivable area
-                segmentation_base = da_mask.copy().astype(np.uint8)
-                segmentation_base[ll_dividers > 0] = 0  # Lane lines become boundaries
-                
-                # Step 3: Label connected regions (each lane segment gets a unique ID)
-                num_labels, labels = cv2.connectedComponents(segmentation_base)
-                
-                # Step 4: Find the centermost lane (closest to image center horizontally)
                 image_center_x = w_im // 2
-                lane_centers = {}
                 
-                for label_id in range(1, num_labels):
-                    mask = labels == label_id
-                    if np.any(mask):
-                        # Find horizontal center of this lane segment
-                        ys, xs = np.where(mask)
-                        lane_center_x = np.mean(xs)
-                        lane_centers[label_id] = lane_center_x
+                # Step 1: Build stable divider tracks from the middle of the drivable area,
+                # then densify them row-by-row instead of fitting global polynomials.
+                row_bounds, lane_tracks = build_lane_tracks(ll_mask, da_mask)
+                ll_dividers = render_lane_dividers(da_mask.shape, da_mask, lane_tracks)
+
+                # Step 2: Partition the drivable area row-by-row using the ordered divider tracks.
+                lane_slots = segment_lane_regions(da_mask, row_bounds, lane_tracks)
+                center_lane_id = find_reference_lane_id(lane_slots, image_center_x, car_center_x)
+                current_lane_id = find_reference_lane_id(lane_slots, car_center_x, image_center_x)
                 
-                # Find centermost lane
-                center_lane_id = None
-                min_dist = float('inf')
-                for label_id, lane_x in lane_centers.items():
-                    dist = abs(lane_x - image_center_x)
-                    if dist < min_dist:
-                        min_dist = dist
-                        center_lane_id = label_id
-                
-                # Step 5: Color each segment based on distance from center lane
+                # Step 3: Color each lane slot based on distance from the center lane.
                 overlay = np.zeros_like(im_infer)
                 
                 # Define colors by distance (0=center, 1=adjacent, 2=further, 3=furthest)
@@ -532,30 +638,21 @@ def inference_loop():
                     (0, 165, 255),    # 2: Orange - further lanes
                     (0, 0, 255),      # 3+: Red - furthest lanes
                 ]
-                
-                # Calculate center lane position
-                center_lane_x = lane_centers.get(center_lane_id, image_center_x) if center_lane_id else image_center_x
-                
-                # Color each segment based on horizontal distance from center
-                for label_id, lane_x in lane_centers.items():
-                    mask = labels == label_id
-                    
-                    if label_id == center_lane_id:
-                        # Center lane is always green
-                        color = distance_colors[0]
+
+                lane_ids = [lane_id for lane_id in np.unique(lane_slots) if lane_id > 0]
+                if center_lane_id == 0 and lane_ids:
+                    center_lane_id = lane_ids[len(lane_ids) // 2]
+                if current_lane_id == 0:
+                    current_lane_id = center_lane_id
+
+                for lane_id in lane_ids:
+                    if center_lane_id > 0:
+                        distance_idx = min(abs(lane_id - center_lane_id), len(distance_colors) - 1)
                     else:
-                        # Calculate approximate lane distance
-                        # Assume average lane width of ~80-100 pixels
-                        avg_lane_width = 90
-                        distance_from_center = abs(lane_x - center_lane_x) / avg_lane_width
-                        distance_idx = min(int(round(distance_from_center)), len(distance_colors) - 1)
-                        color = distance_colors[distance_idx]
-                    
-                    overlay[mask] = color
+                        distance_idx = 0
+                    overlay[lane_slots == lane_id] = distance_colors[distance_idx]
                 
-                # Store which lane the car is actually in for boundary detection
-                car_bottom_y = h_im - 20
-                car_label = labels[car_bottom_y, car_center_x] if labels[car_bottom_y, car_center_x] > 0 else 0
+                current_lane_mask = ((lane_slots == current_lane_id) & (da_mask > 0)).astype(np.uint8) * 255
                 
                 # Blend overlay with original image
                 da_indices = da_mask > 0
@@ -571,13 +668,11 @@ def inference_loop():
                 if np.any(ll_indices):
                     im_infer[ll_indices] = (0, 255, 255)
                 
-                # Step 7: Find and draw the boundaries of the current lane in blue
+                # Step 4: Find and draw the boundaries of the current lane in blue
                 left_poly = None
                 right_poly = None
                 
-                if car_label > 0:
-                    current_lane_mask = (labels == car_label).astype(np.uint8) * 255
-                    
+                if np.any(current_lane_mask > 0):
                     # Apply morphological closing to fill vertical gaps and ensure continuity
                     kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 25))
                     current_lane_mask = cv2.morphologyEx(current_lane_mask, cv2.MORPH_CLOSE, kernel_close)
