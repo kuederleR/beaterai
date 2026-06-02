@@ -54,6 +54,7 @@ LDW_MIN_CALIBRATION_SAMPLES = 60
 
 # --- State ---
 latest_web_frame = None
+latest_lane_overlay = None
 raw_frame_buffer = None
 frame_lock = threading.Lock()
 state = {
@@ -354,8 +355,93 @@ def finalize_ldw_calibration():
     state["error"] = None
     save_calibration_state()
 
+def fit_lane_curve(mask, row_bounds, side, degree=2):
+    if mask is None or not np.any(mask > 0):
+        return None
+
+    ys = []
+    xs = []
+    for y, bounds in enumerate(row_bounds):
+        if bounds is None:
+            continue
+        row_xs = np.where(mask[y] > 0)[0]
+        if len(row_xs) == 0:
+            continue
+        ys.append(float(y))
+        if side == 'left':
+            xs.append(float(np.max(row_xs)))
+        else:
+            xs.append(float(np.min(row_xs)))
+
+    if len(xs) < 6:
+        return None
+
+    fit_degree = min(degree, len(xs) - 1)
+    ys = np.array(ys, dtype=np.float32)
+    xs = np.array(xs, dtype=np.float32)
+    weights = np.linspace(0.7, 1.3, len(ys), dtype=np.float32)
+
+    try:
+        coeffs = np.polyfit(ys, xs, fit_degree, w=weights)
+    except Exception:
+        return None
+
+    return coeffs
+
+def curve_to_points(coeffs, row_bounds):
+    if coeffs is None:
+        return []
+
+    points = []
+    for y, bounds in enumerate(row_bounds):
+        if bounds is None:
+            continue
+        left_bound, right_bound = bounds
+        x = float(np.polyval(coeffs, y))
+        x = float(np.clip(x, left_bound, right_bound))
+        points.append([round(x, 2), int(y)])
+    return points
+
+def build_lane_overlay_payload(left_mask, right_mask, da_mask, row_bounds):
+    h_im, w_im = da_mask.shape[:2]
+    left_curve = fit_lane_curve(left_mask, row_bounds, 'left')
+    right_curve = fit_lane_curve(right_mask, row_bounds, 'right')
+
+    left_curve_sm = None
+    right_curve_sm = None
+    if left_curve is not None:
+        left_curve_sm = smooth_path(left_curve, state['left_poly_history'], max_history=8)
+    elif len(state['left_poly_history']) > 0:
+        left_curve_sm = np.nanmean(state['left_poly_history'], axis=0)
+
+    if right_curve is not None:
+        right_curve_sm = smooth_path(right_curve, state['right_poly_history'], max_history=8)
+    elif len(state['right_poly_history']) > 0:
+        right_curve_sm = np.nanmean(state['right_poly_history'], axis=0)
+
+    left_points = curve_to_points(left_curve_sm, row_bounds) if left_curve_sm is not None else []
+    right_points = curve_to_points(right_curve_sm, row_bounds) if right_curve_sm is not None else []
+
+    polygon = []
+    if len(left_points) >= 2 and len(right_points) >= 2:
+        polygon = left_points + list(reversed(right_points))
+
+    drivable_rows = [y for y, bounds in enumerate(row_bounds) if bounds is not None]
+    top_y = drivable_rows[0] if drivable_rows else 0
+    bottom_y = drivable_rows[-1] if drivable_rows else h_im - 1
+
+    return {
+        "width": w_im,
+        "height": h_im,
+        "top_y": int(top_y),
+        "bottom_y": int(bottom_y),
+        "left_points": left_points,
+        "right_points": right_points,
+        "polygon": polygon,
+    }
+
 def inference_loop():
-    global latest_web_frame, raw_frame_buffer, state
+    global latest_web_frame, latest_lane_overlay, raw_frame_buffer, state
     
     fps_counter = 0
     fps_start = time.time()
@@ -413,6 +499,7 @@ def inference_loop():
 
         fcw_triggered = False
         ldw_triggered = False
+        lane_overlay_payload = None
 
         lane_perception_active = state["adas_enabled"] or state["calibration_center_frames_left"] > 0
 
@@ -448,7 +535,9 @@ def inference_loop():
             if ll_mask is not None and da_mask is not None:
                 car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
                 h_im, w_im = im_infer.shape[:2]
+                row_bounds = get_drivable_row_bounds(da_mask)
                 left_line_mask, right_line_mask, seed_row = build_current_lane_line_masks(ll_mask, da_mask, car_center_x)
+                lane_overlay_payload = build_lane_overlay_payload(left_line_mask, right_line_mask, da_mask, row_bounds)
 
                 cv2.line(im_infer, (car_center_x, 0), (car_center_x, h_im - 1), (255, 255, 255), 1)
 
@@ -466,18 +555,6 @@ def inference_loop():
                 ll_indices = ll_mask > 0
                 if np.any(ll_indices):
                     im_infer[ll_indices] = (0, 255, 255)
-
-                if np.any(left_line_mask > 0):
-                    im_infer[left_line_mask > 0] = cv2.addWeighted(
-                        im_infer[left_line_mask > 0], 0.25,
-                        np.full_like(im_infer[left_line_mask > 0], (255, 0, 0)), 0.75, 0
-                    )
-
-                if np.any(right_line_mask > 0):
-                    im_infer[right_line_mask > 0] = cv2.addWeighted(
-                        im_infer[right_line_mask > 0], 0.25,
-                        np.full_like(im_infer[right_line_mask > 0], (0, 0, 255)), 0.75, 0
-                    )
 
                 cv2.line(im_infer, (0, seed_row), (w_im - 1, seed_row), (255, 255, 255), 1)
 
@@ -512,6 +589,7 @@ def inference_loop():
         _, buf = cv2.imencode('.jpg', im_infer, [cv2.IMWRITE_JPEG_QUALITY, 70])
         with frame_lock:
             latest_web_frame = buf.tobytes()
+            latest_lane_overlay = lane_overlay_payload
 
         fps_counter += 1
         elapsed = time.time() - fps_start
@@ -546,6 +624,23 @@ def index():
 def video_feed():
     return Response(generate_mjpeg(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/api/lane_overlay')
+def lane_overlay():
+    with frame_lock:
+        overlay = latest_lane_overlay
+
+    if overlay is None:
+        return jsonify({
+            "width": INFER_WIDTH,
+            "height": INFER_HEIGHT,
+            "top_y": 0,
+            "bottom_y": INFER_HEIGHT - 1,
+            "left_points": [],
+            "right_points": [],
+            "polygon": []
+        })
+    return jsonify(overlay)
 
 @app.route('/api/status')
 def status():
