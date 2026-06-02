@@ -387,14 +387,19 @@ def inference_loop():
                 if car_label > 0:
                     current_lane_mask = (labels == car_label).astype(np.uint8) * 255
                     
+                    # Apply morphological closing to fill vertical gaps and ensure continuity
+                    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 25))
+                    current_lane_mask = cv2.morphologyEx(current_lane_mask, cv2.MORPH_CLOSE, kernel_close)
+                    
                     # Find left and right edges of current lane
                     left_edge_x = []
                     left_edge_y = []
                     right_edge_x = []
                     right_edge_y = []
                     
-                    start_y = int(h_im * 0.4)
-                    for y in range(start_y, h_im, 2):
+                    # Start from higher up in the image for more complete lane coverage
+                    start_y = int(h_im * 0.3)
+                    for y in range(start_y, h_im, 1):  # Sample every row for continuity
                         row = current_lane_mask[y, :]
                         if np.any(row > 0):
                             lane_xs = np.where(row > 0)[0]
@@ -411,7 +416,7 @@ def inference_loop():
                                     right_edge_y.append(y)
                     
                     # Fit smooth polynomials for lane boundaries
-                    if len(left_edge_x) >= 30:
+                    if len(left_edge_x) >= 20:  # Lower threshold for better detection
                         left_edge_x = np.array(left_edge_x)
                         left_edge_y = np.array(left_edge_y)
                         weights = np.exp((left_edge_y - h_im) / 60.0)
@@ -420,7 +425,7 @@ def inference_loop():
                         except:
                             pass
                     
-                    if len(right_edge_x) >= 30:
+                    if len(right_edge_x) >= 20:  # Lower threshold for better detection
                         right_edge_x = np.array(right_edge_x)
                         right_edge_y = np.array(right_edge_y)
                         weights = np.exp((right_edge_y - h_im) / 60.0)
@@ -431,24 +436,33 @@ def inference_loop():
                     
                     # Temporal smoothing of polynomials (critical for stability)
                     if left_poly is not None:
-                        left_poly_sm = smooth_path(left_poly, state['left_poly_history'], max_history=10)
+                        left_poly_sm = smooth_path(left_poly, state['left_poly_history'], max_history=12)
                     else:
-                        # If we lose the lane, keep using the smoothed history for a few frames
+                        # If we lose the lane, keep using the smoothed history for persistence
                         if len(state['left_poly_history']) > 0:
                             left_poly_sm = np.mean(state['left_poly_history'], axis=0)
                         else:
                             left_poly_sm = None
                         
                     if right_poly is not None:
-                        right_poly_sm = smooth_path(right_poly, state['right_poly_history'], max_history=10)
+                        right_poly_sm = smooth_path(right_poly, state['right_poly_history'], max_history=12)
                     else:
                         if len(state['right_poly_history']) > 0:
                             right_poly_sm = np.mean(state['right_poly_history'], axis=0)
                         else:
                             right_poly_sm = None
 
-                    # Draw smoothed lane boundaries (thick blue lines)
-                    plot_y = np.linspace(int(h_im * 0.4), h_im - 1, num=150).astype(np.int32)
+                    # Draw smoothed lane boundaries (thick blue lines) over full lane height
+                    # Determine actual extent of current lane for plotting range
+                    lane_ys = np.where(current_lane_mask > 0)[0]
+                    if len(lane_ys) > 0:
+                        plot_y_min = max(int(np.min(lane_ys)), 0)
+                        plot_y_max = min(int(np.max(lane_ys)), h_im - 1)
+                    else:
+                        plot_y_min = int(h_im * 0.3)
+                        plot_y_max = h_im - 1
+                    
+                    plot_y = np.linspace(plot_y_min, plot_y_max, num=200).astype(np.int32)
                     
                     if left_poly_sm is not None:
                         left_plot_x = np.polyval(left_poly_sm, plot_y)
