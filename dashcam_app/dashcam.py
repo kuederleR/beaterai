@@ -49,6 +49,8 @@ CENTER_LANE_X_MAX = (INFER_WIDTH // 3) * 2
 
 # LDW Settings
 LDW_MAX_DRIFT = 40 # Max pixel drift from center before warning
+LDW_CALIBRATION_SECONDS = 10
+LDW_MIN_CALIBRATION_SAMPLES = 60
 
 # --- State ---
 latest_web_frame = None
@@ -80,10 +82,11 @@ state = {
     "calib_left_history": [],
     "calib_right_history": [],
     "calibration": None,
-    "car_center_x": 320,
+    "car_center_x": INFER_WIDTH // 2,
     "calibrate_center_requested": False,
     "calibration_center_frames_left": 0,
-    "calib_center_history": []
+    "calib_center_history": [],
+    "ldw_calibration": None
 }
 
 if os.path.exists('models/calibration.json'):
@@ -93,9 +96,9 @@ if os.path.exists('models/calibration.json'):
             if "vp_x" in calib_data and "vp_y" in calib_data:
                 state["calibration"] = {"vp_x": calib_data["vp_x"], "vp_y": calib_data["vp_y"]}
                 print("[INFO] Successfully loaded Stable VP Calibration.", flush=True)
-            if "car_center_x" in calib_data:
-                state["car_center_x"] = calib_data["car_center_x"]
-                print(f"[INFO] Loaded calibrated car center: x={state['car_center_x']}", flush=True)
+            if "ldw_calibration" in calib_data:
+                state["ldw_calibration"] = calib_data["ldw_calibration"]
+                print("[INFO] Loaded LDW baseline calibration.", flush=True)
     except Exception as e:
         print(f"[ERROR] Failed to load calibration matrix: {e}", flush=True)
 
@@ -105,7 +108,8 @@ def save_calibration_state():
     calib_data = {}
     if state.get("calibration"):
         calib_data.update(state["calibration"])
-    calib_data["car_center_x"] = int(state.get("car_center_x", INFER_WIDTH // 2))
+    if state.get("ldw_calibration"):
+        calib_data["ldw_calibration"] = state["ldw_calibration"]
 
     os.makedirs('models', exist_ok=True)
     with open('models/calibration.json', 'w') as f:
@@ -295,6 +299,61 @@ def build_current_lane_line_masks(ll_mask, da_mask, center_x):
 
     return left_mask, right_mask, seed_row
 
+def sample_line_position(line_mask, target_y, side):
+    if line_mask is None or not np.any(line_mask > 0):
+        return None
+
+    target_y = int(np.clip(target_y, 0, line_mask.shape[0] - 1))
+    xs = np.where(line_mask[target_y] > 0)[0]
+    if len(xs) == 0:
+        rows = np.where(np.any(line_mask > 0, axis=1))[0]
+        if len(rows) == 0:
+            return None
+        nearest_row = int(rows[np.argmin(np.abs(rows - target_y))])
+        xs = np.where(line_mask[nearest_row] > 0)[0]
+        if len(xs) == 0:
+            return None
+
+    if side == 'left':
+        return float(np.max(xs))
+    return float(np.min(xs))
+
+def finalize_ldw_calibration():
+    left_samples = np.array(state["calib_left_history"], dtype=np.float32)
+    right_samples = np.array(state["calib_right_history"], dtype=np.float32)
+    eval_samples = np.array(state["calib_center_history"], dtype=np.float32)
+
+    state["calibration_center_frames_left"] = 0
+    state["calibrate_center_requested"] = False
+
+    if len(left_samples) < LDW_MIN_CALIBRATION_SAMPLES or len(right_samples) < LDW_MIN_CALIBRATION_SAMPLES:
+        state["ldw_calibration"] = None
+        state["calib_left_history"] = []
+        state["calib_right_history"] = []
+        state["calib_center_history"] = []
+        state["error"] = "Center calibration failed: not enough lane samples during the 10-second window."
+        return
+
+    left_min = float(np.percentile(left_samples, 10) - 8)
+    left_max = float(np.percentile(left_samples, 90) + 8)
+    right_min = float(np.percentile(right_samples, 10) - 8)
+    right_max = float(np.percentile(right_samples, 90) + 8)
+    eval_y = int(round(float(np.median(eval_samples)))) if len(eval_samples) > 0 else int(INFER_HEIGHT * 0.6)
+
+    state["ldw_calibration"] = {
+        "left_min": left_min,
+        "left_max": left_max,
+        "right_min": right_min,
+        "right_max": right_max,
+        "eval_y": eval_y,
+        "sample_count": int(min(len(left_samples), len(right_samples)))
+    }
+    state["calib_left_history"] = []
+    state["calib_right_history"] = []
+    state["calib_center_history"] = []
+    state["error"] = None
+    save_calibration_state()
+
 def inference_loop():
     global latest_web_frame, raw_frame_buffer, state
     
@@ -355,6 +414,8 @@ def inference_loop():
         fcw_triggered = False
         ldw_triggered = False
 
+        lane_perception_active = state["adas_enabled"] or state["calibration_center_frames_left"] > 0
+
         if state["adas_enabled"]:
             # --- 1. YOLOv8 Forward Collision Warning ---
             # Predict objects without tracking overhead
@@ -380,9 +441,10 @@ def inference_loop():
                             cv2.rectangle(im_infer, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 4)
                             cv2.putText(im_infer, "TOO CLOSE!", (int(x1), int(y1)-10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
 
+        if lane_perception_active:
             # --- 2. TwinLiteNet Drivable Area & Lane Departure Warning ---
             da_mask, ll_mask = twinlite_model.detect(im_infer)
-            
+
             if ll_mask is not None and da_mask is not None:
                 car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
                 h_im, w_im = im_infer.shape[:2]
@@ -419,33 +481,28 @@ def inference_loop():
 
                 cv2.line(im_infer, (0, seed_row), (w_im - 1, seed_row), (255, 255, 255), 1)
 
-                # Lane Departure Warning: estimate lane center from the selected connected left/right masks.
-                ldw_triggered = False
                 eval_y = min(h_im - 1, seed_row + 80)
-                left_xs = np.where(left_line_mask[eval_y] > 0)[0] if np.any(left_line_mask > 0) else np.array([])
-                right_xs = np.where(right_line_mask[eval_y] > 0)[0] if np.any(right_line_mask > 0) else np.array([])
+                left_x = sample_line_position(left_line_mask, eval_y, 'left')
+                right_x = sample_line_position(right_line_mask, eval_y, 'right')
 
-                if len(left_xs) == 0 and np.any(left_line_mask > 0):
-                    left_rows, left_cols = np.where(left_line_mask > 0)
-                    if len(left_rows) > 0:
-                        nearest_idx = np.argmin(np.abs(left_rows - eval_y))
-                        nearest_row = left_rows[nearest_idx]
-                        left_xs = np.where(left_line_mask[nearest_row] > 0)[0]
+                if state["calibration_center_frames_left"] > 0:
+                    state["calibration_center_frames_left"] -= 1
+                    if left_x is not None and right_x is not None and right_x > left_x:
+                        state["calib_left_history"].append(left_x)
+                        state["calib_right_history"].append(right_x)
+                        state["calib_center_history"].append(eval_y)
 
-                if len(right_xs) == 0 and np.any(right_line_mask > 0):
-                    right_rows, right_cols = np.where(right_line_mask > 0)
-                    if len(right_rows) > 0:
-                        nearest_idx = np.argmin(np.abs(right_rows - eval_y))
-                        nearest_row = right_rows[nearest_idx]
-                        right_xs = np.where(right_line_mask[nearest_row] > 0)[0]
+                    if state["calibration_center_frames_left"] <= 0:
+                        finalize_ldw_calibration()
 
-                if len(left_xs) > 0 and len(right_xs) > 0:
-                    left_x = float(np.max(left_xs))
-                    right_x = float(np.min(right_xs))
-                    if right_x > left_x:
-                        lane_center = 0.5 * (left_x + right_x)
-                        if abs(car_center_x - lane_center) > LDW_MAX_DRIFT:
-                            ldw_triggered = True
+                ldw_calibration = state.get("ldw_calibration")
+                if state["adas_enabled"] and ldw_calibration and left_x is not None and right_x is not None and right_x > left_x:
+                    left_out_of_range = left_x < ldw_calibration["left_min"] or left_x > ldw_calibration["left_max"]
+                    right_out_of_range = right_x < ldw_calibration["right_min"] or right_x > ldw_calibration["right_max"]
+                    if left_out_of_range or right_out_of_range:
+                        ldw_triggered = True
+
+                    cv2.line(im_infer, (0, int(ldw_calibration["eval_y"])), (w_im - 1, int(ldw_calibration["eval_y"])), (0, 255, 255), 1)
 
         # Update global state for UI alerts
         state["fcw_warning"] = fcw_triggered
@@ -495,6 +552,7 @@ def status():
     duration = 0
     if state["recording"] and state["recording_since"]:
         duration = int(time.time() - state["recording_since"])
+    calibration_total_frames = TARGET_FPS * LDW_CALIBRATION_SECONDS
     
     return jsonify({
         "capture_fps": state["capture_fps"],
@@ -511,7 +569,9 @@ def status():
         "twinlite_device": state["twinlite_device"],
         "car_center_x": state["car_center_x"],
         "calibrating_center": state["calibration_center_frames_left"] > 0,
-        "calibration_center_progress": 150 - state["calibration_center_frames_left"]
+        "calibration_center_progress": calibration_total_frames - state["calibration_center_frames_left"],
+        "calibration_center_total": calibration_total_frames,
+        "ldw_calibrated": state["ldw_calibration"] is not None
     })
 
 @app.route('/api/toggle_recording', methods=['POST'])
@@ -538,7 +598,13 @@ def api_calibrate():
 @app.route('/api/calibrate_center', methods=['POST'])
 def api_calibrate_center():
     global state
-    state["calibrate_center_requested"] = True
+    state["calibrate_center_requested"] = False
+    state["calibration_center_frames_left"] = TARGET_FPS * LDW_CALIBRATION_SECONDS
+    state["calib_left_history"] = []
+    state["calib_right_history"] = []
+    state["calib_center_history"] = []
+    state["ldw_calibration"] = None
+    state["error"] = None
     return jsonify({"status": "calibrating"})
 
 @app.route('/api/set_center_x', methods=['POST'])
