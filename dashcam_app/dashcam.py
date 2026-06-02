@@ -101,6 +101,16 @@ if os.path.exists('models/calibration.json'):
 
 video_writer = None
 
+def save_calibration_state():
+    calib_data = {}
+    if state.get("calibration"):
+        calib_data.update(state["calibration"])
+    calib_data["car_center_x"] = int(state.get("car_center_x", INFER_WIDTH // 2))
+
+    os.makedirs('models', exist_ok=True)
+    with open('models/calibration.json', 'w') as f:
+        json.dump(calib_data, f)
+
 def make_error_frame(message):
     error_img = np.zeros((480, 800, 3), dtype=np.uint8)
     cv2.putText(error_img, message, (20, 240),
@@ -269,7 +279,7 @@ def build_current_lane_line_masks(ll_mask, da_mask, center_x):
     if not drivable_rows:
         return np.zeros_like(ll_mask), np.zeros_like(ll_mask), 0
 
-    seed_row = drivable_rows[len(drivable_rows) // 2]
+    seed_row = drivable_rows[min(len(drivable_rows) - 1, int(len(drivable_rows) * 0.42))]
     ll_clean = cv2.morphologyEx(ll_mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 7)))
     ll_clean = remove_small_lane_components(ll_clean, min_area=20, min_height=10)
 
@@ -377,6 +387,8 @@ def inference_loop():
                 car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
                 h_im, w_im = im_infer.shape[:2]
                 left_line_mask, right_line_mask, seed_row = build_current_lane_line_masks(ll_mask, da_mask, car_center_x)
+
+                cv2.line(im_infer, (car_center_x, 0), (car_center_x, h_im - 1), (255, 255, 255), 1)
 
                 # Keep the drivable area lightly visible, but only segment the current left/right lane lines.
                 da_indices = da_mask > 0
@@ -528,6 +540,18 @@ def api_calibrate_center():
     global state
     state["calibrate_center_requested"] = True
     return jsonify({"status": "calibrating"})
+
+@app.route('/api/set_center_x', methods=['POST'])
+def api_set_center_x():
+    global state
+    data = request.json or {}
+    center_x = data.get('car_center_x')
+    if center_x is None:
+        return jsonify({"success": False, "error": "car_center_x is required"}), 400
+
+    state["car_center_x"] = int(np.clip(int(center_x), 0, INFER_WIDTH - 1))
+    save_calibration_state()
+    return jsonify({"success": True, "car_center_x": state["car_center_x"]})
 
 if __name__ == '__main__':
     print("=" * 50, flush=True)

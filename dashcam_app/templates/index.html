@@ -323,6 +323,55 @@
             font-size: 14px;
         }
 
+        .slider-card {
+            align-items: stretch;
+            gap: 14px;
+        }
+
+        .slider-header {
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .slider-value {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--accent-blue);
+        }
+
+        .range-input {
+            width: 100%;
+            appearance: none;
+            height: 6px;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.12);
+            outline: none;
+        }
+
+        .range-input::-webkit-slider-thumb {
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: var(--accent-blue);
+            border: 2px solid white;
+            cursor: pointer;
+            box-shadow: 0 0 0 6px rgba(59, 130, 246, 0.15);
+        }
+
+        .range-input::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: var(--accent-blue);
+            border: 2px solid white;
+            cursor: pointer;
+            box-shadow: 0 0 0 6px rgba(59, 130, 246, 0.15);
+        }
+
     </style>
 </head>
 <body>
@@ -393,12 +442,24 @@
                 Toggle real-time FCW & LDW monitoring logic.
             </div>
         </div>
+
+        <div class="control-card slider-card">
+            <div class="slider-header">
+                <span class="toggle-label">Lane Center Bias</span>
+                <span class="slider-value" id="centerSliderValue">320 px</span>
+            </div>
+            <input type="range" id="centerSlider" class="range-input" min="0" max="639" value="320" oninput="previewCenterX(this.value)" onchange="updateCenterX(this.value)">
+            <div style="font-size: 12px; color: var(--text-secondary); text-align: center;">
+                Shift the center probe left or right if lane selection keeps favoring the wrong side.
+            </div>
+        </div>
     </div>
 
     <script>
         // State
         let isRecording = false;
         let isAdasEnabled = false;
+        let isUpdatingCenter = false;
 
         // Elements
         const mainStatus = document.getElementById('mainStatus');
@@ -413,6 +474,12 @@
         const warningBanner = document.getElementById('warningBanner');
         const calibrateCenterBtn = document.getElementById('calibrateCenterBtn');
         const calibrateCenterLabel = document.getElementById('calibrateCenterLabel');
+        const centerSlider = document.getElementById('centerSlider');
+        const centerSliderValue = document.getElementById('centerSliderValue');
+
+        function previewCenterX(value) {
+            centerSliderValue.innerText = `${value}px`;
+        }
 
         function formatDuration(seconds) {
             const m = Math.floor(seconds / 60).toString().padStart(2, '0');
@@ -450,6 +517,10 @@
                 // Update Car Center
                 if (data.car_center_x !== undefined) {
                     centerDisplay.innerText = `Car Center X: ${data.car_center_x}px`;
+                    if (!isUpdatingCenter) {
+                        centerSlider.value = data.car_center_x;
+                        previewCenterX(data.car_center_x);
+                    }
                 }
 
                 // Update Recording UI based on server state
@@ -573,6 +644,29 @@
             } catch(e) {
                 calibrateCenterBtn.style.opacity = '1';
                 calibrateCenterLabel.innerText = 'Calibration Failed';
+            }
+        }
+
+        async function updateCenterX(value) {
+            isUpdatingCenter = true;
+            previewCenterX(value);
+
+            try {
+                const res = await fetch('/api/set_center_x', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ car_center_x: Number(value) })
+                });
+                const data = await res.json();
+                if (data.car_center_x !== undefined) {
+                    centerSlider.value = data.car_center_x;
+                    previewCenterX(data.car_center_x);
+                    centerDisplay.innerText = `Car Center X: ${data.car_center_x}px`;
+                }
+            } catch (e) {
+                await fetchStatus();
+            } finally {
+                isUpdatingCenter = false;
             }
         }
 
