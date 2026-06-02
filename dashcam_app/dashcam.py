@@ -294,14 +294,42 @@ def inference_loop():
                 car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
                 h_im, w_im = im_infer.shape[:2]
                 
-                # Step 1: Connect broken lane line segments using morphological operations
-                # Use vertical kernel to connect gaps in lane lines
-                kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
-                ll_closed = cv2.morphologyEx(ll_mask, cv2.MORPH_CLOSE, kernel_vertical)
+                # Step 1: Intelligently extend lane lines through full drivable area height
+                # Find vertical extent of drivable area
+                da_rows = np.any(da_mask > 0, axis=1)
+                da_top = np.argmax(da_rows) if np.any(da_rows) else 0
+                da_bottom = len(da_rows) - 1 - np.argmax(da_rows[::-1]) if np.any(da_rows) else h_im - 1
                 
-                # Dilate slightly to make lane lines act as better dividers
+                # Create extended lane line mask
+                ll_extended = np.zeros_like(ll_mask)
+                
+                # For each column, if it has enough lane line pixels, extend through drivable area
+                for x in range(w_im):
+                    col_ll = ll_mask[:, x]
+                    col_da = da_mask[:, x]
+                    
+                    # Count lane line pixels in this column
+                    ll_count = np.sum(col_ll > 0)
+                    da_count = np.sum(col_da > 0)
+                    
+                    # If this column has significant lane line presence (>20% of drivable area)
+                    if ll_count > 0 and da_count > 0:
+                        ll_ratio = ll_count / max(da_count, 1)
+                        if ll_ratio > 0.15:  # At least 15% lane line coverage
+                            # Extend this lane line through the full drivable area column
+                            ll_extended[da_top:da_bottom+1, x] = 255
+                
+                # Connect nearby extended lane lines horizontally
+                kernel_horizontal = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))
+                ll_extended = cv2.morphologyEx(ll_extended, cv2.MORPH_CLOSE, kernel_horizontal)
+                
+                # Use vertical kernel to ensure solid dividers
+                kernel_vertical = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 30))
+                ll_dividers = cv2.morphologyEx(ll_extended, cv2.MORPH_CLOSE, kernel_vertical)
+                
+                # Dilate to make stronger boundaries
                 kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-                ll_dividers = cv2.dilate(ll_closed, kernel_dilate, iterations=1)
+                ll_dividers = cv2.dilate(ll_dividers, kernel_dilate, iterations=1)
                 
                 # Step 2: Create segmentation by subtracting lane line dividers from drivable area
                 segmentation_base = da_mask.copy().astype(np.uint8)
