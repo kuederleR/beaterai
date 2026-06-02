@@ -375,6 +375,33 @@ def average_track_distance(track_a, track_b):
         return None
     return float(np.mean(np.abs(track_a[valid_mask] - track_b[valid_mask])))
 
+def extend_track_within_drivable(track_x_by_y, row_bounds, max_extension=120):
+    extended = track_x_by_y.copy()
+    valid_ys = np.where(~np.isnan(extended))[0]
+    if len(valid_ys) == 0:
+        return extended
+
+    first_y = int(valid_ys[0])
+    last_y = int(valid_ys[-1])
+    first_x = float(extended[first_y])
+    last_x = float(extended[last_y])
+
+    for y in range(first_y - 1, max(-1, first_y - max_extension - 1), -1):
+        bounds = row_bounds[y]
+        if bounds is None:
+            continue
+        left_bound, right_bound = bounds
+        extended[y] = float(np.clip(first_x, left_bound + 2, right_bound - 2))
+
+    for y in range(last_y + 1, min(len(row_bounds), last_y + max_extension + 1)):
+        bounds = row_bounds[y]
+        if bounds is None:
+            continue
+        left_bound, right_bound = bounds
+        extended[y] = float(np.clip(last_x, left_bound + 2, right_bound - 2))
+
+    return extended
+
 def filter_and_sort_lane_tracks(dense_tracks, row_bounds, min_gap=24):
     filtered_tracks = []
     for track in dense_tracks:
@@ -394,6 +421,8 @@ def filter_and_sort_lane_tracks(dense_tracks, row_bounds, min_gap=24):
             filtered_tracks.append(track)
 
     filtered_tracks.sort(key=lambda track: np.nanmedian(track["x_by_y"]))
+    for track in filtered_tracks:
+        track["x_by_y"] = extend_track_within_drivable(track["x_by_y"], row_bounds)
 
     for y in range(len(row_bounds)):
         bounds = row_bounds[y]
@@ -475,6 +504,7 @@ def render_lane_dividers(shape, da_mask, lane_tracks, thickness=3):
 def segment_lane_regions(da_mask, row_bounds, lane_tracks):
     h_im, w_im = da_mask.shape[:2]
     lane_slots = np.zeros((h_im, w_im), dtype=np.int32)
+    num_dividers = len(lane_tracks)
 
     for y in range(h_im):
         bounds = row_bounds[y]
@@ -486,28 +516,24 @@ def segment_lane_regions(da_mask, row_bounds, lane_tracks):
         for track in lane_tracks:
             x_val = track["x_by_y"][y]
             if np.isnan(x_val):
+                divider_xs.append(None)
                 continue
-            x_int = int(round(x_val))
-            if left_bound + 3 <= x_int <= right_bound - 3:
-                divider_xs.append(x_int)
-
-        divider_xs.sort()
-        merged_dividers = []
-        for x_int in divider_xs:
-            if not merged_dividers or x_int - merged_dividers[-1] >= 18:
-                merged_dividers.append(x_int)
+            x_int = int(round(np.clip(x_val, left_bound + 2, right_bound - 2)))
+            divider_xs.append(x_int)
 
         segment_left = left_bound
-        lane_id = 1
-        for divider_x in merged_dividers:
+        for divider_idx in range(num_dividers):
+            divider_x = divider_xs[divider_idx]
+            if divider_x is None:
+                continue
+            lane_id = divider_idx + 1
             segment_right = max(segment_left, divider_x - 2)
             if segment_right >= segment_left:
                 lane_slots[y, segment_left:segment_right + 1] = lane_id
             segment_left = min(right_bound, divider_x + 2)
-            lane_id += 1
 
         if segment_left <= right_bound:
-            lane_slots[y, segment_left:right_bound + 1] = lane_id
+            lane_slots[y, segment_left:right_bound + 1] = num_dividers + 1
 
     lane_slots[da_mask == 0] = 0
     return lane_slots
@@ -523,6 +549,53 @@ def find_reference_lane_id(lane_slots, reference_x, fallback_x):
             if lane_id > 0:
                 return lane_id
     return 0
+
+def get_lane_boundary_tracks(lane_id, row_bounds, lane_tracks):
+    height = len(row_bounds)
+    left_track = np.full(height, np.nan, dtype=np.float32)
+    right_track = np.full(height, np.nan, dtype=np.float32)
+    num_dividers = len(lane_tracks)
+    lane_index = max(0, lane_id - 1)
+
+    for y, bounds in enumerate(row_bounds):
+        if bounds is None:
+            continue
+        left_bound, right_bound = bounds
+
+        if lane_index == 0:
+            left_track[y] = float(left_bound)
+        elif lane_index - 1 < num_dividers:
+            left_x = lane_tracks[lane_index - 1]["x_by_y"][y]
+            if not np.isnan(left_x):
+                left_track[y] = float(left_x)
+
+        if lane_index >= num_dividers:
+            right_track[y] = float(right_bound)
+        else:
+            right_x = lane_tracks[lane_index]["x_by_y"][y]
+            if not np.isnan(right_x):
+                right_track[y] = float(right_x)
+
+        if not np.isnan(left_track[y]) and not np.isnan(right_track[y]) and left_track[y] >= right_track[y] - 6:
+            mid_x = 0.5 * (left_track[y] + right_track[y])
+            left_track[y] = mid_x - 3
+            right_track[y] = mid_x + 3
+
+    return left_track, right_track
+
+def track_to_polyline(track_x_by_y, row_bounds, min_y=0, max_y=None):
+    if max_y is None:
+        max_y = len(row_bounds) - 1
+
+    points = []
+    for y in range(max(min_y, 0), min(max_y, len(row_bounds) - 1) + 1):
+        if row_bounds[y] is None or np.isnan(track_x_by_y[y]):
+            continue
+        points.append([int(round(track_x_by_y[y])), y])
+
+    if len(points) < 2:
+        return None
+    return np.array(points, dtype=np.int32)
 
 def inference_loop():
     global latest_web_frame, raw_frame_buffer, state
@@ -653,6 +726,7 @@ def inference_loop():
                     overlay[lane_slots == lane_id] = distance_colors[distance_idx]
                 
                 current_lane_mask = ((lane_slots == current_lane_id) & (da_mask > 0)).astype(np.uint8) * 255
+                left_boundary_track, right_boundary_track = get_lane_boundary_tracks(current_lane_id, row_bounds, lane_tracks)
                 
                 # Blend overlay with original image
                 da_indices = da_mask > 0
@@ -669,77 +743,7 @@ def inference_loop():
                     im_infer[ll_indices] = (0, 255, 255)
                 
                 # Step 4: Find and draw the boundaries of the current lane in blue
-                left_poly = None
-                right_poly = None
-                
                 if np.any(current_lane_mask > 0):
-                    # Apply morphological closing to fill vertical gaps and ensure continuity
-                    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 25))
-                    current_lane_mask = cv2.morphologyEx(current_lane_mask, cv2.MORPH_CLOSE, kernel_close)
-                    
-                    # Find left and right edges of current lane
-                    left_edge_x = []
-                    left_edge_y = []
-                    right_edge_x = []
-                    right_edge_y = []
-                    
-                    # Start from higher up in the image for more complete lane coverage
-                    start_y = int(h_im * 0.3)
-                    for y in range(start_y, h_im, 1):  # Sample every row for continuity
-                        row = current_lane_mask[y, :]
-                        if np.any(row > 0):
-                            lane_xs = np.where(row > 0)[0]
-                            if len(lane_xs) > 0:
-                                left_boundary = np.min(lane_xs)
-                                right_boundary = np.max(lane_xs)
-                                
-                                # Only add if reasonably on the correct side
-                                if left_boundary < car_center_x:
-                                    left_edge_x.append(left_boundary)
-                                    left_edge_y.append(y)
-                                if right_boundary > car_center_x:
-                                    right_edge_x.append(right_boundary)
-                                    right_edge_y.append(y)
-                    
-                    # Fit smooth polynomials for lane boundaries
-                    if len(left_edge_x) >= 20:  # Lower threshold for better detection
-                        left_edge_x = np.array(left_edge_x)
-                        left_edge_y = np.array(left_edge_y)
-                        weights = np.exp((left_edge_y - h_im) / 60.0)
-                        try:
-                            left_poly = np.polyfit(left_edge_y, left_edge_x, 2, w=weights)
-                        except:
-                            pass
-                    
-                    if len(right_edge_x) >= 20:  # Lower threshold for better detection
-                        right_edge_x = np.array(right_edge_x)
-                        right_edge_y = np.array(right_edge_y)
-                        weights = np.exp((right_edge_y - h_im) / 60.0)
-                        try:
-                            right_poly = np.polyfit(right_edge_y, right_edge_x, 2, w=weights)
-                        except:
-                            pass
-                    
-                    # Temporal smoothing of polynomials (critical for stability)
-                    if left_poly is not None:
-                        left_poly_sm = smooth_path(left_poly, state['left_poly_history'], max_history=12)
-                    else:
-                        # If we lose the lane, keep using the smoothed history for persistence
-                        if len(state['left_poly_history']) > 0:
-                            left_poly_sm = np.mean(state['left_poly_history'], axis=0)
-                        else:
-                            left_poly_sm = None
-                        
-                    if right_poly is not None:
-                        right_poly_sm = smooth_path(right_poly, state['right_poly_history'], max_history=12)
-                    else:
-                        if len(state['right_poly_history']) > 0:
-                            right_poly_sm = np.mean(state['right_poly_history'], axis=0)
-                        else:
-                            right_poly_sm = None
-
-                    # Draw smoothed lane boundaries (thick blue lines) over full lane height
-                    # Determine actual extent of current lane for plotting range
                     lane_ys = np.where(current_lane_mask > 0)[0]
                     if len(lane_ys) > 0:
                         plot_y_min = max(int(np.min(lane_ys)), 0)
@@ -747,31 +751,46 @@ def inference_loop():
                     else:
                         plot_y_min = int(h_im * 0.3)
                         plot_y_max = h_im - 1
-                    
-                    plot_y = np.linspace(plot_y_min, plot_y_max, num=200).astype(np.int32)
-                    
-                    if left_poly_sm is not None:
-                        left_plot_x = np.polyval(left_poly_sm, plot_y)
-                        left_plot_x = np.clip(left_plot_x, 0, INFER_WIDTH - 1)
-                        left_pts = np.array([np.vstack([left_plot_x, plot_y]).T], dtype=np.int32)
-                        cv2.polylines(im_infer, left_pts, isClosed=False, color=(255, 0, 0), thickness=6)
-                    
-                    if right_poly_sm is not None:
-                        right_plot_x = np.polyval(right_poly_sm, plot_y)
-                        right_plot_x = np.clip(right_plot_x, 0, INFER_WIDTH - 1)
-                        right_pts = np.array([np.vstack([right_plot_x, plot_y]).T], dtype=np.int32)
-                        cv2.polylines(im_infer, right_pts, isClosed=False, color=(255, 0, 0), thickness=6)
+
+                    left_track_sm = None
+                    right_track_sm = None
+                    if np.any(~np.isnan(left_boundary_track)):
+                        left_track_sm = smooth_path(left_boundary_track, state['left_poly_history'], max_history=8)
+                    elif len(state['left_poly_history']) > 0:
+                        left_track_sm = np.nanmean(state['left_poly_history'], axis=0)
+
+                    if np.any(~np.isnan(right_boundary_track)):
+                        right_track_sm = smooth_path(right_boundary_track, state['right_poly_history'], max_history=8)
+                    elif len(state['right_poly_history']) > 0:
+                        right_track_sm = np.nanmean(state['right_poly_history'], axis=0)
+
+                    left_pts = track_to_polyline(left_track_sm, row_bounds, plot_y_min, plot_y_max) if left_track_sm is not None else None
+                    right_pts = track_to_polyline(right_track_sm, row_bounds, plot_y_min, plot_y_max) if right_track_sm is not None else None
+
+                    if left_pts is not None:
+                        cv2.polylines(im_infer, [left_pts], isClosed=False, color=(255, 0, 0), thickness=6)
+
+                    if right_pts is not None:
+                        cv2.polylines(im_infer, [right_pts], isClosed=False, color=(255, 0, 0), thickness=6)
 
                     # Lane Departure Warning: check if car is drifting from lane center
                     ldw_triggered = False
-                    if left_poly_sm is not None and right_poly_sm is not None:
-                        # Evaluate lane boundaries at bottom of frame
-                        eval_y = h_im - 50
-                        left_x_bottom = np.polyval(left_poly_sm, eval_y)
-                        right_x_bottom = np.polyval(right_poly_sm, eval_y)
+                    if left_track_sm is not None and right_track_sm is not None:
+                        eval_y = max(0, h_im - 50)
+                        left_x_bottom = left_track_sm[eval_y]
+                        right_x_bottom = right_track_sm[eval_y]
+                        if np.isnan(left_x_bottom) or np.isnan(right_x_bottom):
+                            valid_rows = np.where(~np.isnan(left_track_sm) & ~np.isnan(right_track_sm))[0]
+                            if len(valid_rows) > 0:
+                                eval_y = int(valid_rows[-1])
+                                left_x_bottom = left_track_sm[eval_y]
+                                right_x_bottom = right_track_sm[eval_y]
+                            else:
+                                left_x_bottom = np.nan
+                                right_x_bottom = np.nan
+
+                    if left_track_sm is not None and right_track_sm is not None and not np.isnan(left_x_bottom) and not np.isnan(right_x_bottom):
                         lane_center = (left_x_bottom + right_x_bottom) / 2
-                        
-                        # Check drift from current car center
                         drift = abs(car_center_x - lane_center)
                         if drift > LDW_MAX_DRIFT:
                             ldw_triggered = True
