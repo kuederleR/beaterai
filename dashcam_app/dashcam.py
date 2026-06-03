@@ -501,7 +501,7 @@ def curve_to_points(track, row_bounds):
         points.append([round(float(track[y]), 2), int(y)])
     return points
 
-def build_lane_overlay_payload(left_mask, right_mask, da_mask, row_bounds):
+def build_lane_overlay_payload(left_mask, right_mask, da_mask, row_bounds, left_warning=False, right_warning=False, fcw_warning=False):
     h_im, w_im = da_mask.shape[:2]
     left_track = build_lane_track(left_mask, row_bounds, 'left')
     right_track = build_lane_track(right_mask, row_bounds, 'right')
@@ -524,10 +524,24 @@ def build_lane_overlay_payload(left_mask, right_mask, da_mask, row_bounds):
 
     left_points = curve_to_points(left_track_sm, row_bounds) if left_track_sm is not None else []
     right_points = curve_to_points(right_track_sm, row_bounds) if right_track_sm is not None else []
+    center_points = []
+    if left_track_sm is not None and right_track_sm is not None:
+        for y, bounds in enumerate(row_bounds):
+            if bounds is None or np.isnan(left_track_sm[y]) or np.isnan(right_track_sm[y]):
+                continue
+            center_x = 0.5 * (left_track_sm[y] + right_track_sm[y])
+            center_points.append([round(float(center_x), 2), int(y)])
 
     polygon = []
     if len(left_points) >= 2 and len(right_points) >= 2:
         polygon = left_points + list(reversed(right_points))
+
+    left_zone = []
+    right_zone = []
+    if len(left_points) >= 2 and len(center_points) >= 2:
+        left_zone = left_points + list(reversed(center_points))
+    if len(center_points) >= 2 and len(right_points) >= 2:
+        right_zone = center_points + list(reversed(right_points))
 
     drivable_rows = [y for y, bounds in enumerate(row_bounds) if bounds is not None]
     top_y = drivable_rows[0] if drivable_rows else 0
@@ -540,7 +554,13 @@ def build_lane_overlay_payload(left_mask, right_mask, da_mask, row_bounds):
         "bottom_y": int(bottom_y),
         "left_points": left_points,
         "right_points": right_points,
+        "center_points": center_points,
         "polygon": polygon,
+        "left_zone": left_zone,
+        "right_zone": right_zone,
+        "left_warning": bool(left_warning),
+        "right_warning": bool(right_warning),
+        "fcw_warning": bool(fcw_warning),
     }
 
 def inference_loop():
@@ -648,7 +668,8 @@ def inference_loop():
                 h_im, w_im = im_infer.shape[:2]
                 row_bounds = get_drivable_row_bounds(da_lane_mask)
                 left_line_mask, right_line_mask, seed_row = build_current_lane_line_masks(ll_mask, da_lane_mask, car_center_x)
-                lane_overlay_payload = build_lane_overlay_payload(left_line_mask, right_line_mask, da_lane_mask, row_bounds)
+                left_out_of_range = False
+                right_out_of_range = False
 
                 cv2.line(im_infer, (car_center_x, 0), (car_center_x, h_im - 1), (255, 255, 255), 1)
                 if hood_y is not None:
@@ -693,6 +714,16 @@ def inference_loop():
                         ldw_triggered = True
 
                     cv2.line(im_infer, (0, int(ldw_calibration["eval_y"])), (w_im - 1, int(ldw_calibration["eval_y"])), (0, 255, 255), 1)
+
+                lane_overlay_payload = build_lane_overlay_payload(
+                    left_line_mask,
+                    right_line_mask,
+                    da_lane_mask,
+                    row_bounds,
+                    left_warning=left_out_of_range,
+                    right_warning=right_out_of_range,
+                    fcw_warning=fcw_triggered,
+                )
 
         # Update global state for UI alerts
         state["fcw_warning"] = fcw_triggered

@@ -525,9 +525,12 @@
             const scaleX = laneOverlayCanvas.width / data.width;
             const scaleY = laneOverlayCanvas.height / data.height;
 
-            if (Array.isArray(data.polygon) && data.polygon.length >= 3) {
+            const drawPolygon = (points, fillStyle) => {
+                if (!Array.isArray(points) || points.length < 3) {
+                    return;
+                }
                 laneOverlayCtx.beginPath();
-                data.polygon.forEach(([x, y], index) => {
+                points.forEach(([x, y], index) => {
                     const px = x * scaleX;
                     const py = y * scaleY;
                     if (index === 0) {
@@ -537,8 +540,21 @@
                     }
                 });
                 laneOverlayCtx.closePath();
-                laneOverlayCtx.fillStyle = 'rgba(48, 212, 122, 0.18)';
+                laneOverlayCtx.fillStyle = fillStyle;
                 laneOverlayCtx.fill();
+            };
+
+            if (Array.isArray(data.polygon) && data.polygon.length >= 3) {
+                const baseFill = data.fcw_warning ? 'rgba(255, 84, 84, 0.18)' : 'rgba(48, 212, 122, 0.18)';
+                drawPolygon(data.polygon, baseFill);
+            }
+
+            if (data.left_warning) {
+                drawPolygon(data.left_zone, 'rgba(255, 159, 67, 0.32)');
+            }
+
+            if (data.right_warning) {
+                drawPolygon(data.right_zone, 'rgba(255, 159, 67, 0.32)');
             }
 
             const drawPath = (points, strokeStyle) => {
@@ -562,8 +578,8 @@
                 laneOverlayCtx.stroke();
             };
 
-            drawPath(data.left_points, 'rgba(80, 180, 255, 0.95)');
-            drawPath(data.right_points, 'rgba(80, 180, 255, 0.95)');
+            drawPath(data.left_points, data.left_warning ? 'rgba(255, 159, 67, 1.0)' : 'rgba(80, 180, 255, 0.95)');
+            drawPath(data.right_points, data.right_warning ? 'rgba(255, 159, 67, 1.0)' : 'rgba(80, 180, 255, 0.95)');
         }
 
         async function fetchLaneOverlay() {
@@ -596,15 +612,7 @@
                 }
 
                 // Update Warnings
-                if (data.fcw_warning) {
-                    warningBanner.className = 'warning-banner fcw';
-                    warningBanner.innerText = '⚠️ COLLISION WARNING ⚠️';
-                } else if (data.ldw_warning) {
-                    warningBanner.className = 'warning-banner ldw';
-                    warningBanner.innerText = '⚠️ LANE DRIFT WARNING ⚠️';
-                } else {
-                    warningBanner.className = 'warning-banner';
-                }
+                warningBanner.className = 'warning-banner';
 
                 // Update FPS
                 fpsDisplay.innerText = `Capture: ${data.capture_fps} FPS | Web: ${data.web_fps} FPS`;
