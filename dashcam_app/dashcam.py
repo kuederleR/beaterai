@@ -163,48 +163,52 @@ def capture_loop():
     fps_start = time.time()
     
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            if DEV_VIDEO_PATH:
-                # Loop video
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        try:
+            ret, frame = cap.read()
+            if not ret:
+                if DEV_VIDEO_PATH:
+                    # Loop video
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
+                
+                print("[WARNING] Could not read frame from camera. Retrying...", flush=True)
+                time.sleep(0.01)
                 continue
+                
+            if DEV_VIDEO_PATH:
+                # Simulate real-time framerate for video files so it doesn't run at 1000fps
+                time.sleep(1.0 / TARGET_FPS)
+                
+            with frame_lock:
+                raw_frame_buffer = frame.copy()
             
-            print("[WARNING] Could not read frame from camera. Retrying...", flush=True)
-            time.sleep(0.01)
-            continue
-            
-        if DEV_VIDEO_PATH:
-            # Simulate real-time framerate for video files so it doesn't run at 1000fps
-            time.sleep(1.0 / TARGET_FPS)
-            
-        with frame_lock:
-            raw_frame_buffer = frame.copy()
-        
-        # Recording logic
-        if state["recording"]:
-            if video_writer is None:
-                os.makedirs("recordings", exist_ok=True)
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"recordings/dashcam_{timestamp}.avi"
-                fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-                video_writer = cv2.VideoWriter(filename, fourcc, TARGET_FPS, (frame.shape[1], frame.shape[0]))
-                state["recording_since"] = time.time()
-                print(f"[INFO] Started recording: {filename}", flush=True)
-            video_writer.write(frame)
-        else:
-            if video_writer is not None:
-                video_writer.release()
-                video_writer = None
-                state["recording_since"] = None
-                print(f"[INFO] Stopped recording", flush=True)
+            # Recording logic
+            if state["recording"]:
+                if video_writer is None:
+                    os.makedirs("recordings", exist_ok=True)
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"recordings/dashcam_{timestamp}.avi"
+                    fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+                    video_writer = cv2.VideoWriter(filename, fourcc, TARGET_FPS, (frame.shape[1], frame.shape[0]))
+                    state["recording_since"] = time.time()
+                    print(f"[INFO] Started recording: {filename}", flush=True)
+                video_writer.write(frame)
+            else:
+                if video_writer is not None:
+                    video_writer.release()
+                    video_writer = None
+                    state["recording_since"] = None
+                    print(f"[INFO] Stopped recording", flush=True)
 
-        fps_counter += 1
-        elapsed = time.time() - fps_start
-        if elapsed >= 2.0:
-            state["capture_fps"] = round(fps_counter / elapsed, 1)
-            fps_counter = 0
-            fps_start = time.time()
+            fps_counter += 1
+            elapsed = time.time() - fps_start
+            if elapsed >= 2.0:
+                state["capture_fps"] = round(fps_counter / elapsed, 1)
+                fps_counter = 0
+                fps_start = time.time()
+        except Exception:
+            logging.exception("capture_loop frame processing failed")
+            time.sleep(0.05)
 
 
 # --- Thread 2: AI Inference and Web Encoding ---
@@ -605,168 +609,172 @@ def inference_loop():
     state["twinlite_device"] = str(twinlite_model.device)
 
     while True:
-        has_frame = False
-        with frame_lock:
-            if raw_frame_buffer is not None:
-                im0 = raw_frame_buffer.copy()
-                raw_frame_buffer = None
-                has_frame = True
-                
-        if not has_frame:
-            time.sleep(0.01)
-            continue
-            
-        # Ensure im0 is strictly 3-channel BGR
-        if len(im0.shape) == 2:
-            im0 = cv2.cvtColor(im0, cv2.COLOR_GRAY2BGR)
-        elif len(im0.shape) == 3 and im0.shape[2] == 4:
-            im0 = cv2.cvtColor(im0, cv2.COLOR_BGRA2BGR)
-
-        im_infer = cv2.resize(im0, (INFER_WIDTH, INFER_HEIGHT), interpolation=cv2.INTER_LINEAR)
-
-        fcw_triggered = False
-        ldw_triggered = False
-        lane_overlay_payload = None
-        fcw_overlay_boxes = []
-
-        lane_perception_active = state["adas_enabled"] or state["calibration_center_frames_left"] > 0
-
-        if state["adas_enabled"]:
-            # --- 1. YOLOv8 Forward Collision Warning ---
-            # Predict objects without tracking overhead
-            results = yolo_model.predict(im_infer, classes=[2, 5, 7], verbose=False, device=yolo_dev) # Cars, buses, trucks
-            hood_y = state.get("hood_y")
-            
-            for r in results:
-                boxes = r.boxes
-                for box in boxes:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    w = x2 - x1
-                    cx = (x1 + x2) / 2
-
-                    # Ignore detections that fall into the hood zone below the learned road boundary.
-                    if hood_y is not None and y2 >= hood_y:
-                        continue
+        try:
+            has_frame = False
+            with frame_lock:
+                if raw_frame_buffer is not None:
+                    im0 = raw_frame_buffer.copy()
+                    raw_frame_buffer = None
+                    has_frame = True
                     
-                    # FCW Logic: If vehicle is in the center lane and box width is very large (close)
-                    current_center_x = state.get("car_center_x", INFER_WIDTH // 2)
-                    center_lane_min = current_center_x - (INFER_WIDTH // 6)
-                    center_lane_max = current_center_x + (INFER_WIDTH // 6)
-                    is_threat = False
-                    if center_lane_min < cx < center_lane_max:
-                        if w > FCW_WARNING_WIDTH:
-                            fcw_triggered = True
-                            is_threat = True
+            if not has_frame:
+                time.sleep(0.01)
+                continue
+                
+            # Ensure im0 is strictly 3-channel BGR
+            if len(im0.shape) == 2:
+                im0 = cv2.cvtColor(im0, cv2.COLOR_GRAY2BGR)
+            elif len(im0.shape) == 3 and im0.shape[2] == 4:
+                im0 = cv2.cvtColor(im0, cv2.COLOR_BGRA2BGR)
 
-                    fcw_overlay_boxes.append({
-                        "x1": round(float(x1), 2),
-                        "y1": round(float(y1), 2),
-                        "x2": round(float(x2), 2),
-                        "y2": round(float(y2), 2),
-                        "threat": is_threat,
-                    })
+            im_infer = cv2.resize(im0, (INFER_WIDTH, INFER_HEIGHT), interpolation=cv2.INTER_LINEAR)
 
-        if lane_perception_active:
-            # --- 2. TwinLiteNet Drivable Area & Lane Departure Warning ---
-            da_mask, ll_mask = twinlite_model.detect(im_infer)
+            fcw_triggered = False
+            ldw_triggered = False
+            lane_overlay_payload = None
+            fcw_overlay_boxes = []
 
-            if ll_mask is not None and da_mask is not None:
-                update_hood_line(da_mask)
+            lane_perception_active = state["adas_enabled"] or state["calibration_center_frames_left"] > 0
+
+            if state["adas_enabled"]:
+                # --- 1. YOLOv8 Forward Collision Warning ---
+                # Predict objects without tracking overhead
+                results = yolo_model.predict(im_infer, classes=[2, 5, 7], verbose=False, device=yolo_dev) # Cars, buses, trucks
                 hood_y = state.get("hood_y")
-                da_lane_mask = apply_hood_cutoff(da_mask, hood_y)
-                car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
-                h_im, w_im = im_infer.shape[:2]
-                row_bounds = get_drivable_row_bounds(da_lane_mask)
-                left_line_mask, right_line_mask, seed_row = build_current_lane_line_masks(ll_mask, da_lane_mask, car_center_x)
-                left_out_of_range = False
-                right_out_of_range = False
+                
+                for r in results:
+                    boxes = r.boxes
+                    for box in boxes:
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        w = x2 - x1
+                        cx = (x1 + x2) / 2
 
-                cv2.line(im_infer, (car_center_x, 0), (car_center_x, h_im - 1), (255, 255, 255), 1)
-                if hood_y is not None:
-                    cv2.line(im_infer, (0, int(hood_y)), (w_im - 1, int(hood_y)), (255, 0, 255), 2)
+                        # Ignore detections that fall into the hood zone below the learned road boundary.
+                        if hood_y is not None and y2 >= hood_y:
+                            continue
+                        
+                        # FCW Logic: If vehicle is in the center lane and box width is very large (close)
+                        current_center_x = state.get("car_center_x", INFER_WIDTH // 2)
+                        center_lane_min = current_center_x - (INFER_WIDTH // 6)
+                        center_lane_max = current_center_x + (INFER_WIDTH // 6)
+                        is_threat = False
+                        if center_lane_min < cx < center_lane_max:
+                            if w > FCW_WARNING_WIDTH:
+                                fcw_triggered = True
+                                is_threat = True
 
-                # Keep the drivable area lightly visible, but only segment the current left/right lane lines.
-                da_indices = da_lane_mask > 0
-                if np.any(da_indices):
-                    overlay = np.zeros_like(im_infer)
-                    overlay[da_indices] = (0, 120, 0)
-                    alpha = 0.18
-                    im_infer[da_indices] = cv2.addWeighted(
-                        im_infer[da_indices], 1.0 - alpha,
-                        overlay[da_indices], alpha, 0
+                        fcw_overlay_boxes.append({
+                            "x1": round(float(x1), 2),
+                            "y1": round(float(y1), 2),
+                            "x2": round(float(x2), 2),
+                            "y2": round(float(y2), 2),
+                            "threat": is_threat,
+                        })
+
+            if lane_perception_active:
+                # --- 2. TwinLiteNet Drivable Area & Lane Departure Warning ---
+                da_mask, ll_mask = twinlite_model.detect(im_infer)
+
+                if ll_mask is not None and da_mask is not None:
+                    update_hood_line(da_mask)
+                    hood_y = state.get("hood_y")
+                    da_lane_mask = apply_hood_cutoff(da_mask, hood_y)
+                    car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
+                    h_im, w_im = im_infer.shape[:2]
+                    row_bounds = get_drivable_row_bounds(da_lane_mask)
+                    left_line_mask, right_line_mask, seed_row = build_current_lane_line_masks(ll_mask, da_lane_mask, car_center_x)
+                    left_out_of_range = False
+                    right_out_of_range = False
+
+                    cv2.line(im_infer, (car_center_x, 0), (car_center_x, h_im - 1), (255, 255, 255), 1)
+                    if hood_y is not None:
+                        cv2.line(im_infer, (0, int(hood_y)), (w_im - 1, int(hood_y)), (255, 0, 255), 2)
+
+                    # Keep the drivable area lightly visible, but only segment the current left/right lane lines.
+                    da_indices = da_lane_mask > 0
+                    if np.any(da_indices):
+                        overlay = np.zeros_like(im_infer)
+                        overlay[da_indices] = (0, 120, 0)
+                        alpha = 0.18
+                        im_infer[da_indices] = cv2.addWeighted(
+                            im_infer[da_indices], 1.0 - alpha,
+                            overlay[da_indices], alpha, 0
+                        )
+
+                    ll_indices = ll_mask > 0
+                    if np.any(ll_indices):
+                        im_infer[ll_indices] = (0, 255, 255)
+
+                    cv2.line(im_infer, (0, seed_row), (w_im - 1, seed_row), (255, 255, 255), 1)
+
+                    eval_y = min(h_im - 1, seed_row + 80)
+                    left_x = sample_line_position(left_line_mask, eval_y, 'left')
+                    right_x = sample_line_position(right_line_mask, eval_y, 'right')
+
+                    if state["calibration_center_frames_left"] > 0:
+                        state["calibration_center_frames_left"] -= 1
+                        if left_x is not None and right_x is not None and right_x > left_x:
+                            state["calib_left_history"].append(left_x)
+                            state["calib_right_history"].append(right_x)
+                            state["calib_center_history"].append(eval_y)
+
+                        if state["calibration_center_frames_left"] <= 0:
+                            finalize_ldw_calibration()
+
+                    ldw_calibration = state.get("ldw_calibration")
+                    if state["adas_enabled"] and ldw_calibration and left_x is not None and right_x is not None and right_x > left_x:
+                        left_out_of_range_raw = left_x < ldw_calibration["left_min"] or left_x > ldw_calibration["left_max"]
+                        right_out_of_range_raw = right_x < ldw_calibration["right_min"] or right_x > ldw_calibration["right_max"]
+
+                        state["ldw_left_counter"] = min(
+                            LDW_WARNING_CONSECUTIVE_FRAMES,
+                            state["ldw_left_counter"] + 1 if left_out_of_range_raw else 0,
+                        )
+                        state["ldw_right_counter"] = min(
+                            LDW_WARNING_CONSECUTIVE_FRAMES,
+                            state["ldw_right_counter"] + 1 if right_out_of_range_raw else 0,
+                        )
+
+                        left_out_of_range = state["ldw_left_counter"] >= LDW_WARNING_CONSECUTIVE_FRAMES
+                        right_out_of_range = state["ldw_right_counter"] >= LDW_WARNING_CONSECUTIVE_FRAMES
+                        if left_out_of_range or right_out_of_range:
+                            ldw_triggered = True
+
+                        cv2.line(im_infer, (0, int(ldw_calibration["eval_y"])), (w_im - 1, int(ldw_calibration["eval_y"])), (0, 255, 255), 1)
+                    else:
+                        state["ldw_left_counter"] = 0
+                        state["ldw_right_counter"] = 0
+
+                    lane_overlay_payload = build_lane_overlay_payload(
+                        left_line_mask,
+                        right_line_mask,
+                        da_lane_mask,
+                        row_bounds,
+                        left_warning=left_out_of_range,
+                        right_warning=right_out_of_range,
+                        fcw_warning=fcw_triggered,
+                        fcw_boxes=fcw_overlay_boxes,
                     )
 
-                ll_indices = ll_mask > 0
-                if np.any(ll_indices):
-                    im_infer[ll_indices] = (0, 255, 255)
+            # Update global state for UI alerts
+            state["fcw_warning"] = fcw_triggered
+            state["ldw_warning"] = ldw_triggered
 
-                cv2.line(im_infer, (0, seed_row), (w_im - 1, seed_row), (255, 255, 255), 1)
+            # Encode to JPEG for the web interface
+            _, buf = cv2.imencode('.jpg', im_infer, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            with frame_lock:
+                latest_web_frame = buf.tobytes()
+                latest_lane_overlay = lane_overlay_payload
 
-                eval_y = min(h_im - 1, seed_row + 80)
-                left_x = sample_line_position(left_line_mask, eval_y, 'left')
-                right_x = sample_line_position(right_line_mask, eval_y, 'right')
-
-                if state["calibration_center_frames_left"] > 0:
-                    state["calibration_center_frames_left"] -= 1
-                    if left_x is not None and right_x is not None and right_x > left_x:
-                        state["calib_left_history"].append(left_x)
-                        state["calib_right_history"].append(right_x)
-                        state["calib_center_history"].append(eval_y)
-
-                    if state["calibration_center_frames_left"] <= 0:
-                        finalize_ldw_calibration()
-
-                ldw_calibration = state.get("ldw_calibration")
-                if state["adas_enabled"] and ldw_calibration and left_x is not None and right_x is not None and right_x > left_x:
-                    left_out_of_range_raw = left_x < ldw_calibration["left_min"] or left_x > ldw_calibration["left_max"]
-                    right_out_of_range_raw = right_x < ldw_calibration["right_min"] or right_x > ldw_calibration["right_max"]
-
-                    state["ldw_left_counter"] = min(
-                        LDW_WARNING_CONSECUTIVE_FRAMES,
-                        state["ldw_left_counter"] + 1 if left_out_of_range_raw else 0,
-                    )
-                    state["ldw_right_counter"] = min(
-                        LDW_WARNING_CONSECUTIVE_FRAMES,
-                        state["ldw_right_counter"] + 1 if right_out_of_range_raw else 0,
-                    )
-
-                    left_out_of_range = state["ldw_left_counter"] >= LDW_WARNING_CONSECUTIVE_FRAMES
-                    right_out_of_range = state["ldw_right_counter"] >= LDW_WARNING_CONSECUTIVE_FRAMES
-                    if left_out_of_range or right_out_of_range:
-                        ldw_triggered = True
-
-                    cv2.line(im_infer, (0, int(ldw_calibration["eval_y"])), (w_im - 1, int(ldw_calibration["eval_y"])), (0, 255, 255), 1)
-                else:
-                    state["ldw_left_counter"] = 0
-                    state["ldw_right_counter"] = 0
-
-                lane_overlay_payload = build_lane_overlay_payload(
-                    left_line_mask,
-                    right_line_mask,
-                    da_lane_mask,
-                    row_bounds,
-                    left_warning=left_out_of_range,
-                    right_warning=right_out_of_range,
-                    fcw_warning=fcw_triggered,
-                    fcw_boxes=fcw_overlay_boxes,
-                )
-
-        # Update global state for UI alerts
-        state["fcw_warning"] = fcw_triggered
-        state["ldw_warning"] = ldw_triggered
-
-        # Encode to JPEG for the web interface
-        _, buf = cv2.imencode('.jpg', im_infer, [cv2.IMWRITE_JPEG_QUALITY, 70])
-        with frame_lock:
-            latest_web_frame = buf.tobytes()
-            latest_lane_overlay = lane_overlay_payload
-
-        fps_counter += 1
-        elapsed = time.time() - fps_start
-        if elapsed >= 2.0:
-            state["web_fps"] = round(fps_counter / elapsed, 1)
-            fps_counter = 0
-            fps_start = time.time()
+            fps_counter += 1
+            elapsed = time.time() - fps_start
+            if elapsed >= 2.0:
+                state["web_fps"] = round(fps_counter / elapsed, 1)
+                fps_counter = 0
+                fps_start = time.time()
+        except Exception:
+            logging.exception("inference_loop frame processing failed")
+            time.sleep(0.05)
 
 
 def generate_mjpeg():

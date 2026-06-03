@@ -480,6 +480,10 @@
         let isRecording = false;
         let isAdasEnabled = false;
         let isUpdatingCenter = false;
+        let statusPollHandle = null;
+        let laneOverlayPollHandle = null;
+        let statusRequestInFlight = false;
+        let laneOverlayRequestInFlight = false;
 
         // Elements
         const mainStatus = document.getElementById('mainStatus');
@@ -602,13 +606,24 @@
         }
 
         async function fetchLaneOverlay() {
+            if (laneOverlayRequestInFlight) {
+                return;
+            }
+            laneOverlayRequestInFlight = true;
             try {
                 const response = await fetch(`/api/lane_overlay?t=${Date.now()}`, { cache: 'no-store' });
                 const data = await response.json();
                 drawLaneOverlay(data);
             } catch (e) {
                 laneOverlayCtx.clearRect(0, 0, laneOverlayCanvas.width, laneOverlayCanvas.height);
+            } finally {
+                laneOverlayRequestInFlight = false;
             }
+        }
+
+        async function pollLaneOverlay() {
+            await fetchLaneOverlay();
+            laneOverlayPollHandle = window.setTimeout(pollLaneOverlay, 180);
         }
 
         function formatDuration(seconds) {
@@ -618,6 +633,10 @@
         }
 
         async function fetchStatus() {
+            if (statusRequestInFlight) {
+                return;
+            }
+            statusRequestInFlight = true;
             try {
                 const response = await fetch('/api/status');
                 const data = await response.json();
@@ -686,7 +705,14 @@
                 fpsDisplay.innerText = `FPS: --`;
                 centerDisplay.innerText = `Car Center X: --`;
                 warningBanner.className = 'warning-banner';
+            } finally {
+                statusRequestInFlight = false;
             }
+        }
+
+        async function pollStatus() {
+            await fetchStatus();
+            statusPollHandle = window.setTimeout(pollStatus, 700);
         }
 
         function updateRecordingUI() {
@@ -793,14 +819,12 @@
             }
         }
 
-        // Poll status every 0.5s for faster warning response
-        setInterval(fetchStatus, 500);
-        setInterval(fetchLaneOverlay, 120);
+        // Poll with one in-flight request at a time to avoid starving the MJPEG stream.
         window.addEventListener('resize', resizeLaneOverlayCanvas);
         videoFeed.addEventListener('load', resizeLaneOverlayCanvas);
         resizeLaneOverlayCanvas();
-        fetchStatus();
-        fetchLaneOverlay();
+        pollStatus();
+        pollLaneOverlay();
     </script>
 </body>
 </html>
