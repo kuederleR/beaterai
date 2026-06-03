@@ -51,6 +51,7 @@ CENTER_LANE_X_MAX = (INFER_WIDTH // 3) * 2
 LDW_MAX_DRIFT = 40 # Max pixel drift from center before warning
 LDW_CALIBRATION_SECONDS = 10
 LDW_MIN_CALIBRATION_SAMPLES = 60
+HOOD_CALIBRATION_FRAMES = 12
 
 # --- State ---
 latest_web_frame = None
@@ -87,7 +88,10 @@ state = {
     "calibrate_center_requested": False,
     "calibration_center_frames_left": 0,
     "calib_center_history": [],
-    "ldw_calibration": None
+    "ldw_calibration": None,
+    "hood_y": None,
+    "hood_row_history": [],
+    "hood_detection_frames_left": HOOD_CALIBRATION_FRAMES
 }
 
 if os.path.exists('models/calibration.json'):
@@ -100,6 +104,10 @@ if os.path.exists('models/calibration.json'):
             if "ldw_calibration" in calib_data:
                 state["ldw_calibration"] = calib_data["ldw_calibration"]
                 print("[INFO] Loaded LDW baseline calibration.", flush=True)
+            if "hood_y" in calib_data:
+                state["hood_y"] = int(calib_data["hood_y"])
+                state["hood_detection_frames_left"] = 0
+                print(f"[INFO] Loaded hood line: y={state['hood_y']}", flush=True)
     except Exception as e:
         print(f"[ERROR] Failed to load calibration matrix: {e}", flush=True)
 
@@ -111,6 +119,8 @@ def save_calibration_state():
         calib_data.update(state["calibration"])
     if state.get("ldw_calibration"):
         calib_data["ldw_calibration"] = state["ldw_calibration"]
+    if state.get("hood_y") is not None:
+        calib_data["hood_y"] = int(state["hood_y"])
 
     os.makedirs('models', exist_ok=True)
     with open('models/calibration.json', 'w') as f:
@@ -234,6 +244,50 @@ def get_drivable_row_bounds(da_mask):
         else:
             row_bounds.append(None)
     return row_bounds
+
+def estimate_hood_line(da_mask):
+    if da_mask is None or not np.any(da_mask > 0):
+        return None
+
+    h_im, w_im = da_mask.shape[:2]
+    x_min = int(w_im * 0.2)
+    x_max = int(w_im * 0.8)
+    bottom_edges = []
+
+    for x in range(x_min, x_max):
+        ys = np.where(da_mask[:, x] > 0)[0]
+        if len(ys) > 0:
+            bottom_edges.append(int(np.max(ys)))
+
+    if len(bottom_edges) < max(20, int((x_max - x_min) * 0.1)):
+        return None
+
+    return int(round(np.percentile(bottom_edges, 75)))
+
+def update_hood_line(da_mask):
+    if da_mask is None or state["hood_detection_frames_left"] <= 0:
+        return
+
+    hood_y = estimate_hood_line(da_mask)
+    if hood_y is None:
+        return
+
+    state["hood_row_history"].append(hood_y)
+    state["hood_detection_frames_left"] -= 1
+
+    if state["hood_detection_frames_left"] <= 0:
+        state["hood_y"] = int(round(np.median(state["hood_row_history"])))
+        state["hood_row_history"] = []
+        save_calibration_state()
+
+def apply_hood_cutoff(da_mask, hood_y):
+    if da_mask is None or hood_y is None:
+        return da_mask
+    clipped_mask = da_mask.copy()
+    cutoff_y = int(np.clip(hood_y, 0, da_mask.shape[0] - 1))
+    if cutoff_y + 1 < clipped_mask.shape[0]:
+        clipped_mask[cutoff_y + 1:, :] = 0
+    return clipped_mask
 
 def find_seed_labels(labels, row_bounds, center_x, seed_row, band_half_height=10):
     h_im, w_im = labels.shape
@@ -556,6 +610,7 @@ def inference_loop():
             # --- 1. YOLOv8 Forward Collision Warning ---
             # Predict objects without tracking overhead
             results = yolo_model.predict(im_infer, classes=[2, 5, 7], verbose=False, device=yolo_dev) # Cars, buses, trucks
+            hood_y = state.get("hood_y")
             
             for r in results:
                 boxes = r.boxes
@@ -563,6 +618,10 @@ def inference_loop():
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                     w = x2 - x1
                     cx = (x1 + x2) / 2
+
+                    # Ignore detections that fall into the hood zone below the learned road boundary.
+                    if hood_y is not None and y2 >= hood_y:
+                        continue
                     
                     # Draw box
                     cv2.rectangle(im_infer, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
@@ -582,16 +641,21 @@ def inference_loop():
             da_mask, ll_mask = twinlite_model.detect(im_infer)
 
             if ll_mask is not None and da_mask is not None:
+                update_hood_line(da_mask)
+                hood_y = state.get("hood_y")
+                da_lane_mask = apply_hood_cutoff(da_mask, hood_y)
                 car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
                 h_im, w_im = im_infer.shape[:2]
-                row_bounds = get_drivable_row_bounds(da_mask)
-                left_line_mask, right_line_mask, seed_row = build_current_lane_line_masks(ll_mask, da_mask, car_center_x)
-                lane_overlay_payload = build_lane_overlay_payload(left_line_mask, right_line_mask, da_mask, row_bounds)
+                row_bounds = get_drivable_row_bounds(da_lane_mask)
+                left_line_mask, right_line_mask, seed_row = build_current_lane_line_masks(ll_mask, da_lane_mask, car_center_x)
+                lane_overlay_payload = build_lane_overlay_payload(left_line_mask, right_line_mask, da_lane_mask, row_bounds)
 
                 cv2.line(im_infer, (car_center_x, 0), (car_center_x, h_im - 1), (255, 255, 255), 1)
+                if hood_y is not None:
+                    cv2.line(im_infer, (0, int(hood_y)), (w_im - 1, int(hood_y)), (255, 0, 255), 2)
 
                 # Keep the drivable area lightly visible, but only segment the current left/right lane lines.
-                da_indices = da_mask > 0
+                da_indices = da_lane_mask > 0
                 if np.any(da_indices):
                     overlay = np.zeros_like(im_infer)
                     overlay[da_indices] = (0, 120, 0)
