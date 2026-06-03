@@ -580,6 +580,25 @@
 
             drawPath(data.left_points, data.left_warning ? 'rgba(255, 159, 67, 1.0)' : 'rgba(80, 180, 255, 0.95)');
             drawPath(data.right_points, data.right_warning ? 'rgba(255, 159, 67, 1.0)' : 'rgba(80, 180, 255, 0.95)');
+
+            if (Array.isArray(data.fcw_boxes)) {
+                data.fcw_boxes.forEach((box) => {
+                    const x = box.x1 * scaleX;
+                    const y = box.y1 * scaleY;
+                    const width = (box.x2 - box.x1) * scaleX;
+                    const height = (box.y2 - box.y1) * scaleY;
+
+                    laneOverlayCtx.strokeStyle = box.threat ? 'rgba(255, 84, 84, 0.98)' : 'rgba(120, 255, 160, 0.85)';
+                    laneOverlayCtx.lineWidth = box.threat ? 4 : 2;
+                    laneOverlayCtx.strokeRect(x, y, width, height);
+
+                    if (box.threat) {
+                        laneOverlayCtx.fillStyle = 'rgba(255, 84, 84, 0.96)';
+                        laneOverlayCtx.font = 'bold 16px Inter, sans-serif';
+                        laneOverlayCtx.fillText('TOO CLOSE', x, Math.max(18, y - 8));
+                    }
+                });
+            }
         }
 
         async function fetchLaneOverlay() {

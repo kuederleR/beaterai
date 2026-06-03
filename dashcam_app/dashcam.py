@@ -51,6 +51,7 @@ CENTER_LANE_X_MAX = (INFER_WIDTH // 3) * 2
 LDW_MAX_DRIFT = 40 # Max pixel drift from center before warning
 LDW_CALIBRATION_SECONDS = 10
 LDW_MIN_CALIBRATION_SAMPLES = 60
+LDW_WARNING_CONSECUTIVE_FRAMES = 3
 HOOD_CALIBRATION_FRAMES = 12
 
 # --- State ---
@@ -89,6 +90,8 @@ state = {
     "calibration_center_frames_left": 0,
     "calib_center_history": [],
     "ldw_calibration": None,
+    "ldw_left_counter": 0,
+    "ldw_right_counter": 0,
     "hood_y": None,
     "hood_row_history": [],
     "hood_detection_frames_left": HOOD_CALIBRATION_FRAMES
@@ -389,10 +392,10 @@ def finalize_ldw_calibration():
         state["error"] = "Center calibration failed: not enough lane samples during the 10-second window."
         return
 
-    left_min = float(np.percentile(left_samples, 10) - 8)
-    left_max = float(np.percentile(left_samples, 90) + 8)
-    right_min = float(np.percentile(right_samples, 10) - 8)
-    right_max = float(np.percentile(right_samples, 90) + 8)
+    left_min = float(np.percentile(left_samples, 5) - 16)
+    left_max = float(np.percentile(left_samples, 95) + 16)
+    right_min = float(np.percentile(right_samples, 5) - 16)
+    right_max = float(np.percentile(right_samples, 95) + 16)
     eval_y = int(round(float(np.median(eval_samples)))) if len(eval_samples) > 0 else int(INFER_HEIGHT * 0.6)
 
     state["ldw_calibration"] = {
@@ -501,7 +504,7 @@ def curve_to_points(track, row_bounds):
         points.append([round(float(track[y]), 2), int(y)])
     return points
 
-def build_lane_overlay_payload(left_mask, right_mask, da_mask, row_bounds, left_warning=False, right_warning=False, fcw_warning=False):
+def build_lane_overlay_payload(left_mask, right_mask, da_mask, row_bounds, left_warning=False, right_warning=False, fcw_warning=False, fcw_boxes=None):
     h_im, w_im = da_mask.shape[:2]
     left_track = build_lane_track(left_mask, row_bounds, 'left')
     right_track = build_lane_track(right_mask, row_bounds, 'right')
@@ -561,6 +564,7 @@ def build_lane_overlay_payload(left_mask, right_mask, da_mask, row_bounds, left_
         "left_warning": bool(left_warning),
         "right_warning": bool(right_warning),
         "fcw_warning": bool(fcw_warning),
+        "fcw_boxes": fcw_boxes or [],
     }
 
 def inference_loop():
@@ -623,6 +627,7 @@ def inference_loop():
         fcw_triggered = False
         ldw_triggered = False
         lane_overlay_payload = None
+        fcw_overlay_boxes = []
 
         lane_perception_active = state["adas_enabled"] or state["calibration_center_frames_left"] > 0
 
@@ -643,18 +648,23 @@ def inference_loop():
                     if hood_y is not None and y2 >= hood_y:
                         continue
                     
-                    # Draw box
-                    cv2.rectangle(im_infer, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                    
                     # FCW Logic: If vehicle is in the center lane and box width is very large (close)
                     current_center_x = state.get("car_center_x", INFER_WIDTH // 2)
                     center_lane_min = current_center_x - (INFER_WIDTH // 6)
                     center_lane_max = current_center_x + (INFER_WIDTH // 6)
+                    is_threat = False
                     if center_lane_min < cx < center_lane_max:
                         if w > FCW_WARNING_WIDTH:
                             fcw_triggered = True
-                            cv2.rectangle(im_infer, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 4)
-                            cv2.putText(im_infer, "TOO CLOSE!", (int(x1), int(y1)-10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                            is_threat = True
+
+                    fcw_overlay_boxes.append({
+                        "x1": round(float(x1), 2),
+                        "y1": round(float(y1), 2),
+                        "x2": round(float(x2), 2),
+                        "y2": round(float(y2), 2),
+                        "threat": is_threat,
+                    })
 
         if lane_perception_active:
             # --- 2. TwinLiteNet Drivable Area & Lane Departure Warning ---
@@ -708,12 +718,27 @@ def inference_loop():
 
                 ldw_calibration = state.get("ldw_calibration")
                 if state["adas_enabled"] and ldw_calibration and left_x is not None and right_x is not None and right_x > left_x:
-                    left_out_of_range = left_x < ldw_calibration["left_min"] or left_x > ldw_calibration["left_max"]
-                    right_out_of_range = right_x < ldw_calibration["right_min"] or right_x > ldw_calibration["right_max"]
+                    left_out_of_range_raw = left_x < ldw_calibration["left_min"] or left_x > ldw_calibration["left_max"]
+                    right_out_of_range_raw = right_x < ldw_calibration["right_min"] or right_x > ldw_calibration["right_max"]
+
+                    state["ldw_left_counter"] = min(
+                        LDW_WARNING_CONSECUTIVE_FRAMES,
+                        state["ldw_left_counter"] + 1 if left_out_of_range_raw else 0,
+                    )
+                    state["ldw_right_counter"] = min(
+                        LDW_WARNING_CONSECUTIVE_FRAMES,
+                        state["ldw_right_counter"] + 1 if right_out_of_range_raw else 0,
+                    )
+
+                    left_out_of_range = state["ldw_left_counter"] >= LDW_WARNING_CONSECUTIVE_FRAMES
+                    right_out_of_range = state["ldw_right_counter"] >= LDW_WARNING_CONSECUTIVE_FRAMES
                     if left_out_of_range or right_out_of_range:
                         ldw_triggered = True
 
                     cv2.line(im_infer, (0, int(ldw_calibration["eval_y"])), (w_im - 1, int(ldw_calibration["eval_y"])), (0, 255, 255), 1)
+                else:
+                    state["ldw_left_counter"] = 0
+                    state["ldw_right_counter"] = 0
 
                 lane_overlay_payload = build_lane_overlay_payload(
                     left_line_mask,
@@ -723,6 +748,7 @@ def inference_loop():
                     left_warning=left_out_of_range,
                     right_warning=right_out_of_range,
                     fcw_warning=fcw_triggered,
+                    fcw_boxes=fcw_overlay_boxes,
                 )
 
         # Update global state for UI alerts
