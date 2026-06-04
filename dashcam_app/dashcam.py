@@ -22,10 +22,9 @@ if not hasattr(cv2, 'IMREAD_UNCHANGED'):
     cv2.IMREAD_UNCHANGED = -1
 
 from flask import Flask, Response, jsonify, request, render_template
-from ultralytics import YOLO
 
-# Import TwinLiteNet for fast drivable area segmentation
-from twinlite_detector import TwinLiteDetector
+# Import YolopDetector for unified GPU inference
+from yolop_detector import YolopDetector
 
 os.environ['PYTHONUNBUFFERED'] = '1'
 
@@ -70,8 +69,7 @@ state = {
     "error": None,
     "cuda_available": False,
     "gpu_device_name": "None",
-    "yolo_device": "Unknown",
-    "twinlite_device": "Unknown",
+    "yolop_device": "Unknown",
     "left_poly_history": [],
     "right_poly_history": [],
     "left_miny_history": [],
@@ -577,36 +575,13 @@ def inference_loop():
     fps_counter = 0
     fps_start = time.time()
 
-    print("[INFO] Loading YOLOv8n object detector...", flush=True)
-    os.makedirs('models', exist_ok=True)
-    yolo_model = YOLO('yolov8n.pt') # Will auto-download if missing
-    
     state["cuda_available"] = torch.cuda.is_available()
     state["gpu_device_name"] = torch.cuda.get_device_name(0) if state["cuda_available"] else "None"
     
-    if state["cuda_available"]:
-        engine_path = 'models/yolov8n.engine'
-        if not os.path.exists(engine_path):
-            print("[INFO] Exporting YOLOv8n to TensorRT engine (this will take a few minutes)...", flush=True)
-            try:
-                yolo_model.export(format='engine', device='0', half=True)
-                if os.path.exists('yolov8n.engine'):
-                    os.rename('yolov8n.engine', engine_path)
-            except Exception as e:
-                print(f"[ERROR] Failed to export TensorRT: {e}", flush=True)
-                
-        if os.path.exists(engine_path):
-            print("[INFO] Loading TensorRT engine from cache...", flush=True)
-            yolo_model = YOLO(engine_path, task='detect')
-    
-    yolo_dev = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    state["yolo_device"] = yolo_dev
-    print(f"\n{'='*50}\n[DEBUG - GPU CHECK]\nCUDA Available: {state['cuda_available']}\nGPU Name: {state['gpu_device_name']}\nYOLOv8 Device Target: {yolo_dev}\n{'='*50}\n", flush=True)
-    
-    
-    print("[INFO] Loading TwinLiteNet Lane detector...", flush=True)
-    twinlite_model = TwinLiteDetector()
-    state["twinlite_device"] = str(twinlite_model.device)
+    print("[INFO] Loading YOLOpv2 detector...", flush=True)
+    yolop_detector = YolopDetector()
+    state["yolop_device"] = str(yolop_detector.device)
+    print(f"\n{'='*50}\n[DEBUG - GPU CHECK]\nCUDA Available: {state['cuda_available']}\nGPU Name: {state['gpu_device_name']}\nYOLOpv2 Device Target: {yolop_detector.device}\n{'='*50}\n", flush=True)
 
     while True:
         try:
@@ -636,16 +611,15 @@ def inference_loop():
 
             lane_perception_active = state["adas_enabled"] or state["calibration_center_frames_left"] > 0
 
-            if state["adas_enabled"]:
-                # --- 1. YOLOv8 Forward Collision Warning ---
-                # Predict objects without tracking overhead
-                results = yolo_model.predict(im_infer, classes=[2, 5, 7], verbose=False, device=yolo_dev) # Cars, buses, trucks
-                hood_y = state.get("hood_y")
-                
-                for r in results:
-                    boxes = r.boxes
-                    for box in boxes:
-                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            if state["adas_enabled"] or lane_perception_active:
+                # Run YOLOpv2 inference
+                det_boxes, da_mask, ll_mask = yolop_detector.detect(im_infer)
+
+                if state["adas_enabled"]:
+                    # --- 1. Forward Collision Warning from YOLOpv2 Detections ---
+                    hood_y = state.get("hood_y")
+                    for box in det_boxes:
+                        x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
                         w = x2 - x1
                         cx = (x1 + x2) / 2
 
@@ -671,11 +645,8 @@ def inference_loop():
                             "threat": is_threat,
                         })
 
-            if lane_perception_active:
-                # --- 2. TwinLiteNet Drivable Area & Lane Departure Warning ---
-                da_mask, ll_mask = twinlite_model.detect(im_infer)
-
-                if ll_mask is not None and da_mask is not None:
+                if lane_perception_active and da_mask is not None and ll_mask is not None:
+                    # --- 2. Drivable Area & Lane Departure Warning ---
                     update_hood_line(da_mask)
                     hood_y = state.get("hood_y")
                     da_lane_mask = apply_hood_cutoff(da_mask, hood_y)
@@ -838,8 +809,7 @@ def status():
         "error": state["error"],
         "cuda_available": state["cuda_available"],
         "gpu_device_name": state["gpu_device_name"],
-        "yolo_device": state["yolo_device"],
-        "twinlite_device": state["twinlite_device"],
+        "yolop_device": state["yolop_device"],
         "car_center_x": state["car_center_x"],
         "calibrating_center": state["calibration_center_frames_left"] > 0,
         "calibration_center_progress": calibration_total_frames - state["calibration_center_frames_left"],

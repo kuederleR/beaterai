@@ -24,8 +24,7 @@ services:
       - ./recordings:/app/recordings
       - ../weights:/app/data/weights
       - ./dashcam.py:/app/dashcam.py
-      - ./twinlite_detector.py:/app/twinlite_detector.py
-      - ./TwinLite.py:/app/TwinLite.py
+      - ./yolop_detector.py:/app/yolop_detector.py
       - ./models:/app/models
       - ./templates:/app/templates
     # WARNING: If your camera is physically UNPLUGGED, you MUST comment out the two lines below, 

@@ -34,8 +34,7 @@ RUN pip3 install --no-cache-dir --extra-index-url https://pypi.jetson-ai-lab.io/
 RUN mkdir -p data/weights recordings
 
 # Copy our custom dashcam application
-COPY TwinLite.py .
-COPY twinlite_detector.py .
+COPY yolop_detector.py .
 COPY dashcam.py .
 COPY templates/ templates/
 COPY install_service.sh .
