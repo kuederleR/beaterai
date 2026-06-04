@@ -17,7 +17,7 @@ services:
       - "5001:5001"
     environment:
       - VIDEO_SOURCE=/dev/video0
-      # - DEV_VIDEO_PATH=/app/recordings/dashcam_20260521_105410.avi # Uncomment to test with a looping recorded video
+      - DEV_VIDEO_PATH=/app/recordings/dashcam_20260521_105410.avi # Uncomment to test with a looping recorded video
       - DEVICE=0
       - PYTHONUNBUFFERED=1
     volumes:
