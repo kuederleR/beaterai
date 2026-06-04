@@ -83,6 +83,7 @@ state = {
     "calib_left_history": [],
     "calib_right_history": [],
     "calibration": None,
+    "car_center_x": INFER_WIDTH // 2,
     "calibration_ldw_left_frames_left": 0,
     "calibration_ldw_right_frames_left": 0,
     "calib_ldw_left_dists": [],
