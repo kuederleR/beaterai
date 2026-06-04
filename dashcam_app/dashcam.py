@@ -451,7 +451,14 @@ def build_lane_track(mask, row_bounds, side, smoothing_window=11):
     if not drivable_ys:
         return None
 
+    top_drivable_y = int(drivable_ys[0])
+    bottom_drivable_y = int(drivable_ys[-1])
+    drivable_height = bottom_drivable_y - top_drivable_y
+    cutoff_y = top_drivable_y + 0.1 * drivable_height
+
     for y in drivable_ys:
+        if y < cutoff_y:
+            continue
         row_xs = np.where(mask[y] > 0)[0]
         if len(row_xs) == 0:
             continue
