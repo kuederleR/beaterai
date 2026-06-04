@@ -439,14 +439,26 @@
         </div>
 
         <div class="control-card">
-            <button class="record-btn" id="calibrateCenterBtn" onclick="requestCenterCalibration()">
+            <button class="record-btn" id="calibrateLdwLeftBtn" onclick="requestLdwLeftCalibration()">
                 <div class="record-icon" style="border-color: var(--accent-yellow);">
-                    <div class="record-inner" style="background-color: var(--accent-yellow); border-radius: 50%; transform: scale(0.4);"></div>
+                    <div class="record-inner" style="background-color: var(--accent-yellow); border-radius: 50% 0 0 50%; transform: scale(0.5);"></div>
                 </div>
-                <span class="record-label" id="calibrateCenterLabel">Calibrate LDW</span>
+                <span class="record-label" id="calibrateLdwLeftLabel">Calibrate Left Edge</span>
             </button>
             <div style="font-size: 12px; color: var(--text-secondary); text-align: center; margin-top: 8px;">
-                Record 10 seconds of safe lane keeping to learn the normal left/right line range.
+                Drive at left-most comfortable edge for 10s to learn left threshold.
+            </div>
+        </div>
+
+        <div class="control-card">
+            <button class="record-btn" id="calibrateLdwRightBtn" onclick="requestLdwRightCalibration()">
+                <div class="record-icon" style="border-color: var(--accent-yellow);">
+                    <div class="record-inner" style="background-color: var(--accent-yellow); border-radius: 0 50% 50% 0; transform: scale(0.5);"></div>
+                </div>
+                <span class="record-label" id="calibrateLdwRightLabel">Calibrate Right Edge</span>
+            </button>
+            <div style="font-size: 12px; color: var(--text-secondary); text-align: center; margin-top: 8px;">
+                Drive at right-most comfortable edge for 10s to learn right threshold.
             </div>
         </div>
 
@@ -496,13 +508,72 @@
         const adasToggle = document.getElementById('adasToggle');
         const errorBanner = document.getElementById('errorBanner');
         const warningBanner = document.getElementById('warningBanner');
-        const calibrateCenterBtn = document.getElementById('calibrateCenterBtn');
-        const calibrateCenterLabel = document.getElementById('calibrateCenterLabel');
+        const calibrateLdwLeftBtn = document.getElementById('calibrateLdwLeftBtn');
+        const calibrateLdwLeftLabel = document.getElementById('calibrateLdwLeftLabel');
+        const calibrateLdwRightBtn = document.getElementById('calibrateLdwRightBtn');
+        const calibrateLdwRightLabel = document.getElementById('calibrateLdwRightLabel');
         const centerSlider = document.getElementById('centerSlider');
         const centerSliderValue = document.getElementById('centerSliderValue');
         const videoFeed = document.getElementById('videoFeed');
         const laneOverlayCanvas = document.getElementById('laneOverlayCanvas');
         const laneOverlayCtx = laneOverlayCanvas.getContext('2d');
+
+        // Web Audio API components
+        let audioCtx = null;
+        let lastBeepTime = 0;
+
+        function playWarningBeep(severity) {
+            try {
+                if (!audioCtx) {
+                    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                const now = audioCtx.currentTime;
+                // Orange severity (>0.4) beeps every 600ms, Red (>0.8) beeps every 300ms
+                const beepInterval = severity > 0.8 ? 0.3 : 0.6;
+                if (now - lastBeepTime < beepInterval) {
+                    return;
+                }
+                lastBeepTime = now;
+
+                const osc = audioCtx.createOscillator();
+                const gainNode = audioCtx.createGain();
+                
+                osc.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+                
+                // Red pitch: 880Hz (A5), Orange pitch: 587.33Hz (D5)
+                osc.frequency.setValueAtTime(severity > 0.8 ? 880 : 587.33, now);
+                osc.type = 'sine';
+                
+                gainNode.gain.setValueAtTime(0.001, now);
+                gainNode.gain.linearRampToValueAtTime(0.15, now + 0.05);
+                gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+                
+                osc.start(now);
+                osc.stop(now + 0.2);
+            } catch (e) {
+                console.error("Audio warning playback failed:", e);
+            }
+        }
+
+        // Auto-resume AudioContext on user interaction
+        document.body.addEventListener('click', () => {
+            if (audioCtx && audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        });
+
+        const getSeverityColor = (severity, alpha = 1.0) => {
+            if (severity <= 0.0) {
+                return `rgba(80, 180, 255, ${alpha})`;
+            } else if (severity <= 0.4) {
+                return `rgba(234, 179, 8, ${alpha})`; // Yellow
+            } else if (severity <= 0.8) {
+                return `rgba(249, 115, 22, ${alpha})`; // Orange
+            } else {
+                return `rgba(239, 68, 68, ${alpha})`; // Red
+            }
+        };
 
         function previewCenterX(value) {
             centerSliderValue.innerText = `${value}px`;
@@ -548,17 +619,19 @@
                 laneOverlayCtx.fill();
             };
 
+            const maxSeverity = Math.max(data.left_severity || 0.0, data.right_severity || 0.0);
+
             if (Array.isArray(data.polygon) && data.polygon.length >= 3) {
-                const baseFill = data.fcw_warning ? 'rgba(255, 84, 84, 0.18)' : 'rgba(48, 212, 122, 0.18)';
+                const baseFill = data.fcw_warning || maxSeverity > 0.8 ? 'rgba(255, 84, 84, 0.18)' : 'rgba(48, 212, 122, 0.18)';
                 drawPolygon(data.polygon, baseFill);
             }
 
-            if (data.left_warning) {
-                drawPolygon(data.left_zone, 'rgba(255, 159, 67, 0.32)');
+            if (data.left_severity > 0.0) {
+                drawPolygon(data.left_zone, getSeverityColor(data.left_severity, 0.25));
             }
 
-            if (data.right_warning) {
-                drawPolygon(data.right_zone, 'rgba(255, 159, 67, 0.32)');
+            if (data.right_severity > 0.0) {
+                drawPolygon(data.right_zone, getSeverityColor(data.right_severity, 0.25));
             }
 
             const drawPath = (points, strokeStyle) => {
@@ -582,8 +655,13 @@
                 laneOverlayCtx.stroke();
             };
 
-            drawPath(data.left_points, data.left_warning ? 'rgba(255, 159, 67, 1.0)' : 'rgba(80, 180, 255, 0.95)');
-            drawPath(data.right_points, data.right_warning ? 'rgba(255, 159, 67, 1.0)' : 'rgba(80, 180, 255, 0.95)');
+            drawPath(data.left_points, getSeverityColor(data.left_severity || 0.0, 0.95));
+            drawPath(data.right_points, getSeverityColor(data.right_severity || 0.0, 0.95));
+
+            // Trigger warning beep if severity is in orange or red territory (> 0.4)
+            if (maxSeverity > 0.4 && isAdasEnabled) {
+                playWarningBeep(maxSeverity);
+            }
 
             if (Array.isArray(data.fcw_boxes)) {
                 data.fcw_boxes.forEach((box) => {
@@ -650,7 +728,16 @@
                 }
 
                 // Update Warnings
-                warningBanner.className = 'warning-banner';
+                if (data.fcw_warning) {
+                    warningBanner.className = 'warning-banner fcw';
+                    warningBanner.innerText = 'COLLISION ALERT';
+                } else if (data.ldw_warning) {
+                    warningBanner.className = 'warning-banner ldw';
+                    warningBanner.innerText = 'LANE DEPARTURE ALERT';
+                } else {
+                    warningBanner.className = 'warning-banner';
+                    warningBanner.innerText = '';
+                }
 
                 // Update FPS
                 fpsDisplay.innerText = `Capture: ${data.capture_fps} FPS | Web: ${data.web_fps} FPS`;
@@ -688,15 +775,26 @@
                     adasToggle.checked = isAdasEnabled;
                 }
 
-                // Update Car Center Calibration UI
-                if (data.calibrating_center) {
-                    calibrateCenterBtn.style.opacity = '0.5';
-                    const totalFrames = Math.max(1, data.calibration_center_total || 1);
-                    const progressPercent = Math.min(100, Math.round((data.calibration_center_progress / totalFrames) * 100));
-                    calibrateCenterLabel.innerText = `Calibrating (${progressPercent}%)`;
+                // Update Left LDW Calibration UI
+                if (data.calibrating_ldw_left) {
+                    calibrateLdwLeftBtn.style.opacity = '0.5';
+                    const totalFrames = Math.max(1, data.calibration_total || 1);
+                    const progressPercent = Math.min(100, Math.round((data.calibration_ldw_left_progress / totalFrames) * 100));
+                    calibrateLdwLeftLabel.innerText = `Calibrating Left (${progressPercent}%)`;
                 } else {
-                    calibrateCenterBtn.style.opacity = '1';
-                    calibrateCenterLabel.innerText = data.ldw_calibrated ? 'Recalibrate LDW' : 'Calibrate LDW';
+                    calibrateLdwLeftBtn.style.opacity = '1';
+                    calibrateLdwLeftLabel.innerText = data.ldw_calibrated_left ? 'Recalibrate Left' : 'Calibrate Left Edge';
+                }
+
+                // Update Right LDW Calibration UI
+                if (data.calibrating_ldw_right) {
+                    calibrateLdwRightBtn.style.opacity = '0.5';
+                    const totalFrames = Math.max(1, data.calibration_total || 1);
+                    const progressPercent = Math.min(100, Math.round((data.calibration_ldw_right_progress / totalFrames) * 100));
+                    calibrateLdwRightLabel.innerText = `Calibrating Right (${progressPercent}%)`;
+                } else {
+                    calibrateLdwRightBtn.style.opacity = '1';
+                    calibrateLdwRightLabel.innerText = data.ldw_calibrated_right ? 'Recalibrate Right' : 'Calibrate Right Edge';
                 }
 
             } catch (err) {
@@ -784,15 +882,25 @@
             }
         }
         
-        async function requestCenterCalibration() {
-            calibrateCenterBtn.style.opacity = '0.5';
-            calibrateCenterLabel.innerText = 'Calibrating (0%)';
-            
+        async function requestLdwLeftCalibration() {
+            calibrateLdwLeftBtn.style.opacity = '0.5';
+            calibrateLdwLeftLabel.innerText = 'Calibrating Left (0%)';
             try {
-                await fetch('/api/calibrate_center', { method: 'POST' });
+                await fetch('/api/calibrate_ldw_left', { method: 'POST' });
             } catch(e) {
-                calibrateCenterBtn.style.opacity = '1';
-                calibrateCenterLabel.innerText = 'Calibration Failed';
+                calibrateLdwLeftBtn.style.opacity = '1';
+                calibrateLdwLeftLabel.innerText = 'Calibration Failed';
+            }
+        }
+
+        async function requestLdwRightCalibration() {
+            calibrateLdwRightBtn.style.opacity = '0.5';
+            calibrateLdwRightLabel.innerText = 'Calibrating Right (0%)';
+            try {
+                await fetch('/api/calibrate_ldw_right', { method: 'POST' });
+            } catch(e) {
+                calibrateLdwRightBtn.style.opacity = '1';
+                calibrateLdwRightLabel.innerText = 'Calibration Failed';
             }
         }
 
