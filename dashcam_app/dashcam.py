@@ -49,7 +49,7 @@ CENTER_LANE_X_MAX = (INFER_WIDTH // 3) * 2
 # LDW Settings
 LDW_MAX_DRIFT = 40 # Max pixel drift from center before warning
 LDW_CALIBRATION_SECONDS = 10
-LDW_MIN_CALIBRATION_SAMPLES = 60
+LDW_MIN_CALIBRATION_SAMPLES = 30
 LDW_WARNING_CONSECUTIVE_FRAMES = 3
 HOOD_CALIBRATION_FRAMES = 12
 
@@ -84,8 +84,8 @@ state = {
     "calib_right_history": [],
     "calibration": None,
     "car_center_x": INFER_WIDTH // 2,
-    "calibration_ldw_left_frames_left": 0,
-    "calibration_ldw_right_frames_left": 0,
+    "calibration_ldw_left_start_time": None,
+    "calibration_ldw_right_start_time": None,
     "calib_ldw_left_dists": [],
     "calib_ldw_right_dists": [],
     "ldw_calibration": None,
@@ -110,6 +110,9 @@ if os.path.exists('models/calibration.json'):
                 state["hood_y"] = int(calib_data["hood_y"])
                 state["hood_detection_frames_left"] = 0
                 print(f"[INFO] Loaded hood line: y={state['hood_y']}", flush=True)
+            if "car_center_x" in calib_data:
+                state["car_center_x"] = int(calib_data["car_center_x"])
+                print(f"[INFO] Loaded car center bias: x={state['car_center_x']}", flush=True)
     except Exception as e:
         print(f"[ERROR] Failed to load calibration matrix: {e}", flush=True)
 
@@ -123,6 +126,8 @@ def save_calibration_state():
         calib_data["ldw_calibration"] = state["ldw_calibration"]
     if state.get("hood_y") is not None:
         calib_data["hood_y"] = int(state["hood_y"])
+    if state.get("car_center_x") is not None:
+        calib_data["car_center_x"] = int(state["car_center_x"])
 
     os.makedirs('models', exist_ok=True)
     with open('models/calibration.json', 'w') as f:
@@ -379,9 +384,34 @@ def sample_line_position(line_mask, target_y, side):
         return float(np.max(xs))
     return float(np.min(xs))
 
+def auto_calculate_lane_center_bias():
+    ldw_calib = state.get("ldw_calibration")
+    if not ldw_calib or not isinstance(ldw_calib, dict):
+        return
+    
+    left_comfort = ldw_calib.get("left_comfort_dist")
+    right_comfort = ldw_calib.get("right_comfort_dist")
+    
+    if left_comfort is not None and right_comfort is not None:
+        # Calculate shift
+        shift = (right_comfort - left_comfort) / 2.0
+        
+        # Update car_center_x
+        old_center = state.get("car_center_x", INFER_WIDTH // 2)
+        new_center = int(np.clip(old_center + shift, 0, INFER_WIDTH - 1))
+        
+        # Calculate new balanced comfort distance
+        balanced_comfort = (left_comfort + right_comfort) / 2.0
+        
+        state["car_center_x"] = new_center
+        ldw_calib["left_comfort_dist"] = balanced_comfort
+        ldw_calib["right_comfort_dist"] = balanced_comfort
+        
+        print(f"[INFO] Auto-balanced center bias: shifted from {old_center} to {new_center} (shift={shift:.2f} px). New balanced comfort dist: {balanced_comfort:.2f} px", flush=True)
+
 def finalize_ldw_left_calibration():
     dists = np.array(state["calib_ldw_left_dists"], dtype=np.float32)
-    state["calibration_ldw_left_frames_left"] = 0
+    state["calibration_ldw_left_start_time"] = None
     
     if len(dists) < LDW_MIN_CALIBRATION_SAMPLES:
         state["error"] = "Left LDW calibration failed: not enough lane samples."
@@ -398,12 +428,13 @@ def finalize_ldw_left_calibration():
     
     state["ldw_calibration"] = ldw_calib
     state["error"] = None
+    auto_calculate_lane_center_bias()
     save_calibration_state()
     print(f"[INFO] Calibrated left comfortable distance: {left_comfort_dist:.2f} px", flush=True)
 
 def finalize_ldw_right_calibration():
     dists = np.array(state["calib_ldw_right_dists"], dtype=np.float32)
-    state["calibration_ldw_right_frames_left"] = 0
+    state["calibration_ldw_right_start_time"] = None
     
     if len(dists) < LDW_MIN_CALIBRATION_SAMPLES:
         state["error"] = "Right LDW calibration failed: not enough lane samples."
@@ -420,6 +451,7 @@ def finalize_ldw_right_calibration():
     
     state["ldw_calibration"] = ldw_calib
     state["error"] = None
+    auto_calculate_lane_center_bias()
     save_calibration_state()
     print(f"[INFO] Calibrated right comfortable distance: {right_comfort_dist:.2f} px", flush=True)
 
@@ -698,21 +730,23 @@ def inference_loop():
                     right_severity = 0.0
 
                     # 1. LDW Left Calibration
-                    if state["calibration_ldw_left_frames_left"] > 0:
-                        state["calibration_ldw_left_frames_left"] -= 1
-                        if left_x is not None:
-                            dist = car_center_x - left_x
-                            state["calib_ldw_left_dists"].append(dist)
-                        if state["calibration_ldw_left_frames_left"] <= 0:
+                    if state.get("calibration_ldw_left_start_time") is not None:
+                        elapsed = time.time() - state["calibration_ldw_left_start_time"]
+                        if elapsed < LDW_CALIBRATION_SECONDS:
+                            if left_x is not None:
+                                dist = car_center_x - left_x
+                                state["calib_ldw_left_dists"].append(dist)
+                        else:
                             finalize_ldw_left_calibration()
 
                     # 2. LDW Right Calibration
-                    if state["calibration_ldw_right_frames_left"] > 0:
-                        state["calibration_ldw_right_frames_left"] -= 1
-                        if right_x is not None:
-                            dist = right_x - car_center_x
-                            state["calib_ldw_right_dists"].append(dist)
-                        if state["calibration_ldw_right_frames_left"] <= 0:
+                    if state.get("calibration_ldw_right_start_time") is not None:
+                        elapsed = time.time() - state["calibration_ldw_right_start_time"]
+                        if elapsed < LDW_CALIBRATION_SECONDS:
+                            if right_x is not None:
+                                dist = right_x - car_center_x
+                                state["calib_ldw_right_dists"].append(dist)
+                        else:
                             finalize_ldw_right_calibration()
 
                     ldw_calibration = state.get("ldw_calibration")
@@ -843,8 +877,29 @@ def status():
     duration = 0
     if state["recording"] and state["recording_since"]:
         duration = int(time.time() - state["recording_since"])
-    calibration_total_frames = TARGET_FPS * LDW_CALIBRATION_SECONDS
     
+    now = time.time()
+    
+    calibrating_ldw_left = False
+    calibration_ldw_left_progress = 0
+    if state.get("calibration_ldw_left_start_time") is not None:
+        elapsed = now - state["calibration_ldw_left_start_time"]
+        if elapsed < LDW_CALIBRATION_SECONDS:
+            calibrating_ldw_left = True
+            calibration_ldw_left_progress = int((elapsed / LDW_CALIBRATION_SECONDS) * 100)
+        else:
+            calibration_ldw_left_progress = 100
+
+    calibrating_ldw_right = False
+    calibration_ldw_right_progress = 0
+    if state.get("calibration_ldw_right_start_time") is not None:
+        elapsed = now - state["calibration_ldw_right_start_time"]
+        if elapsed < LDW_CALIBRATION_SECONDS:
+            calibrating_ldw_right = True
+            calibration_ldw_right_progress = int((elapsed / LDW_CALIBRATION_SECONDS) * 100)
+        else:
+            calibration_ldw_right_progress = 100
+            
     return jsonify({
         "capture_fps": state["capture_fps"],
         "web_fps": state["web_fps"],
@@ -858,11 +913,11 @@ def status():
         "gpu_device_name": state["gpu_device_name"],
         "yolop_device": state["yolop_device"],
         "car_center_x": state["car_center_x"],
-        "calibrating_ldw_left": state["calibration_ldw_left_frames_left"] > 0,
-        "calibration_ldw_left_progress": calibration_total_frames - state["calibration_ldw_left_frames_left"],
-        "calibrating_ldw_right": state["calibration_ldw_right_frames_left"] > 0,
-        "calibration_ldw_right_progress": calibration_total_frames - state["calibration_ldw_right_frames_left"],
-        "calibration_total": calibration_total_frames,
+        "calibrating_ldw_left": calibrating_ldw_left,
+        "calibration_ldw_left_progress": calibration_ldw_left_progress,
+        "calibrating_ldw_right": calibrating_ldw_right,
+        "calibration_ldw_right_progress": calibration_ldw_right_progress,
+        "calibration_total": 100,
         "ldw_calibrated": state["ldw_calibration"] is not None,
         "ldw_calibrated_left": state["ldw_calibration"] is not None and "left_comfort_dist" in state["ldw_calibration"],
         "ldw_calibrated_right": state["ldw_calibration"] is not None and "right_comfort_dist" in state["ldw_calibration"]
@@ -892,18 +947,18 @@ def api_calibrate():
 @app.route('/api/calibrate_ldw_left', methods=['POST'])
 def api_calibrate_ldw_left():
     global state
-    state["calibration_ldw_left_frames_left"] = TARGET_FPS * LDW_CALIBRATION_SECONDS
+    state["calibration_ldw_left_start_time"] = time.time()
     state["calib_ldw_left_dists"] = []
-    state["calibration_ldw_right_frames_left"] = 0
+    state["calibration_ldw_right_start_time"] = None
     state["error"] = None
     return jsonify({"status": "calibrating_left"})
 
 @app.route('/api/calibrate_ldw_right', methods=['POST'])
 def api_calibrate_ldw_right():
     global state
-    state["calibration_ldw_right_frames_left"] = TARGET_FPS * LDW_CALIBRATION_SECONDS
+    state["calibration_ldw_right_start_time"] = time.time()
     state["calib_ldw_right_dists"] = []
-    state["calibration_ldw_left_frames_left"] = 0
+    state["calibration_ldw_left_start_time"] = None
     state["error"] = None
     return jsonify({"status": "calibrating_right"})
 
