@@ -161,15 +161,6 @@
             object-fit: fill;
         }
 
-        .lane-overlay {
-            position: absolute;
-            inset: 0;
-            width: 100%;
-            height: 100%;
-            pointer-events: none;
-            z-index: 1;
-        }
-
         .stats-overlay {
             position: absolute;
             top: 16px;
@@ -410,24 +401,27 @@
     <div id="warningBanner" class="warning-banner"></div>
 
     <div class="video-container">
+        <div style="padding: 10px 16px; font-weight: 600; font-size: 13px; border-bottom: 1px solid rgba(255,255,255,0.08); background: rgba(0,0,0,0.15); display: flex; justify-content: space-between;">
+            <span>Perspective Mask View</span>
+            <span style="color: var(--text-secondary); font-size: 11px;">Raw perspective feed with lane and vehicle masks</span>
+        </div>
         <div class="video-stage">
             <div class="stats-overlay">
                 <div id="fpsDisplay">FPS: --</div>
                 <div id="centerDisplay">Car Center X: --</div>
                 <div id="durationDisplay" style="display:none; color: #fca5a5;">REC: 00:00</div>
             </div>
-            <img id="videoFeed" src="/video_feed" class="video-feed" alt="Camera Feed" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjgwIiBoZWlnaHQ9IjgwMCI+PHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsbD0i/#222\"/><text x=\"50%\" y=\"50%\" font-family=\"arial\" font-size=\"24\" fill=\"#666\" dominant-baseline=\"middle\" text-anchor=\"middle\">Camera Offline</text></svg>'" />
-            <canvas id="laneOverlayCanvas" class="lane-overlay"></canvas>
+            <img id="videoFeed" src="/debug_feed" class="video-feed" alt="Perspective Mask Feed" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjgwIiBoZWlnaHQ9IjgwMCI+PHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsbD0iIzIyMiIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LWZhbWlseT0iYXJpYWwiIGZvbnQtc2l6ZT0iMjQiIGZpbGw9IiM2NjYiIGRvbWluYW50LWJhc2VsaW5lPSJtaWRkbGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPlBlcnNwZWN0aXZlIEZlZWQgT2ZmbGluZTwvdGV4dD48L3N2Zz4='" />
         </div>
     </div>
 
     <div class="video-container" style="margin-bottom: 24px;">
         <div style="padding: 10px 16px; font-weight: 600; font-size: 13px; border-bottom: 1px solid rgba(255,255,255,0.08); background: rgba(0,0,0,0.15); display: flex; justify-content: space-between;">
-            <span>Perspective Debug View</span>
-            <span style="color: var(--text-secondary); font-size: 11px;">Undistorted perspective feed</span>
+            <span>Bird's-Eye Feed</span>
+            <span style="color: var(--text-secondary); font-size: 11px;">Current BEV output for comparison</span>
         </div>
         <div style="position: relative; width: 100%; aspect-ratio: 16/10; overflow: hidden;">
-            <img id="debugFeed" src="/debug_feed" class="video-feed" alt="Debug Feed" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NDAiIGhlaWdodD0iNDAwIj48cmVjdCB3aWR0aD0iMTAwJSIgZmlsbD0iIzIyMiIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LWZhbWlseT0iYXJpYWwiIGZvbnQtc2l6ZT0iMTYiIGZpbGw9IiM2NjYiIGRvbWluYW50LWJhc2VsaW5lPSJtaWRkbGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkRlYnVnIEZlZWQgT2ZmbGluZTwvdGV4dD48L3N2Zz4='" />
+            <img id="debugFeed" src="/video_feed" class="video-feed" alt="Bird's-Eye Feed" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NDAiIGhlaWdodD0iNDAwIj48cmVjdCB3aWR0aD0iMTAwJSIgZmlsbD0iIzIyMiIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LWZhbWlseT0iYXJpYWwiIGZvbnQtc2l6ZT0iMTYiIGZpbGw9IiM2NjYiIGRvbWluYW50LWJhc2VsaW5lPSJtaWRkbGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkJFViBGZWVkIE9mZmxpbmU8L3RleHQ+PC9zdmc+='" />
         </div>
     </div>
 
@@ -521,9 +515,7 @@
         let isAdasEnabled = false;
         let isUpdatingCenter = false;
         let statusPollHandle = null;
-        let laneOverlayPollHandle = null;
         let statusRequestInFlight = false;
-        let laneOverlayRequestInFlight = false;
 
         // Elements
         const mainStatus = document.getElementById('mainStatus');
@@ -542,10 +534,6 @@
         const calibrateLdwRightLabel = document.getElementById('calibrateLdwRightLabel');
         const centerSlider = document.getElementById('centerSlider');
         const centerSliderValue = document.getElementById('centerSliderValue');
-        const videoFeed = document.getElementById('videoFeed');
-        const laneOverlayCanvas = document.getElementById('laneOverlayCanvas');
-        const laneOverlayCtx = laneOverlayCanvas.getContext('2d');
-
         // Web Audio API components
         let audioCtx = null;
         let lastBeepTime = 0;
@@ -716,145 +704,8 @@
         document.body.addEventListener('click', handleGlobalInteraction);
         document.body.addEventListener('touchstart', handleGlobalInteraction);
 
-        const getSeverityColor = (severity, alpha = 1.0) => {
-            if (severity <= 0.0) {
-                return `rgba(80, 180, 255, ${alpha})`;
-            } else if (severity <= 0.4) {
-                return `rgba(234, 179, 8, ${alpha})`; // Yellow
-            } else if (severity <= 0.8) {
-                return `rgba(249, 115, 22, ${alpha})`; // Orange
-            } else {
-                return `rgba(239, 68, 68, ${alpha})`; // Red
-            }
-        };
-
         function previewCenterX(value) {
             centerSliderValue.innerText = `${value}px`;
-        }
-
-        function resizeLaneOverlayCanvas() {
-            const rect = videoFeed.getBoundingClientRect();
-            const width = Math.max(1, Math.round(rect.width));
-            const height = Math.max(1, Math.round(rect.height));
-            if (laneOverlayCanvas.width !== width || laneOverlayCanvas.height !== height) {
-                laneOverlayCanvas.width = width;
-                laneOverlayCanvas.height = height;
-            }
-        }
-
-        function drawLaneOverlay(data) {
-            resizeLaneOverlayCanvas();
-            laneOverlayCtx.clearRect(0, 0, laneOverlayCanvas.width, laneOverlayCanvas.height);
-
-            if (!data || !data.width || !data.height) {
-                return;
-            }
-
-            const scaleX = laneOverlayCanvas.width / data.width;
-            const scaleY = laneOverlayCanvas.height / data.height;
-
-            const drawPolygon = (points, fillStyle) => {
-                if (!Array.isArray(points) || points.length < 3) {
-                    return;
-                }
-                laneOverlayCtx.beginPath();
-                points.forEach(([x, y], index) => {
-                    const px = x * scaleX;
-                    const py = y * scaleY;
-                    if (index === 0) {
-                        laneOverlayCtx.moveTo(px, py);
-                    } else {
-                        laneOverlayCtx.lineTo(px, py);
-                    }
-                });
-                laneOverlayCtx.closePath();
-                laneOverlayCtx.fillStyle = fillStyle;
-                laneOverlayCtx.fill();
-            };
-
-            const maxSeverity = Math.max(data.left_severity || 0.0, data.right_severity || 0.0);
-
-            if (Array.isArray(data.polygon) && data.polygon.length >= 3) {
-                const baseFill = data.fcw_warning || maxSeverity > 0.8 ? 'rgba(255, 84, 84, 0.18)' : 'rgba(48, 212, 122, 0.18)';
-                drawPolygon(data.polygon, baseFill);
-            }
-
-            if (data.left_severity > 0.0) {
-                drawPolygon(data.left_zone, getSeverityColor(data.left_severity, 0.25));
-            }
-
-            if (data.right_severity > 0.0) {
-                drawPolygon(data.right_zone, getSeverityColor(data.right_severity, 0.25));
-            }
-
-            const drawPath = (points, strokeStyle) => {
-                if (!Array.isArray(points) || points.length < 2) {
-                    return;
-                }
-                laneOverlayCtx.beginPath();
-                points.forEach(([x, y], index) => {
-                    const px = x * scaleX;
-                    const py = y * scaleY;
-                    if (index === 0) {
-                        laneOverlayCtx.moveTo(px, py);
-                    } else {
-                        laneOverlayCtx.lineTo(px, py);
-                    }
-                });
-                laneOverlayCtx.strokeStyle = strokeStyle;
-                laneOverlayCtx.lineWidth = 4;
-                laneOverlayCtx.lineCap = 'round';
-                laneOverlayCtx.lineJoin = 'round';
-                laneOverlayCtx.stroke();
-            };
-
-            drawPath(data.left_points, getSeverityColor(data.left_severity || 0.0, 0.95));
-            drawPath(data.right_points, getSeverityColor(data.right_severity || 0.0, 0.95));
-
-            // Trigger warning beep if severity is in orange or red territory (> 0.4)
-            if (maxSeverity > 0.4 && isAdasEnabled) {
-                playWarningBeep(maxSeverity);
-            }
-
-            if (Array.isArray(data.fcw_boxes)) {
-                data.fcw_boxes.forEach((box) => {
-                    const x = box.x1 * scaleX;
-                    const y = box.y1 * scaleY;
-                    const width = (box.x2 - box.x1) * scaleX;
-                    const height = (box.y2 - box.y1) * scaleY;
-
-                    laneOverlayCtx.strokeStyle = box.threat ? 'rgba(255, 84, 84, 0.98)' : 'rgba(120, 255, 160, 0.85)';
-                    laneOverlayCtx.lineWidth = box.threat ? 4 : 2;
-                    laneOverlayCtx.strokeRect(x, y, width, height);
-
-                    if (box.threat) {
-                        laneOverlayCtx.fillStyle = 'rgba(255, 84, 84, 0.96)';
-                        laneOverlayCtx.font = 'bold 16px Inter, sans-serif';
-                        laneOverlayCtx.fillText('TOO CLOSE', x, Math.max(18, y - 8));
-                    }
-                });
-            }
-        }
-
-        async function fetchLaneOverlay() {
-            if (laneOverlayRequestInFlight) {
-                return;
-            }
-            laneOverlayRequestInFlight = true;
-            try {
-                const response = await fetch(`/api/lane_overlay?t=${Date.now()}`, { cache: 'no-store' });
-                const data = await response.json();
-                drawLaneOverlay(data);
-            } catch (e) {
-                laneOverlayCtx.clearRect(0, 0, laneOverlayCanvas.width, laneOverlayCanvas.height);
-            } finally {
-                laneOverlayRequestInFlight = false;
-            }
-        }
-
-        async function pollLaneOverlay() {
-            await fetchLaneOverlay();
-            laneOverlayPollHandle = window.setTimeout(pollLaneOverlay, 180);
         }
 
         function formatDuration(seconds) {
@@ -1085,11 +936,7 @@
         updateSoundBadge();
 
         // Poll with one in-flight request at a time to avoid starving the MJPEG stream.
-        window.addEventListener('resize', resizeLaneOverlayCanvas);
-        videoFeed.addEventListener('load', resizeLaneOverlayCanvas);
-        resizeLaneOverlayCanvas();
         pollStatus();
-        pollLaneOverlay();
     </script>
 </body>
 </html>

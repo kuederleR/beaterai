@@ -860,6 +860,11 @@ def inference_loop():
                     cv2.circle(im_debug, (int(vp["vp_x"]), int(vp["vp_y"])), 5, (0, 0, 255), -1)
                 else:
                     cv2.circle(im_debug, (int(K_INFER[0, 2]), 160), 5, (0, 0, 255), -1)
+
+                if da_mask is not None:
+                    road_overlay = im_debug.copy()
+                    road_overlay[da_mask > 0] = (0, 140, 0)
+                    cv2.addWeighted(road_overlay, 0.28, im_debug, 0.72, 0, dst=im_debug)
                 
                 if ll_mask is not None:
                     im_debug[ll_mask > 0] = (0, 255, 255)
