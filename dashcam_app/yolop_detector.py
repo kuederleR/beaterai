@@ -209,7 +209,7 @@ class YolopDetector:
         h_orig, w_orig = img.shape[:2]
         
         # 1. Preprocess with letterbox
-        img_padded, ratio, (dw, dh) = letterbox(img, new_shape=(self.img_size, self.img_size), auto=True)
+        img_padded, ratio, (dw, dh) = letterbox(img, new_shape=(self.img_size, self.img_size), auto=False)
         
         # Determine padding
         top_pad = int(round(dh - 0.1))
