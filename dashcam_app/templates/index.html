@@ -525,6 +525,8 @@
         const durationDisplay = document.getElementById('durationDisplay');
         const recordBtn = document.getElementById('recordBtn');
         const recordLabel = document.getElementById('recordLabel');
+        const calibrateBtn = document.getElementById('calibrateBtn');
+        const calibrateLabel = document.getElementById('calibrateLabel');
         const adasToggle = document.getElementById('adasToggle');
         const errorBanner = document.getElementById('errorBanner');
         const warningBanner = document.getElementById('warningBanner');
@@ -779,6 +781,15 @@
                     adasToggle.checked = isAdasEnabled;
                 }
 
+                // Update Lens Calibration UI
+                if (data.calibrating_lens) {
+                    calibrateBtn.style.opacity = '0.5';
+                    calibrateLabel.innerText = `Calibrating Lens (${data.calibration_lens_progress}%)`;
+                } else {
+                    calibrateBtn.style.opacity = '1';
+                    calibrateLabel.innerText = data.lens_calibrated ? 'Recalibrate Lens' : 'Calibrate Lens';
+                }
+
                 // Update Left LDW Calibration UI
                 if (data.calibrating_ldw_left) {
                     calibrateLdwLeftBtn.style.opacity = '0.5';
@@ -868,21 +879,14 @@
         }
         
         async function requestCalibration() {
-            const btn = document.getElementById('calibrateBtn');
-            const label = document.getElementById('calibrateLabel');
-            
-            btn.style.opacity = '0.5';
-            label.innerText = 'Calibrating...';
+            calibrateBtn.style.opacity = '0.5';
+            calibrateLabel.innerText = 'Calibrating Lens (0%)';
             
             try {
                 await fetch('/api/calibrate', { method: 'POST' });
-                setTimeout(() => {
-                    btn.style.opacity = '1';
-                    label.innerText = 'Calibrate Lens';
-                }, 2000);
             } catch(e) {
-                btn.style.opacity = '1';
-                label.innerText = 'Calibration Failed';
+                calibrateBtn.style.opacity = '1';
+                calibrateLabel.innerText = 'Calibration Failed';
             }
         }
         

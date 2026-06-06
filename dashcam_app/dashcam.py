@@ -52,6 +52,7 @@ LDW_CALIBRATION_SECONDS = 10
 LDW_MIN_CALIBRATION_SAMPLES = 30
 LDW_WARNING_CONSECUTIVE_FRAMES = 3
 HOOD_CALIBRATION_FRAMES = 12
+LENS_CALIBRATION_FRAMES = 30
 
 # --- Road Plane / Bird's Eye View (BEV) Geometry Configuration ---
 CAMERA_HEIGHT = 1.2192 # 4 feet off the ground in meters
@@ -146,8 +147,6 @@ state = {
     "calibration_frames_left": 0,
     "calib_vp_x_list": [],
     "calib_vp_y_list": [],
-    "live_vp_x_history": [],
-    "live_vp_y_history": [],
     "calib_left_history": [],
     "calib_right_history": [],
     "calibration": None,
@@ -670,14 +669,15 @@ def inference_loop():
 
             # Check if calibration requested
             if state.get("calibrate_requested"):
-                state["calibration_frames_left"] = 30
+                state["calibration_frames_left"] = LENS_CALIBRATION_FRAMES
                 state["calib_vp_x_list"] = []
                 state["calib_vp_y_list"] = []
+                state["error"] = None
                 state["calibrate_requested"] = False
 
             car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
 
-            lane_perception_active = state["adas_enabled"]
+            lane_perception_active = state["adas_enabled"] or state["calibration_frames_left"] > 0 or state.get("calibrate_requested", False)
 
             if state["adas_enabled"] or lane_perception_active:
                 # Run YOLOpv2 inference
@@ -706,17 +706,6 @@ def inference_loop():
                         else:
                             state["error"] = "Lens calibration failed: not enough lane lines detected."
                             print("[WARNING] Lens calibration failed", flush=True)
-
-                if state.get("calibration") is None and detected_vp is not None:
-                    state["live_vp_x_history"].append(detected_vp[0])
-                    state["live_vp_y_history"].append(detected_vp[1])
-                    if len(state["live_vp_x_history"]) > 8:
-                        state["live_vp_x_history"].pop(0)
-                        state["live_vp_y_history"].pop(0)
-                    update_homography({
-                        "vp_x": float(np.median(state["live_vp_x_history"])),
-                        "vp_y": float(np.median(state["live_vp_y_history"])),
-                    })
 
                 car_center_pts = np.array([[car_center_x, INFER_HEIGHT - 1]], dtype=np.float32)
                 car_center_road = image_to_road(car_center_pts)[0]
@@ -1036,6 +1025,12 @@ def status():
             calibration_ldw_right_progress = int((elapsed / LDW_CALIBRATION_SECONDS) * 100)
         else:
             calibration_ldw_right_progress = 100
+
+    calibrating_lens = state["calibration_frames_left"] > 0 or state.get("calibrate_requested", False)
+    calibration_lens_progress = 0
+    if calibrating_lens:
+        calibration_lens_progress = int(((LENS_CALIBRATION_FRAMES - state["calibration_frames_left"]) / LENS_CALIBRATION_FRAMES) * 100)
+        calibration_lens_progress = int(np.clip(calibration_lens_progress, 0, 100))
             
     return jsonify({
         "capture_fps": state["capture_fps"],
@@ -1050,11 +1045,14 @@ def status():
         "gpu_device_name": state["gpu_device_name"],
         "yolop_device": state["yolop_device"],
         "car_center_x": state["car_center_x"],
+        "calibrating_lens": calibrating_lens,
+        "calibration_lens_progress": calibration_lens_progress,
         "calibrating_ldw_left": calibrating_ldw_left,
         "calibration_ldw_left_progress": calibration_ldw_left_progress,
         "calibrating_ldw_right": calibrating_ldw_right,
         "calibration_ldw_right_progress": calibration_ldw_right_progress,
         "calibration_total": 100,
+        "lens_calibrated": state["calibration"] is not None,
         "ldw_calibrated": state["ldw_calibration"] is not None,
         "ldw_calibrated_left": state["ldw_calibration"] is not None and "left_comfort_dist" in state["ldw_calibration"],
         "ldw_calibrated_right": state["ldw_calibration"] is not None and "right_comfort_dist" in state["ldw_calibration"]
@@ -1079,6 +1077,10 @@ def api_toggle_adas():
 def api_calibrate():
     global state
     state["calibrate_requested"] = True
+    state["calib_vp_x_list"] = []
+    state["calib_vp_y_list"] = []
+    state["calibration_frames_left"] = 0
+    state["error"] = None
     return jsonify({"status": "calibrating"})
 
 @app.route('/api/calibrate_ldw_left', methods=['POST'])
