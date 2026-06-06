@@ -395,9 +395,14 @@
 
     <div class="header">
         <h1>Dashcam OS</h1>
-        <div class="status-badge" id="mainStatus">
-            <div class="status-dot"></div>
-            <span id="statusText">Connecting...</span>
+        <div style="display: flex; gap: 8px;">
+            <div class="status-badge" id="soundStatus" onclick="event.stopPropagation(); initAndToggleAudio();" style="cursor: pointer;">
+                <span id="soundStatusIcon">🔇</span> <span id="soundStatusText">Tap to Enable Sound</span>
+            </div>
+            <div class="status-badge" id="mainStatus">
+                <div class="status-dot"></div>
+                <span id="statusText">Connecting...</span>
+            </div>
         </div>
     </div>
 
@@ -475,6 +480,19 @@
             </div>
         </div>
 
+        <div class="control-card">
+            <div class="toggle-container">
+                <span class="toggle-label">Audio Mode</span>
+                <select id="audioModeSelect" onchange="changeAudioMode(this.value)" style="background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: white; padding: 6px 12px; border-radius: 8px; font-size: 14px; outline: none; cursor: pointer;">
+                    <option value="ambient" style="background: var(--bg-color); color: white;">Mix with Music (Ambient)</option>
+                    <option value="playback" style="background: var(--bg-color); color: white;">Override Silence (Playback)</option>
+                </select>
+            </div>
+            <div style="font-size: 12px; color: var(--text-secondary); text-align: center; margin-top: 8px;">
+                Choose "Mix with Music" to beep alongside Spotify (phone must be unmuted). Choose "Override Silence" to beep even on Silent/Mute switch.
+            </div>
+        </div>
+
         <div class="control-card slider-card">
             <div class="slider-header">
                 <span class="toggle-label">Lane Center Bias</span>
@@ -521,11 +539,132 @@
         // Web Audio API components
         let audioCtx = null;
         let lastBeepTime = 0;
+        let audioMode = localStorage.getItem('adas_audio_mode') || 'ambient';
+        let keepAliveSource = null;
 
-        function playWarningBeep(severity) {
+        function updateSoundBadge() {
+            const badge = document.getElementById('soundStatus');
+            const icon = document.getElementById('soundStatusIcon');
+            const text = document.getElementById('soundStatusText');
+            
+            if (!audioCtx) {
+                badge.style.borderColor = 'rgba(239, 68, 68, 0.4)';
+                badge.style.color = '#fca5a5';
+                icon.innerText = '🔇';
+                text.innerText = 'Tap to Enable Sound';
+            } else if (audioCtx.state === 'suspended') {
+                badge.style.borderColor = 'rgba(245, 158, 11, 0.4)';
+                badge.style.color = '#fde047';
+                icon.innerText = '🔇';
+                text.innerText = 'Tap to Resume Sound';
+            } else {
+                badge.style.borderColor = 'rgba(16, 185, 129, 0.4)';
+                badge.style.color = '#a7f3d0';
+                icon.innerText = '🔊';
+                text.innerText = audioMode === 'ambient' ? 'Alerts Active (Ambient)' : 'Alerts Active (Playback)';
+            }
+        }
+
+        async function applyAudioSessionType(type) {
+            if ('audioSession' in navigator) {
+                try {
+                    await navigator.audioSession.setType(type);
+                    console.log(`Successfully set audioSession type to: ${type}`);
+                } catch (e) {
+                    // Try direct assignment as fallback
+                    try {
+                        navigator.audioSession.type = type;
+                        console.log(`Successfully assigned audioSession type to: ${type}`);
+                    } catch (err) {
+                        console.warn("Failed to set audio session type:", err);
+                    }
+                }
+            }
+        }
+
+        async function initAndToggleAudio() {
             try {
                 if (!audioCtx) {
                     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    await applyAudioSessionType(audioMode);
+                    if (audioCtx.state === 'suspended') {
+                        await audioCtx.resume();
+                    }
+                    playConfirmationChirp();
+                    startSilentKeepAlive();
+                } else if (audioCtx.state === 'running') {
+                    await audioCtx.suspend();
+                    if (keepAliveSource) {
+                        try { keepAliveSource.stop(); } catch(e){}
+                        keepAliveSource = null;
+                    }
+                } else if (audioCtx.state === 'suspended') {
+                    await audioCtx.resume();
+                    startSilentKeepAlive();
+                    playConfirmationChirp();
+                }
+                updateSoundBadge();
+            } catch (e) {
+                console.error("Failed to toggle audio:", e);
+            }
+        }
+
+        function playConfirmationChirp() {
+            if (!audioCtx) return;
+            const now = audioCtx.currentTime;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.frequency.setValueAtTime(1000, now);
+            gain.gain.setValueAtTime(0.001, now);
+            gain.gain.linearRampToValueAtTime(0.05, now + 0.05);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+            osc.start(now);
+            osc.stop(now + 0.15);
+        }
+
+        function startSilentKeepAlive() {
+            if (!audioCtx || keepAliveSource) return;
+            try {
+                // Create a 1-second silent buffer
+                const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate, audioCtx.sampleRate);
+                const data = buffer.getChannelData(0);
+                for (let i = 0; i < data.length; i++) {
+                    data[i] = 0.0001 * (Math.random() - 0.5); // Add dynamic micro-noise to prevent engine sleep
+                }
+                
+                keepAliveSource = audioCtx.createBufferSource();
+                keepAliveSource.buffer = buffer;
+                keepAliveSource.loop = true;
+                
+                // Low gain to ensure complete silence
+                const silentGain = audioCtx.createGain();
+                silentGain.gain.value = 0.00001; // Silent but keeps channel active
+                
+                keepAliveSource.connect(silentGain);
+                silentGain.connect(audioCtx.destination);
+                keepAliveSource.start();
+                console.log("Started Web Audio background keep-alive loop.");
+            } catch (e) {
+                console.warn("Failed to start silent background keep-alive:", e);
+            }
+        }
+
+        async function changeAudioMode(value) {
+            audioMode = value;
+            localStorage.setItem('adas_audio_mode', value);
+            if (audioCtx) {
+                await applyAudioSessionType(value);
+            }
+            updateSoundBadge();
+        }
+
+        function playWarningBeep(severity) {
+            try {
+                if (!audioCtx || audioCtx.state === 'suspended') {
+                    if (audioCtx) audioCtx.resume().then(updateSoundBadge);
+                    return;
                 }
                 const now = audioCtx.currentTime;
                 // Orange severity (>0.4) beeps every 600ms, Red (>0.8) beeps every 300ms
@@ -546,7 +685,7 @@
                 osc.type = 'sine';
                 
                 gainNode.gain.setValueAtTime(0.001, now);
-                gainNode.gain.linearRampToValueAtTime(0.15, now + 0.05);
+                gainNode.gain.linearRampToValueAtTime(0.2, now + 0.05);
                 gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
                 
                 osc.start(now);
@@ -556,12 +695,16 @@
             }
         }
 
-        // Auto-resume AudioContext on user interaction
-        document.body.addEventListener('click', () => {
-            if (audioCtx && audioCtx.state === 'suspended') {
-                audioCtx.resume();
+        // Auto-initialize or resume AudioContext on general page click/touch
+        function handleGlobalInteraction() {
+            if (!audioCtx) {
+                initAndToggleAudio();
+            } else if (audioCtx.state === 'suspended') {
+                audioCtx.resume().then(updateSoundBadge);
             }
-        });
+        }
+        document.body.addEventListener('click', handleGlobalInteraction);
+        document.body.addEventListener('touchstart', handleGlobalInteraction);
 
         const getSeverityColor = (severity, alpha = 1.0) => {
             if (severity <= 0.0) {
@@ -926,6 +1069,10 @@
                 isUpdatingCenter = false;
             }
         }
+
+        // Initialize audio mode settings from preference
+        document.getElementById('audioModeSelect').value = audioMode;
+        updateSoundBadge();
 
         // Poll with one in-flight request at a time to avoid starving the MJPEG stream.
         window.addEventListener('resize', resizeLaneOverlayCanvas);

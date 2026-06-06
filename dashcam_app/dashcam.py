@@ -105,7 +105,8 @@ if os.path.exists('models/calibration.json'):
                 print("[INFO] Successfully loaded Stable VP Calibration.", flush=True)
             if "ldw_calibration" in calib_data:
                 state["ldw_calibration"] = calib_data["ldw_calibration"]
-                print("[INFO] Loaded LDW baseline calibration.", flush=True)
+                state["adas_enabled"] = True
+                print("[INFO] Loaded LDW baseline calibration. Auto-enabling ADAS.", flush=True)
             if "hood_y" in calib_data:
                 state["hood_y"] = int(calib_data["hood_y"])
                 state["hood_detection_frames_left"] = 0
