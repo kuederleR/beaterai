@@ -191,8 +191,9 @@ def update_homography():
         
     h = CAMERA_HEIGHT
     
-    # Transform matrix from road to camera coordinates
-    M = np.stack([u_x, u_y, h * u_z], axis=1)
+    # The camera sits h meters above the road plane, so the plane-origin translation
+    # in camera coordinates is opposite the plane normal direction.
+    M = np.stack([u_x, u_y, -h * u_z], axis=1)
     ROAD_TO_CAMERA_MATRIX = M
     
     # Homography H mapping road plane (X, Y) to image coordinates
