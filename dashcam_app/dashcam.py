@@ -110,6 +110,7 @@ H_cam2bev = None
 
 # --- State ---
 latest_web_frame = None
+latest_debug_frame = None
 latest_lane_overlay = None
 raw_frame_buffer = None
 frame_lock = threading.Lock()
@@ -586,6 +587,7 @@ def inference_loop():
             # Undistort and resize
             im0_undistorted = cv2.undistort(im0, CAMERA_MATRIX, DIST_COEFF)
             im_infer = cv2.resize(im0_undistorted, (INFER_WIDTH, INFER_HEIGHT), interpolation=cv2.INTER_LINEAR)
+            im_debug = im_infer.copy()
 
             fcw_triggered = False
             ldw_triggered = False
@@ -811,6 +813,22 @@ def inference_loop():
                     fcw_warning=fcw_triggered,
                     fcw_boxes=fcw_overlay_boxes,
                 )
+                
+                # Draw debug overlays on im_debug
+                im_debug = im_infer.copy()
+                vp = state.get("calibration")
+                if vp is not None:
+                    cv2.circle(im_debug, (int(vp["vp_x"]), int(vp["vp_y"])), 5, (0, 0, 255), -1)
+                else:
+                    cv2.circle(im_debug, (int(K_INFER[0, 2]), 160), 5, (0, 0, 255), -1)
+                
+                if ll_mask is not None:
+                    im_debug[ll_mask > 0] = (0, 255, 255)
+                    
+                if det_boxes is not None:
+                    for box in det_boxes:
+                        bx1, by1, bx2, by2 = int(box["x1"]), int(box["y1"]), int(box["x2"]), int(box["y2"])
+                        cv2.rectangle(im_debug, (bx1, by1), (bx2, by2), (0, 255, 0), 2)
             else:
                 # ADAS disabled fallback: just show warped BEV frame and ego-car
                 im_bev = cv2.warpPerspective(im_infer, H_cam2bev, (BEV_WIDTH, BEV_HEIGHT))
@@ -836,8 +854,10 @@ def inference_loop():
 
             # Encode to JPEG for the web interface
             _, buf = cv2.imencode('.jpg', im_bev, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            _, buf_debug = cv2.imencode('.jpg', im_debug, [cv2.IMWRITE_JPEG_QUALITY, 60])
             with frame_lock:
                 latest_web_frame = buf.tobytes()
+                latest_debug_frame = buf_debug.tobytes()
                 latest_lane_overlay = lane_overlay_payload
 
             fps_counter += 1
@@ -875,6 +895,26 @@ def index():
 @app.route('/video_feed')
 def video_feed():
     return Response(generate_mjpeg(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+def generate_debug_mjpeg():
+    while True:
+        with frame_lock:
+            frame = latest_debug_frame
+        if frame is None:
+            wait_img = np.zeros((400, 640, 3), dtype=np.uint8)
+            cv2.putText(wait_img, "Initializing Debug Feed...",
+                        (40, 200), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                        (255, 255, 255), 2)
+            _, buf = cv2.imencode('.jpg', wait_img)
+            frame = buf.tobytes()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        time.sleep(0.04)
+
+@app.route('/debug_feed')
+def debug_feed():
+    return Response(generate_debug_mjpeg(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/api/lane_overlay')

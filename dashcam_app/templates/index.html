@@ -421,6 +421,16 @@
         </div>
     </div>
 
+    <div class="video-container" style="margin-bottom: 24px;">
+        <div style="padding: 10px 16px; font-weight: 600; font-size: 13px; border-bottom: 1px solid rgba(255,255,255,0.08); background: rgba(0,0,0,0.15); display: flex; justify-content: space-between;">
+            <span>Perspective Debug View</span>
+            <span style="color: var(--text-secondary); font-size: 11px;">Undistorted perspective feed</span>
+        </div>
+        <div style="position: relative; width: 100%; aspect-ratio: 16/10; overflow: hidden;">
+            <img id="debugFeed" src="/debug_feed" class="video-feed" alt="Debug Feed" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NDAiIGhlaWdodD0iNDAwIj48cmVjdCB3aWR0aD0iMTAwJSIgZmlsbD0iIzIyMiIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LWZhbWlseT0iYXJpYWwiIGZvbnQtc2l6ZT0iMTYiIGZpbGw9IiM2NjYiIGRvbWluYW50LWJhc2VsaW5lPSJtaWRkbGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkRlYnVnIEZlZWQgT2ZmbGluZTwvdGV4dD48L3N2Zz4='" />
+        </div>
+    </div>
+
     <div class="controls">
         <div class="control-card">
             <button class="record-btn" id="recordBtn" onclick="toggleRecording()">
