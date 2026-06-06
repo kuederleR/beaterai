@@ -258,57 +258,77 @@ def road_to_image(pts_road):
     return img
 
 
-def estimate_vanishing_point_from_mask(ll_mask, car_center_x):
-    if ll_mask is None:
-        return None
-
-    v_coords, u_coords = np.where(ll_mask > 0)
-    if len(v_coords) <= 20:
-        return None
-
-    left_mask = u_coords < car_center_x
-    right_mask = u_coords > car_center_x
-    left_us, left_vs = u_coords[left_mask], v_coords[left_mask]
-    right_us, right_vs = u_coords[right_mask], v_coords[right_mask]
-    if len(left_us) < 5 or len(right_us) < 5:
-        return None
-
-    try:
-        m_left, c_left = np.polyfit(left_vs, left_us, 1)
-        m_right, c_right = np.polyfit(right_vs, right_us, 1)
-    except Exception:
-        return None
-
-    if abs(m_left - m_right) <= 0.05:
-        return None
-
-    v_intersect = (c_right - c_left) / (m_left - m_right)
-    u_intersect = m_left * v_intersect + c_left
-    if 150 < u_intersect < 490 and 80 < v_intersect < 280:
-        return float(u_intersect), float(v_intersect)
-    return None
-
-
 def estimate_lane_lines_in_image(ll_mask, car_center_x):
     if ll_mask is None:
         return None
 
-    v_coords, u_coords = np.where(ll_mask > 0)
-    if len(v_coords) <= 20:
+    row_step = 4
+    max_jump_px = 36.0
+    min_points = 8
+
+    def collect_side_points(direction):
+        points = []
+        prev_u = None
+
+        for v in range(INFER_HEIGHT - 1, max(120, int(INFER_HEIGHT * 0.35)), -row_step):
+            row = ll_mask[v]
+            cols = np.flatnonzero(row > 0)
+            if len(cols) == 0:
+                continue
+
+            if direction == "left":
+                cols = cols[cols < car_center_x]
+                if len(cols) == 0:
+                    continue
+                candidate = cols[-1]
+            else:
+                cols = cols[cols > car_center_x]
+                if len(cols) == 0:
+                    continue
+                candidate = cols[0]
+
+            seg_left = candidate
+            seg_right = candidate
+            while seg_left - 1 >= 0 and row[seg_left - 1] > 0:
+                seg_left -= 1
+            while seg_right + 1 < len(row) and row[seg_right + 1] > 0:
+                seg_right += 1
+
+            segment_center = 0.5 * (seg_left + seg_right)
+            if prev_u is not None and abs(segment_center - prev_u) > max_jump_px:
+                continue
+
+            points.append((float(segment_center), float(v)))
+            prev_u = segment_center
+
+        return np.array(points, dtype=np.float32) if len(points) >= min_points else None
+
+    def fit_side_line(points):
+        if points is None or len(points) < min_points:
+            return None
+        vs = points[:, 1]
+        us = points[:, 0]
+        try:
+            line = np.polyfit(vs, us, 1)
+            fit_us = np.polyval(line, vs)
+            residuals = np.abs(us - fit_us)
+            inliers = residuals < 8.0
+            if np.sum(inliers) < min_points:
+                return None
+            line = np.polyfit(vs[inliers], us[inliers], 1)
+            return (float(line[0]), float(line[1])), points[inliers]
+        except Exception:
+            return None
+
+    left_points = collect_side_points("left")
+    right_points = collect_side_points("right")
+    left_fit = fit_side_line(left_points)
+    right_fit = fit_side_line(right_points)
+    if left_fit is None or right_fit is None:
         return None
 
-    left_mask = u_coords < car_center_x
-    right_mask = u_coords > car_center_x
-    left_us, left_vs = u_coords[left_mask], v_coords[left_mask]
-    right_us, right_vs = u_coords[right_mask], v_coords[right_mask]
-    if len(left_us) < 5 or len(right_us) < 5:
-        return None
-
-    try:
-        m_left, c_left = np.polyfit(left_vs, left_us, 1)
-        m_right, c_right = np.polyfit(right_vs, right_us, 1)
-    except Exception:
-        return None
+    (m_left, c_left), left_points = left_fit
+    (m_right, c_right), right_points = right_fit
 
     if abs(m_left - m_right) <= 0.05:
         return None
@@ -323,7 +343,16 @@ def estimate_lane_lines_in_image(ll_mask, car_center_x):
         "vp_y": float(v_intersect),
         "left_line": (float(m_left), float(c_left)),
         "right_line": (float(m_right), float(c_right)),
+        "left_points": left_points,
+        "right_points": right_points,
     }
+
+
+def estimate_vanishing_point_from_mask(ll_mask, car_center_x):
+    lane_lines = estimate_lane_lines_in_image(ll_mask, car_center_x)
+    if lane_lines is None:
+        return None
+    return float(lane_lines["vp_x"]), float(lane_lines["vp_y"])
 
 
 def build_lane_rectification_homography(lane_lines):
@@ -764,7 +793,8 @@ def inference_loop():
                 da_mask_undist = (cv2.undistort((da_mask * 255).astype(np.uint8), K_INFER, DIST_COEFF) > 127).astype(np.uint8) if da_mask is not None else None
                 ll_mask_undist = (cv2.undistort((ll_mask * 255).astype(np.uint8), K_INFER, DIST_COEFF) > 127).astype(np.uint8) if ll_mask is not None else None
 
-                detected_vp = estimate_vanishing_point_from_mask(ll_mask, car_center_x)
+                lane_lines_raw = estimate_lane_lines_in_image(ll_mask, car_center_x) if ll_mask is not None else None
+                detected_vp = None if lane_lines_raw is None else (lane_lines_raw["vp_x"], lane_lines_raw["vp_y"])
                 lane_lines_undist = estimate_lane_lines_in_image(ll_mask_undist, car_center_x) if ll_mask_undist is not None else None
 
                 # Lens Calibration VP update
@@ -977,6 +1007,15 @@ def inference_loop():
                 
                 if ll_mask is not None:
                     im_debug[ll_mask > 0] = (0, 255, 255)
+
+                if state["calibration_frames_left"] > 0 and lane_lines_raw is not None:
+                    for line_key, color in (("left_line", (255, 0, 0)), ("right_line", (0, 0, 255))):
+                        m_line, c_line = lane_lines_raw[line_key]
+                        y0 = INFER_HEIGHT - 1
+                        y1 = max(0, int(lane_lines_raw["vp_y"] + 24.0))
+                        x0 = int(np.clip(m_line * y0 + c_line, 0, INFER_WIDTH - 1))
+                        x1 = int(np.clip(m_line * y1 + c_line, 0, INFER_WIDTH - 1))
+                        cv2.line(im_debug, (x0, y0), (x1, y1), color, 3)
                     
                 if det_boxes is not None:
                     for box in det_boxes:
