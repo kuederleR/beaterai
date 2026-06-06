@@ -288,6 +288,83 @@ def estimate_vanishing_point_from_mask(ll_mask, car_center_x):
         return float(u_intersect), float(v_intersect)
     return None
 
+
+def estimate_lane_lines_in_image(ll_mask, car_center_x):
+    if ll_mask is None:
+        return None
+
+    v_coords, u_coords = np.where(ll_mask > 0)
+    if len(v_coords) <= 20:
+        return None
+
+    left_mask = u_coords < car_center_x
+    right_mask = u_coords > car_center_x
+    left_us, left_vs = u_coords[left_mask], v_coords[left_mask]
+    right_us, right_vs = u_coords[right_mask], v_coords[right_mask]
+    if len(left_us) < 5 or len(right_us) < 5:
+        return None
+
+    try:
+        m_left, c_left = np.polyfit(left_vs, left_us, 1)
+        m_right, c_right = np.polyfit(right_vs, right_us, 1)
+    except Exception:
+        return None
+
+    if abs(m_left - m_right) <= 0.05:
+        return None
+
+    v_intersect = (c_right - c_left) / (m_left - m_right)
+    u_intersect = m_left * v_intersect + c_left
+    if not (150 < u_intersect < 490 and 80 < v_intersect < 280):
+        return None
+
+    return {
+        "vp_x": float(u_intersect),
+        "vp_y": float(v_intersect),
+        "left_line": (float(m_left), float(c_left)),
+        "right_line": (float(m_right), float(c_right)),
+    }
+
+
+def build_lane_rectification_homography(lane_lines):
+    if lane_lines is None:
+        return None
+
+    m_left, c_left = lane_lines["left_line"]
+    m_right, c_right = lane_lines["right_line"]
+    vp_y = lane_lines["vp_y"]
+
+    bottom_v = float(INFER_HEIGHT - 1)
+    top_v = float(np.clip(vp_y + 24.0, 140.0, INFER_HEIGHT - 100.0))
+
+    left_bottom = m_left * bottom_v + c_left
+    right_bottom = m_right * bottom_v + c_right
+    left_top = m_left * top_v + c_left
+    right_top = m_right * top_v + c_right
+
+    bottom_width = right_bottom - left_bottom
+    top_width = right_top - left_top
+    if bottom_width < 80.0 or top_width < 20.0:
+        return None
+
+    src = np.array([
+        [left_bottom, bottom_v],
+        [right_bottom, bottom_v],
+        [right_top, top_v],
+        [left_top, top_v],
+    ], dtype=np.float32)
+
+    dst_left = BEV_WIDTH * 0.33
+    dst_right = BEV_WIDTH * 0.67
+    dst = np.array([
+        [dst_left, BEV_HEIGHT - 1],
+        [dst_right, BEV_HEIGHT - 1],
+        [dst_right, 0],
+        [dst_left, 0],
+    ], dtype=np.float32)
+
+    return cv2.getPerspectiveTransform(src, dst)
+
 if os.path.exists('models/calibration.json'):
     try:
         with open('models/calibration.json', 'r') as f:
@@ -688,6 +765,7 @@ def inference_loop():
                 ll_mask_undist = (cv2.undistort((ll_mask * 255).astype(np.uint8), K_INFER, DIST_COEFF) > 127).astype(np.uint8) if ll_mask is not None else None
 
                 detected_vp = estimate_vanishing_point_from_mask(ll_mask, car_center_x)
+                lane_lines_undist = estimate_lane_lines_in_image(ll_mask_undist, car_center_x) if ll_mask_undist is not None else None
 
                 # Lens Calibration VP update
                 if state["calibration_frames_left"] > 0 and detected_vp is not None:
@@ -827,10 +905,13 @@ def inference_loop():
 
                 # Use a blank background for the BEV map
                 im_bev = np.zeros((BEV_HEIGHT, BEV_WIDTH, 3), dtype=np.uint8)
+                bev_display_h = build_lane_rectification_homography(lane_lines_undist)
+                if bev_display_h is None:
+                    bev_display_h = H_cam2bev
 
                 # Warp and draw drivable area mask
                 if da_mask_undist is not None:
-                    da_bev = cv2.warpPerspective(da_mask_undist, H_cam2bev, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
+                    da_bev = cv2.warpPerspective(da_mask_undist, bev_display_h, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
                     da_indices = da_bev > 0
                     if np.any(da_indices):
                         overlay = im_bev.copy()
@@ -840,23 +921,31 @@ def inference_loop():
 
                 # Warp and draw lane lines points
                 if ll_mask_undist is not None:
-                    ll_bev = cv2.warpPerspective(ll_mask_undist, H_cam2bev, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
+                    ll_bev = cv2.warpPerspective(ll_mask_undist, bev_display_h, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
                     ll_indices = ll_bev > 0
                     if np.any(ll_indices):
                         im_bev[ll_indices] = (0, 200, 200)
 
-                # Draw ego car center line
-                car_center_bev_x = int(road_to_bev(np.array([[car_center_x_meters, 1.0]]))[0, 0])
-                cv2.line(im_bev, (car_center_bev_x, 0), (car_center_bev_x, BEV_HEIGHT - 1), (100, 100, 100), 1)
+                # Draw ego center guide. For the lane-rectified view, keep the guide centered.
+                if lane_lines_undist is not None:
+                    car_center_bev_x = BEV_WIDTH // 2
+                    ego_corners_bev = np.array([
+                        [BEV_WIDTH * 0.43, BEV_HEIGHT - 1],
+                        [BEV_WIDTH * 0.43, BEV_HEIGHT * 0.88],
+                        [BEV_WIDTH * 0.57, BEV_HEIGHT * 0.88],
+                        [BEV_WIDTH * 0.57, BEV_HEIGHT - 1],
+                    ], dtype=np.int32)
+                else:
+                    car_center_bev_x = int(road_to_bev(np.array([[car_center_x_meters, 1.0]]))[0, 0])
+                    ego_corners_road = np.array([
+                        [car_center_x_meters - 0.9, 1.0],
+                        [car_center_x_meters - 0.9, 2.8],
+                        [car_center_x_meters + 0.9, 2.8],
+                        [car_center_x_meters + 0.9, 1.0]
+                    ], dtype=np.float32)
+                    ego_corners_bev = road_to_bev(ego_corners_road).astype(np.int32)
 
-                # Draw ego vehicle representation
-                ego_corners_road = np.array([
-                    [car_center_x_meters - 0.9, 1.0],
-                    [car_center_x_meters - 0.9, 2.8],
-                    [car_center_x_meters + 0.9, 2.8],
-                    [car_center_x_meters + 0.9, 1.0]
-                ], dtype=np.float32)
-                ego_corners_bev = road_to_bev(ego_corners_road).astype(np.int32)
+                cv2.line(im_bev, (car_center_bev_x, 0), (car_center_bev_x, BEV_HEIGHT - 1), (100, 100, 100), 1)
                 
                 overlay = im_bev.copy()
                 cv2.fillPoly(overlay, [ego_corners_bev], (60, 60, 60))
