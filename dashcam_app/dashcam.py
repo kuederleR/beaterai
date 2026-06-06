@@ -174,9 +174,9 @@ def update_homography():
     u_x = np.array([u_y[2], 0.0, -u_y[0]], dtype=np.float32)
     u_x = u_x / np.linalg.norm(u_x)
     
-    # Up/Normal unit vector
+    # Up/Normal unit vector (points DOWN in camera coords, since road is below camera)
     u_z = np.cross(u_x, u_y)
-    if u_z[1] > 0:
+    if u_z[1] < 0:
         u_z = -u_z
         
     h = CAMERA_HEIGHT
@@ -796,13 +796,10 @@ def inference_loop():
                     da_bev = cv2.warpPerspective(da_mask_undist, H_cam2bev, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
                     da_indices = da_bev > 0
                     if np.any(da_indices):
-                        overlay = np.zeros_like(im_bev)
+                        overlay = im_bev.copy()
                         overlay[da_indices] = (0, 100, 0)
                         alpha = 0.22
-                        im_bev[da_indices] = cv2.addWeighted(
-                            im_bev[da_indices], 1.0 - alpha,
-                            overlay[da_indices], alpha, 0
-                        )
+                        cv2.addWeighted(overlay, alpha, im_bev, 1.0 - alpha, 0, dst=im_bev)
 
                 # Warp and draw lane lines points
                 if ll_mask_undist is not None:
