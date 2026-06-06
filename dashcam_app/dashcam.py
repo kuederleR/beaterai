@@ -146,6 +146,8 @@ state = {
     "calibration_frames_left": 0,
     "calib_vp_x_list": [],
     "calib_vp_y_list": [],
+    "live_vp_x_history": [],
+    "live_vp_y_history": [],
     "calib_left_history": [],
     "calib_right_history": [],
     "calibration": None,
@@ -162,9 +164,9 @@ state = {
     "hood_detection_frames_left": HOOD_CALIBRATION_FRAMES
 }
 
-def update_homography():
+def update_homography(vp_override=None):
     global H, H_inv, H_cam2bev, ROAD_TO_CAMERA_MATRIX
-    vp = state.get("calibration")
+    vp = vp_override if vp_override is not None else state.get("calibration")
     if vp is not None:
         vp_x = vp["vp_x"]
         vp_y = vp["vp_y"]
@@ -255,6 +257,37 @@ def road_to_image(pts_road):
         img[valid] = img_valid.reshape(-1, 2)
     img[~valid] = np.nan
     return img
+
+
+def estimate_vanishing_point_from_mask(ll_mask, car_center_x):
+    if ll_mask is None:
+        return None
+
+    v_coords, u_coords = np.where(ll_mask > 0)
+    if len(v_coords) <= 20:
+        return None
+
+    left_mask = u_coords < car_center_x
+    right_mask = u_coords > car_center_x
+    left_us, left_vs = u_coords[left_mask], v_coords[left_mask]
+    right_us, right_vs = u_coords[right_mask], v_coords[right_mask]
+    if len(left_us) < 5 or len(right_us) < 5:
+        return None
+
+    try:
+        m_left, c_left = np.polyfit(left_vs, left_us, 1)
+        m_right, c_right = np.polyfit(right_vs, right_us, 1)
+    except Exception:
+        return None
+
+    if abs(m_left - m_right) <= 0.05:
+        return None
+
+    v_intersect = (c_right - c_left) / (m_left - m_right)
+    u_intersect = m_left * v_intersect + c_left
+    if 150 < u_intersect < 490 and 80 < v_intersect < 280:
+        return float(u_intersect), float(v_intersect)
+    return None
 
 if os.path.exists('models/calibration.json'):
     try:
@@ -643,9 +676,6 @@ def inference_loop():
                 state["calibrate_requested"] = False
 
             car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
-            car_center_pts = np.array([[car_center_x, INFER_HEIGHT - 1]], dtype=np.float32)
-            car_center_road = image_to_road(car_center_pts)[0]
-            car_center_x_meters = car_center_road[0] if not np.isnan(car_center_road[0]) else 0.0
 
             lane_perception_active = state["adas_enabled"]
 
@@ -657,26 +687,12 @@ def inference_loop():
                 da_mask_undist = (cv2.undistort((da_mask * 255).astype(np.uint8), K_INFER, DIST_COEFF) > 127).astype(np.uint8) if da_mask is not None else None
                 ll_mask_undist = (cv2.undistort((ll_mask * 255).astype(np.uint8), K_INFER, DIST_COEFF) > 127).astype(np.uint8) if ll_mask is not None else None
 
+                detected_vp = estimate_vanishing_point_from_mask(ll_mask, car_center_x)
+
                 # Lens Calibration VP update
-                if state["calibration_frames_left"] > 0 and ll_mask is not None:
-                    v_coords, u_coords = np.where(ll_mask > 0)
-                    if len(v_coords) > 20:
-                        left_mask = u_coords < car_center_x
-                        right_mask = u_coords > car_center_x
-                        left_us, left_vs = u_coords[left_mask], v_coords[left_mask]
-                        right_us, right_vs = u_coords[right_mask], v_coords[right_mask]
-                        if len(left_us) >= 5 and len(right_us) >= 5:
-                            try:
-                                m_left, c_left = np.polyfit(left_vs, left_us, 1)
-                                m_right, c_right = np.polyfit(right_vs, right_us, 1)
-                                if abs(m_left - m_right) > 0.05:
-                                    v_intersect = (c_right - c_left) / (m_left - m_right)
-                                    u_intersect = m_left * v_intersect + c_left
-                                    if 150 < u_intersect < 490 and 80 < v_intersect < 280:
-                                        state["calib_vp_x_list"].append(u_intersect)
-                                        state["calib_vp_y_list"].append(v_intersect)
-                            except Exception:
-                                pass
+                if state["calibration_frames_left"] > 0 and detected_vp is not None:
+                    state["calib_vp_x_list"].append(detected_vp[0])
+                    state["calib_vp_y_list"].append(detected_vp[1])
                     state["calibration_frames_left"] -= 1
                     if state["calibration_frames_left"] == 0:
                         if len(state["calib_vp_x_list"]) >= 5:
@@ -690,6 +706,21 @@ def inference_loop():
                         else:
                             state["error"] = "Lens calibration failed: not enough lane lines detected."
                             print("[WARNING] Lens calibration failed", flush=True)
+
+                if state.get("calibration") is None and detected_vp is not None:
+                    state["live_vp_x_history"].append(detected_vp[0])
+                    state["live_vp_y_history"].append(detected_vp[1])
+                    if len(state["live_vp_x_history"]) > 8:
+                        state["live_vp_x_history"].pop(0)
+                        state["live_vp_y_history"].pop(0)
+                    update_homography({
+                        "vp_x": float(np.median(state["live_vp_x_history"])),
+                        "vp_y": float(np.median(state["live_vp_y_history"])),
+                    })
+
+                car_center_pts = np.array([[car_center_x, INFER_HEIGHT - 1]], dtype=np.float32)
+                car_center_road = image_to_road(car_center_pts)[0]
+                car_center_x_meters = car_center_road[0] if not np.isnan(car_center_road[0]) else 0.0
 
                 # Fit lane lines in road plane
                 left_poly, right_poly = None, None
