@@ -53,6 +53,61 @@ LDW_MIN_CALIBRATION_SAMPLES = 30
 LDW_WARNING_CONSECUTIVE_FRAMES = 3
 HOOD_CALIBRATION_FRAMES = 12
 
+# --- Road Plane / Bird's Eye View (BEV) Geometry Configuration ---
+CAMERA_HEIGHT = 1.2192 # 4 feet off the ground in meters
+BEV_WIDTH = 640
+BEV_HEIGHT = 400
+X_MIN = -6.0
+X_MAX = 6.0
+Y_MIN = 1.0
+Y_MAX = 30.0
+
+# --- Camera Calibration Matrix and Distortion Coefficients ---
+def load_camera_calibration():
+    yaml_path = 'calibration.yaml'
+    if not os.path.exists(yaml_path):
+        yaml_path = os.path.join(os.path.dirname(__file__), 'calibration.yaml')
+        
+    camera_matrix = None
+    dist_coeff = None
+    
+    if os.path.exists(yaml_path):
+        try:
+            fs = cv2.FileStorage(yaml_path, cv2.FILE_STORAGE_READ)
+            if fs.isOpened():
+                camera_matrix = fs.getNode("camera_matrix").mat()
+                dist_coeff = fs.getNode("dist_coeff").mat()
+                fs.release()
+                if camera_matrix is not None and dist_coeff is not None:
+                    print(f"[INFO] Loaded camera calibration from {yaml_path}", flush=True)
+                    return camera_matrix.astype(np.float32), dist_coeff.astype(np.float32)
+        except Exception as e:
+            print(f"[ERROR] Failed to load calibration.yaml: {e}", flush=True)
+            
+    print("[WARNING] Using fallback camera calibration parameters", flush=True)
+    camera_matrix = np.array([
+        [898.6913680933326, 0.0, 673.4475138526925],
+        [0.0, 898.7300068900809, 349.2407561225512],
+        [0.0, 0.0, 1.0]
+    ], dtype=np.float32)
+    dist_coeff = np.array([0.027602996212313838, -0.064486646048556584,
+                           0.0034829585578156821, -0.0048244561182151577,
+                           0.035676429431834245], dtype=np.float32)
+    return camera_matrix, dist_coeff
+
+CAMERA_MATRIX, DIST_COEFF = load_camera_calibration()
+
+# Camera matrix scaled for inference size (640x400)
+K_INFER = np.array([
+    [CAMERA_MATRIX[0, 0] * 0.5, 0.0, CAMERA_MATRIX[0, 2] * 0.5],
+    [0.0, CAMERA_MATRIX[1, 1] * 0.5, CAMERA_MATRIX[1, 2] * 0.5],
+    [0.0, 0.0, 1.0]
+], dtype=np.float32)
+
+H = None
+H_inv = None
+H_cam2bev = None
+
 # --- State ---
 latest_web_frame = None
 latest_lane_overlay = None
@@ -80,6 +135,8 @@ state = {
     "last_right_x": None,
     "calibrate_requested": False,
     "calibration_frames_left": 0,
+    "calib_vp_x_list": [],
+    "calib_vp_y_list": [],
     "calib_left_history": [],
     "calib_right_history": [],
     "calibration": None,
@@ -95,6 +152,88 @@ state = {
     "hood_row_history": [],
     "hood_detection_frames_left": HOOD_CALIBRATION_FRAMES
 }
+
+def update_homography():
+    global H, H_inv, H_cam2bev
+    vp = state.get("calibration")
+    if vp is not None:
+        vp_x = vp["vp_x"]
+        vp_y = vp["vp_y"]
+    else:
+        vp_x = K_INFER[0, 2] # Default center
+        vp_y = 160.0 # Default vanishing point y (approx 1.86 deg pitch down)
+        
+    K_inv = np.linalg.inv(K_INFER)
+    
+    # Forward unit vector in camera coordinates
+    u_y = K_inv @ np.array([vp_x, vp_y, 1.0], dtype=np.float32)
+    u_y = u_y / np.linalg.norm(u_y)
+    
+    # Right unit vector (horizontal in camera, roll=0)
+    u_x = np.array([u_y[2], 0.0, -u_y[0]], dtype=np.float32)
+    u_x = u_x / np.linalg.norm(u_x)
+    
+    # Up/Normal unit vector
+    u_z = np.cross(u_x, u_y)
+    if u_z[1] > 0:
+        u_z = -u_z
+        
+    h = CAMERA_HEIGHT
+    
+    # Transform matrix from road to camera coordinates
+    M = np.stack([u_x, u_y, h * u_z], axis=1)
+    
+    # Homography H mapping road plane (X, Y) to image coordinates
+    H = K_INFER @ M
+    H_inv = np.linalg.inv(H)
+    
+    # Mapping from road (X, Y) to BEV pixels
+    s_x = (BEV_WIDTH - 1) / (X_MAX - X_MIN)
+    t_x = -X_MIN * s_x
+    s_y = (BEV_HEIGHT - 1) / (Y_MAX - Y_MIN)
+    t_y = Y_MAX * s_y
+    
+    M_road2bev = np.array([
+        [s_x, 0.0, t_x],
+        [0.0, -s_y, t_y],
+        [0.0, 0.0, 1.0]
+    ], dtype=np.float32)
+    
+    H_cam2bev = M_road2bev @ H_inv
+
+# Coordinate transformation helpers
+def image_to_road(pts):
+    if len(pts) == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    pts_h = np.hstack([pts, np.ones((len(pts), 1), dtype=np.float32)])
+    road_h = (H_inv @ pts_h.T).T
+    valid = road_h[:, 2] > 1e-5
+    road = np.zeros((len(pts), 2), dtype=np.float32)
+    road[valid, 0] = road_h[valid, 0] / road_h[valid, 2]
+    road[valid, 1] = road_h[valid, 1] / road_h[valid, 2]
+    road[~valid] = np.nan
+    return road
+
+def road_to_bev(pts):
+    if len(pts) == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    s_x = (BEV_WIDTH - 1) / (X_MAX - X_MIN)
+    s_y = (BEV_HEIGHT - 1) / (Y_MAX - Y_MIN)
+    u_bev = (pts[:, 0] - X_MIN) * s_x
+    v_bev = (Y_MAX - pts[:, 1]) * s_y
+    return np.stack([u_bev, v_bev], axis=1)
+
+def road_to_image(pts_road):
+    if len(pts_road) == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    pts_h = np.hstack([pts_road[:, 0:1], pts_road[:, 1:2], np.ones((len(pts_road), 1), dtype=np.float32)])
+    img_h = (H @ pts_h.T).T
+    valid = img_h[:, 2] > 1e-5
+    img = np.zeros((len(pts_road), 2), dtype=np.float32)
+    img[valid, 0] = img_h[valid, 0] / img_h[valid, 2]
+    img[valid, 1] = img_h[valid, 1] / img_h[valid, 2]
+    img[~valid] = np.nan
+    return img
 
 if os.path.exists('models/calibration.json'):
     try:
@@ -116,6 +255,9 @@ if os.path.exists('models/calibration.json'):
                 print(f"[INFO] Loaded car center bias: x={state['car_center_x']}", flush=True)
     except Exception as e:
         print(f"[ERROR] Failed to load calibration matrix: {e}", flush=True)
+
+# Initialize homography
+update_homography()
 
 video_writer = None
 
@@ -219,171 +361,7 @@ def capture_loop():
 # --- Thread 2: AI Inference and Web Encoding ---
 import warnings
 
-def smooth_path(path, history, max_history=10):
-    if path is None:
-        return None
-    history.append(path)
-    if len(history) > max_history:
-        history.pop(0)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-        return np.nanmean(history, axis=0)
 
-def smooth_scalar(val, history, max_history=5):
-    if val is None:
-        return None
-    history.append(val)
-    if len(history) > max_history:
-        history.pop(0)
-    return np.mean(history)
-
-def remove_small_lane_components(ll_mask, min_area=20, min_height=12):
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats((ll_mask > 0).astype(np.uint8), connectivity=8)
-    cleaned = np.zeros_like(ll_mask)
-    for label_id in range(1, num_labels):
-        area = stats[label_id, cv2.CC_STAT_AREA]
-        height = stats[label_id, cv2.CC_STAT_HEIGHT]
-        if area >= min_area and height >= min_height:
-            cleaned[labels == label_id] = 255
-    return cleaned
-
-def get_drivable_row_bounds(da_mask):
-    row_bounds = []
-    for y in range(da_mask.shape[0]):
-        xs = np.where(da_mask[y] > 0)[0]
-        if len(xs) > 0:
-            row_bounds.append((int(xs[0]), int(xs[-1])))
-        else:
-            row_bounds.append(None)
-    return row_bounds
-
-def estimate_hood_line(da_mask):
-    if da_mask is None or not np.any(da_mask > 0):
-        return None
-
-    h_im, w_im = da_mask.shape[:2]
-    x_min = int(w_im * 0.2)
-    x_max = int(w_im * 0.8)
-    bottom_edges = []
-
-    for x in range(x_min, x_max):
-        ys = np.where(da_mask[:, x] > 0)[0]
-        if len(ys) > 0:
-            bottom_edges.append(int(np.max(ys)))
-
-    if len(bottom_edges) < max(20, int((x_max - x_min) * 0.1)):
-        return None
-
-    return int(round(np.percentile(bottom_edges, 75)))
-
-def update_hood_line(da_mask):
-    if da_mask is None or state["hood_detection_frames_left"] <= 0:
-        return
-
-    hood_y = estimate_hood_line(da_mask)
-    if hood_y is None:
-        return
-
-    state["hood_row_history"].append(hood_y)
-    state["hood_detection_frames_left"] -= 1
-
-    if state["hood_detection_frames_left"] <= 0:
-        state["hood_y"] = int(round(np.median(state["hood_row_history"])))
-        state["hood_row_history"] = []
-        save_calibration_state()
-
-def apply_hood_cutoff(da_mask, hood_y):
-    if da_mask is None or hood_y is None:
-        return da_mask
-    clipped_mask = da_mask.copy()
-    cutoff_y = int(np.clip(hood_y, 0, da_mask.shape[0] - 1))
-    if cutoff_y + 1 < clipped_mask.shape[0]:
-        clipped_mask[cutoff_y + 1:, :] = 0
-    return clipped_mask
-
-def find_seed_labels(labels, row_bounds, center_x, seed_row, band_half_height=10):
-    h_im, w_im = labels.shape
-    left_hits = []
-    right_hits = []
-
-    for y in range(max(0, seed_row - band_half_height), min(h_im, seed_row + band_half_height + 1)):
-        bounds = row_bounds[y]
-        if bounds is None:
-            continue
-        left_bound, right_bound = bounds
-        center_clamped = int(np.clip(center_x, left_bound, right_bound))
-
-        for x in range(center_clamped, left_bound - 1, -1):
-            label_id = int(labels[y, x])
-            if label_id > 0:
-                left_hits.append(label_id)
-                break
-
-        for x in range(center_clamped, right_bound + 1):
-            label_id = int(labels[y, x])
-            if label_id > 0:
-                right_hits.append(label_id)
-                break
-
-    def choose_label(hit_list, banned_label=None):
-        if not hit_list:
-            return 0
-        label_counts = {}
-        for label_id in hit_list:
-            if banned_label is not None and label_id == banned_label:
-                continue
-            label_counts[label_id] = label_counts.get(label_id, 0) + 1
-        if not label_counts:
-            return 0
-        return max(label_counts.items(), key=lambda item: item[1])[0]
-
-    left_label = choose_label(left_hits)
-    right_label = choose_label(right_hits, banned_label=left_label)
-    return left_label, right_label
-
-def build_current_lane_line_masks(ll_mask, da_mask, center_x):
-    if ll_mask is None or da_mask is None:
-        return None, None, 0
-
-    row_bounds = get_drivable_row_bounds(da_mask)
-    drivable_rows = [y for y, bounds in enumerate(row_bounds) if bounds is not None]
-    if not drivable_rows:
-        return np.zeros_like(ll_mask), np.zeros_like(ll_mask), 0
-
-    seed_row = drivable_rows[min(len(drivable_rows) - 1, int(len(drivable_rows) * 0.42))]
-    ll_clean = cv2.morphologyEx(ll_mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 7)))
-    ll_clean = remove_small_lane_components(ll_clean, min_area=20, min_height=10)
-
-    _, labels = cv2.connectedComponents((ll_clean > 0).astype(np.uint8), connectivity=8)
-    left_label, right_label = find_seed_labels(labels, row_bounds, center_x, seed_row)
-
-    left_mask = np.zeros_like(ll_mask)
-    right_mask = np.zeros_like(ll_mask)
-    if left_label > 0:
-        left_mask[labels == left_label] = 255
-    if right_label > 0:
-        right_mask[labels == right_label] = 255
-
-    return left_mask, right_mask, seed_row
-
-def sample_line_position(line_mask, target_y, side):
-    if line_mask is None or not np.any(line_mask > 0):
-        return None
-
-    target_y = int(np.clip(target_y, 0, line_mask.shape[0] - 1))
-    xs = np.where(line_mask[target_y] > 0)[0]
-    if len(xs) == 0:
-        rows = np.where(np.any(line_mask > 0, axis=1))[0]
-        if len(rows) == 0:
-            return None
-        nearest_row = int(rows[np.argmin(np.abs(rows - target_y))])
-        xs = np.where(line_mask[nearest_row] > 0)[0]
-        if len(xs) == 0:
-            return None
-
-    if side == 'left':
-        return float(np.max(xs))
-    return float(np.min(xs))
 
 def auto_calculate_lane_center_bias():
     ldw_calib = state.get("ldw_calibration")
@@ -393,13 +371,28 @@ def auto_calculate_lane_center_bias():
     left_comfort = ldw_calib.get("left_comfort_dist")
     right_comfort = ldw_calib.get("right_comfort_dist")
     
+    if left_comfort is not None and left_comfort > 10.0:
+        left_comfort = 1.1
+    if right_comfort is not None and right_comfort > 10.0:
+        right_comfort = 1.1
+    
     if left_comfort is not None and right_comfort is not None:
         # Calculate shift
         shift = (right_comfort - left_comfort) / 2.0
         
         # Update car_center_x
         old_center = state.get("car_center_x", INFER_WIDTH // 2)
-        new_center = int(np.clip(old_center + shift, 0, INFER_WIDTH - 1))
+        
+        # Project old center to meters
+        car_center_pts = np.array([[old_center, INFER_HEIGHT - 1]], dtype=np.float32)
+        car_center_road = image_to_road(car_center_pts)[0]
+        old_center_meters = car_center_road[0] if not np.isnan(car_center_road[0]) else 0.0
+        
+        new_center_meters = old_center_meters + shift
+        
+        # Project back to image pixels
+        new_center_img = road_to_image(np.array([[new_center_meters, 1.0]]))[0]
+        new_center = int(np.clip(new_center_img[0], 0, INFER_WIDTH - 1)) if not np.isnan(new_center_img[0]) else old_center
         
         # Calculate new balanced comfort distance
         balanced_comfort = (left_comfort + right_comfort) / 2.0
@@ -408,7 +401,7 @@ def auto_calculate_lane_center_bias():
         ldw_calib["left_comfort_dist"] = balanced_comfort
         ldw_calib["right_comfort_dist"] = balanced_comfort
         
-        print(f"[INFO] Auto-balanced center bias: shifted from {old_center} to {new_center} (shift={shift:.2f} px). New balanced comfort dist: {balanced_comfort:.2f} px", flush=True)
+        print(f"[INFO] Auto-balanced center bias: shifted from {old_center} to {new_center} (shift={shift:.2f} m). New balanced comfort dist: {balanced_comfort:.2f} m", flush=True)
 
 def finalize_ldw_left_calibration():
     dists = np.array(state["calib_ldw_left_dists"], dtype=np.float32)
@@ -425,13 +418,13 @@ def finalize_ldw_left_calibration():
         ldw_calib = {}
         
     ldw_calib["left_comfort_dist"] = left_comfort_dist
-    ldw_calib["eval_y"] = ldw_calib.get("eval_y", int(INFER_HEIGHT * 0.75))
+    ldw_calib["eval_y"] = 5.0
     
     state["ldw_calibration"] = ldw_calib
     state["error"] = None
     auto_calculate_lane_center_bias()
     save_calibration_state()
-    print(f"[INFO] Calibrated left comfortable distance: {left_comfort_dist:.2f} px", flush=True)
+    print(f"[INFO] Calibrated left comfortable distance: {left_comfort_dist:.2f} m", flush=True)
 
 def finalize_ldw_right_calibration():
     dists = np.array(state["calib_ldw_right_dists"], dtype=np.float32)
@@ -448,164 +441,103 @@ def finalize_ldw_right_calibration():
         ldw_calib = {}
         
     ldw_calib["right_comfort_dist"] = right_comfort_dist
-    ldw_calib["eval_y"] = ldw_calib.get("eval_y", int(INFER_HEIGHT * 0.75))
+    ldw_calib["eval_y"] = 5.0
     
     state["ldw_calibration"] = ldw_calib
     state["error"] = None
     auto_calculate_lane_center_bias()
     save_calibration_state()
-    print(f"[INFO] Calibrated right comfortable distance: {right_comfort_dist:.2f} px", flush=True)
+    print(f"[INFO] Calibrated right comfortable distance: {right_comfort_dist:.2f} m", flush=True)
 
-def smooth_track(track, history, max_history=8):
-    if track is None:
+def fit_lane_polynomials(ll_mask, car_center_x):
+    v_coords, u_coords = np.where(ll_mask > 0)
+    if len(v_coords) < 20:
+        return None, None
+        
+    pts = np.stack([u_coords, v_coords], axis=1).astype(np.float32)
+    pts_road = image_to_road(pts)
+    
+    # Filter valid coordinates in road range
+    valid = ~np.isnan(pts_road[:, 0]) & ~np.isnan(pts_road[:, 1])
+    pts_road = pts_road[valid]
+    
+    # Only keep points in Y range [1.0, 30.0] meters and lateral range [-6.0, 6.0]
+    in_range = (pts_road[:, 1] >= 1.0) & (pts_road[:, 1] <= 30.0) & (pts_road[:, 0] >= -6.0) & (pts_road[:, 0] <= 6.0)
+    pts_road = pts_road[in_range]
+    if len(pts_road) < 15:
+        return None, None
+        
+    # Get car center in meters
+    car_center_pts = np.array([[car_center_x, INFER_HEIGHT - 1]], dtype=np.float32)
+    car_center_road = image_to_road(car_center_pts)[0]
+    car_center_x_meters = car_center_road[0] if not np.isnan(car_center_road[0]) else 0.0
+    
+    # Segment left and right lane points relative to car center
+    left_mask = (pts_road[:, 0] - car_center_x_meters >= -3.0) & (pts_road[:, 0] - car_center_x_meters <= -0.4)
+    right_mask = (pts_road[:, 0] - car_center_x_meters >= 0.4) & (pts_road[:, 0] - car_center_x_meters <= 3.0)
+    
+    left_pts = pts_road[left_mask]
+    right_pts = pts_road[right_mask]
+    
+    def fit_single_lane(lane_pts):
+        if len(lane_pts) < 10:
+            return None
+        ys = lane_pts[:, 1]
+        xs = lane_pts[:, 0]
+        try:
+            poly = np.polyfit(ys, xs, 2)
+            # Outlier rejection
+            fit_xs = np.polyval(poly, ys)
+            residuals = np.abs(xs - fit_xs)
+            inliers = residuals < 0.25 # within 25 cm
+            if np.sum(inliers) >= 8:
+                poly = np.polyfit(ys[inliers], xs[inliers], 2)
+                return poly
+        except Exception:
+            pass
         return None
-    if history and np.shape(history[0]) != np.shape(track):
-        history.clear()
-    history.append(track)
-    if len(history) > max_history:
-        history.pop(0)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-        return np.nanmean(history, axis=0)
+        
+    left_poly = fit_single_lane(left_pts)
+    right_poly = fit_single_lane(right_pts)
+    
+    return left_poly, right_poly
 
-def _estimate_track_slope(sample_ys, sample_xs, use_top, window_size=10):
-    if len(sample_ys) < 2:
-        return 0.0
-    if use_top:
-        ys = sample_ys[:window_size]
-        xs = sample_xs[:window_size]
-    else:
-        ys = sample_ys[-window_size:]
-        xs = sample_xs[-window_size:]
-    if len(ys) < 2:
-        return 0.0
-    coeffs = np.polyfit(ys, xs, 1)
-    return float(coeffs[0])
-
-def build_lane_track(mask, row_bounds, side, smoothing_window=11):
-    if mask is None or not np.any(mask > 0):
-        return []
-
-    track = np.full(mask.shape[0], np.nan, dtype=np.float32)
-    observed_ys = []
-    observed_xs = []
-    drivable_ys = [y for y, bounds in enumerate(row_bounds) if bounds is not None]
-    if not drivable_ys:
-        return None
-
-    top_drivable_y = int(drivable_ys[0])
-    bottom_drivable_y = int(drivable_ys[-1])
-    drivable_height = bottom_drivable_y - top_drivable_y
-    cutoff_y = top_drivable_y + 0.1 * drivable_height
-
-    for y in drivable_ys:
-        if y < cutoff_y:
-            continue
-        row_xs = np.where(mask[y] > 0)[0]
-        if len(row_xs) == 0:
-            continue
-        x_val = float(np.max(row_xs)) if side == 'left' else float(np.min(row_xs))
-        observed_ys.append(y)
-        observed_xs.append(x_val)
-
-    if len(observed_xs) < 6:
-        return None
-
-    observed_ys = np.array(observed_ys, dtype=np.int32)
-    observed_xs = np.array(observed_xs, dtype=np.float32)
-    first_y = int(observed_ys[0])
-    last_y = int(observed_ys[-1])
-
-    interp_ys = np.arange(first_y, last_y + 1, dtype=np.int32)
-    interp_xs = np.interp(interp_ys, observed_ys, observed_xs)
-
-    if len(interp_xs) >= smoothing_window:
-        kernel = np.ones(smoothing_window, dtype=np.float32) / float(smoothing_window)
-        padded = np.pad(interp_xs, (smoothing_window // 2, smoothing_window // 2), mode='edge')
-        interp_xs = np.convolve(padded, kernel, mode='valid')
-
-    track[interp_ys] = interp_xs.astype(np.float32)
-
-    top_slope = _estimate_track_slope(interp_ys, interp_xs, use_top=True)
-    bottom_slope = _estimate_track_slope(interp_ys, interp_xs, use_top=False)
-
-    top_drivable_y = int(drivable_ys[0])
-    bottom_drivable_y = int(drivable_ys[-1])
-    for y in range(first_y - 1, top_drivable_y - 1, -1):
-        track[y] = float(track[y + 1] - top_slope)
-    for y in range(last_y + 1, bottom_drivable_y + 1):
-        track[y] = float(track[y - 1] + bottom_slope)
-
-    for y in drivable_ys:
-        if np.isnan(track[y]):
-            continue
-        left_bound, right_bound = row_bounds[y]
-        track[y] = float(np.clip(track[y], left_bound, right_bound))
-
-    return track
-
-def curve_to_points(track, row_bounds):
-    if track is None:
-        return []
-
-    points = []
-    for y, bounds in enumerate(row_bounds):
-        if bounds is None or np.isnan(track[y]):
-            continue
-        points.append([round(float(track[y]), 2), int(y)])
-    return points
-
-def build_lane_overlay_payload(left_mask, right_mask, da_mask, row_bounds, left_severity=0.0, right_severity=0.0, fcw_warning=False, fcw_boxes=None):
-    h_im, w_im = da_mask.shape[:2]
-    left_track = build_lane_track(left_mask, row_bounds, 'left')
-    right_track = build_lane_track(right_mask, row_bounds, 'right')
- 
-    left_track_sm = None
-    right_track_sm = None
-    if left_track is not None:
-        left_track_sm = smooth_track(left_track, state['left_poly_history'], max_history=8)
-    elif len(state['left_poly_history']) > 0:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            left_track_sm = np.nanmean(state['left_poly_history'], axis=0)
- 
-    if right_track is not None:
-        right_track_sm = smooth_track(right_track, state['right_poly_history'], max_history=8)
-    elif len(state['right_poly_history']) > 0:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            right_track_sm = np.nanmean(state['right_poly_history'], axis=0)
- 
-    left_points = curve_to_points(left_track_sm, row_bounds) if left_track_sm is not None else []
-    right_points = curve_to_points(right_track_sm, row_bounds) if right_track_sm is not None else []
-    center_points = []
-    if left_track_sm is not None and right_track_sm is not None:
-        for y, bounds in enumerate(row_bounds):
-            if bounds is None or np.isnan(left_track_sm[y]) or np.isnan(right_track_sm[y]):
-                continue
-            center_x = 0.5 * (left_track_sm[y] + right_track_sm[y])
-            center_points.append([round(float(center_x), 2), int(y)])
- 
+def build_lane_overlay_payload(left_poly, right_poly, left_severity=0.0, right_severity=0.0, fcw_warning=False, fcw_boxes=None):
+    # Evaluate polynomials to build BEV points
+    eval_ys = np.arange(1.0, 30.0, 0.5, dtype=np.float32)
+    left_xs = np.polyval(left_poly, eval_ys)
+    right_xs = np.polyval(right_poly, eval_ys)
+    
+    left_pts_road = np.stack([left_xs, eval_ys], axis=1)
+    right_pts_road = np.stack([right_xs, eval_ys], axis=1)
+    center_xs = 0.5 * (left_xs + right_xs)
+    center_pts_road = np.stack([center_xs, eval_ys], axis=1)
+    
+    # Map to BEV pixels
+    left_pts_bev = road_to_bev(left_pts_road)
+    right_pts_bev = road_to_bev(right_pts_road)
+    center_pts_bev = road_to_bev(center_pts_road)
+    
+    left_points = left_pts_bev.tolist()
+    right_points = right_pts_bev.tolist()
+    center_points = center_pts_bev.tolist()
+    
     polygon = []
     if len(left_points) >= 2 and len(right_points) >= 2:
         polygon = left_points + list(reversed(right_points))
- 
+        
     left_zone = []
     right_zone = []
     if len(left_points) >= 2 and len(center_points) >= 2:
         left_zone = left_points + list(reversed(center_points))
     if len(center_points) >= 2 and len(right_points) >= 2:
         right_zone = center_points + list(reversed(right_points))
- 
-    drivable_rows = [y for y, bounds in enumerate(row_bounds) if bounds is not None]
-    top_y = drivable_rows[0] if drivable_rows else 0
-    bottom_y = drivable_rows[-1] if drivable_rows else h_im - 1
- 
+        
     return {
-        "width": w_im,
-        "height": h_im,
-        "top_y": int(top_y),
-        "bottom_y": int(bottom_y),
+        "width": BEV_WIDTH,
+        "height": BEV_HEIGHT,
+        "top_y": 0,
+        "bottom_y": BEV_HEIGHT - 1,
         "left_points": left_points,
         "right_points": right_points,
         "center_points": center_points,
@@ -651,12 +583,26 @@ def inference_loop():
             elif len(im0.shape) == 3 and im0.shape[2] == 4:
                 im0 = cv2.cvtColor(im0, cv2.COLOR_BGRA2BGR)
 
-            im_infer = cv2.resize(im0, (INFER_WIDTH, INFER_HEIGHT), interpolation=cv2.INTER_LINEAR)
+            # Undistort and resize
+            im0_undistorted = cv2.undistort(im0, CAMERA_MATRIX, DIST_COEFF)
+            im_infer = cv2.resize(im0_undistorted, (INFER_WIDTH, INFER_HEIGHT), interpolation=cv2.INTER_LINEAR)
 
             fcw_triggered = False
             ldw_triggered = False
             lane_overlay_payload = None
             fcw_overlay_boxes = []
+
+            # Check if calibration requested
+            if state.get("calibrate_requested"):
+                state["calibration_frames_left"] = 30
+                state["calib_vp_x_list"] = []
+                state["calib_vp_y_list"] = []
+                state["calibrate_requested"] = False
+
+            car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
+            car_center_pts = np.array([[car_center_x, INFER_HEIGHT - 1]], dtype=np.float32)
+            car_center_road = image_to_road(car_center_pts)[0]
+            car_center_x_meters = car_center_road[0] if not np.isnan(car_center_road[0]) else 0.0
 
             lane_perception_active = state["adas_enabled"]
 
@@ -664,157 +610,232 @@ def inference_loop():
                 # Run YOLOpv2 inference
                 det_boxes, da_mask, ll_mask = yolop_detector.detect(im_infer)
 
-                if state["adas_enabled"]:
-                    # --- 1. Forward Collision Warning from YOLOpv2 Detections ---
-                    hood_y = state.get("hood_y")
+                # Lens Calibration VP update
+                if state["calibration_frames_left"] > 0 and ll_mask is not None:
+                    v_coords, u_coords = np.where(ll_mask > 0)
+                    if len(v_coords) > 20:
+                        left_mask = u_coords < car_center_x
+                        right_mask = u_coords > car_center_x
+                        left_us, left_vs = u_coords[left_mask], v_coords[left_mask]
+                        right_us, right_vs = u_coords[right_mask], v_coords[right_mask]
+                        if len(left_us) >= 5 and len(right_us) >= 5:
+                            try:
+                                m_left, c_left = np.polyfit(left_vs, left_us, 1)
+                                m_right, c_right = np.polyfit(right_vs, right_us, 1)
+                                if abs(m_left - m_right) > 0.05:
+                                    v_intersect = (c_right - c_left) / (m_left - m_right)
+                                    u_intersect = m_left * v_intersect + c_left
+                                    if 150 < u_intersect < 490 and 80 < v_intersect < 280:
+                                        state["calib_vp_x_list"].append(u_intersect)
+                                        state["calib_vp_y_list"].append(v_intersect)
+                            except Exception:
+                                pass
+                    state["calibration_frames_left"] -= 1
+                    if state["calibration_frames_left"] == 0:
+                        if len(state["calib_vp_x_list"]) >= 5:
+                            vp_x = float(np.median(state["calib_vp_x_list"]))
+                            vp_y = float(np.median(state["calib_vp_y_list"]))
+                            state["calibration"] = {"vp_x": vp_x, "vp_y": vp_y}
+                            state["error"] = None
+                            print(f"[INFO] Calibrated vanishing point: ({vp_x:.2f}, {vp_y:.2f})", flush=True)
+                            save_calibration_state()
+                            update_homography()
+                        else:
+                            state["error"] = "Lens calibration failed: not enough lane lines detected."
+                            print("[WARNING] Lens calibration failed", flush=True)
+
+                # Fit lane lines in road plane
+                left_poly, right_poly = None, None
+                if ll_mask is not None:
+                    left_poly, right_poly = fit_lane_polynomials(ll_mask, car_center_x)
+
+                # Smooth polynomials using history
+                def smooth_poly(poly, history, max_history=8):
+                    if poly is not None:
+                        history.append(poly)
+                        if len(history) > max_history:
+                            history.pop(0)
+                    if len(history) > 0:
+                        return np.mean(history, axis=0)
+                    return None
+
+                left_poly_smoothed = smooth_poly(left_poly, state["left_poly_history"])
+                right_poly_smoothed = smooth_poly(right_poly, state["right_poly_history"])
+
+                # Fallback to straight parallel lanes
+                if left_poly_smoothed is None and right_poly_smoothed is None:
+                    left_poly_smoothed = np.array([0.0, 0.0, car_center_x_meters - 1.85], dtype=np.float32)
+                    right_poly_smoothed = np.array([0.0, 0.0, car_center_x_meters + 1.85], dtype=np.float32)
+                elif left_poly_smoothed is None:
+                    left_poly_smoothed = right_poly_smoothed.copy()
+                    left_poly_smoothed[2] -= 3.7
+                elif right_poly_smoothed is None:
+                    right_poly_smoothed = left_poly_smoothed.copy()
+                    right_poly_smoothed[2] += 3.7
+
+                # Project vehicles to road plane and calculate FCW
+                if state["adas_enabled"] and det_boxes is not None:
                     for box in det_boxes:
                         x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
-                        w = x2 - x1
-                        cx = (x1 + x2) / 2
-
-                        # Ignore detections that fall into the hood zone below the learned road boundary.
-                        if hood_y is not None and y2 >= hood_y:
-                            continue
+                        u_bot = (x1 + x2) / 2.0
+                        v_bot = y2
                         
-                        # FCW Logic: If vehicle is in the center lane and box width is very large (close)
-                        current_center_x = state.get("car_center_x", INFER_WIDTH // 2)
-                        center_lane_min = current_center_x - (INFER_WIDTH // 6)
-                        center_lane_max = current_center_x + (INFER_WIDTH // 6)
+                        pts_bot = np.array([[u_bot, v_bot]], dtype=np.float32)
+                        road_bot = image_to_road(pts_bot)[0]
+                        X_veh = road_bot[0]
+                        Y_veh = road_bot[1]
+                        
                         is_threat = False
-                        if center_lane_min < cx < center_lane_max:
-                            if w > FCW_WARNING_WIDTH:
-                                fcw_triggered = True
-                                is_threat = True
+                        if not np.isnan(X_veh) and not np.isnan(Y_veh):
+                            # Ego lane check
+                            if abs(X_veh - car_center_x_meters) < 1.6:
+                                if Y_veh < 15.0:
+                                    fcw_triggered = True
+                                    is_threat = True
+                            
+                            # Construct BEV bounding box (width 1.8m, length 3.5m)
+                            pts_veh_road = np.array([
+                                [X_veh - 0.9, Y_veh + 3.5],
+                                [X_veh + 0.9, Y_veh]
+                            ], dtype=np.float32)
+                            pts_veh_bev = road_to_bev(pts_veh_road)
+                            x1_bev, y1_bev = pts_veh_bev[0]
+                            x2_bev, y2_bev = pts_veh_bev[1]
+                            
+                            fcw_overlay_boxes.append({
+                                "x1": round(float(x1_bev), 2),
+                                "y1": round(float(y1_bev), 2),
+                                "x2": round(float(x2_bev), 2),
+                                "y2": round(float(y2_bev), 2),
+                                "threat": is_threat,
+                            })
 
-                        fcw_overlay_boxes.append({
-                            "x1": round(float(x1), 2),
-                            "y1": round(float(y1), 2),
-                            "x2": round(float(x2), 2),
-                            "y2": round(float(y2), 2),
-                            "threat": is_threat,
-                        })
+                # Calculate LDW severities in road plane
+                y_eval = 5.0
+                left_x_at_eval = np.polyval(left_poly_smoothed, y_eval)
+                right_x_at_eval = np.polyval(right_poly_smoothed, y_eval)
+                
+                d_left = car_center_x_meters - left_x_at_eval
+                d_right = right_x_at_eval - car_center_x_meters
+                
+                left_severity = 0.0
+                right_severity = 0.0
 
-                if lane_perception_active and da_mask is not None and ll_mask is not None:
-                    # --- 2. Drivable Area & Lane Departure Warning ---
-                    update_hood_line(da_mask)
-                    hood_y = state.get("hood_y")
-                    da_lane_mask = apply_hood_cutoff(da_mask, hood_y)
-                    car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
-                    h_im, w_im = im_infer.shape[:2]
-                    row_bounds = get_drivable_row_bounds(da_lane_mask)
-                    left_line_mask, right_line_mask, seed_row = build_current_lane_line_masks(ll_mask, da_lane_mask, car_center_x)
-                    
-                    cv2.line(im_infer, (car_center_x, 0), (car_center_x, h_im - 1), (255, 255, 255), 1)
+                # 1. LDW Left Calibration
+                if state.get("calibration_ldw_left_start_time") is not None:
+                    elapsed = time.time() - state["calibration_ldw_left_start_time"]
+                    if elapsed < LDW_CALIBRATION_SECONDS:
+                        state["calib_ldw_left_dists"].append(float(d_left))
+                    else:
+                        finalize_ldw_left_calibration()
 
-                    # Keep the drivable area lightly visible
-                    da_indices = da_lane_mask > 0
+                # 2. LDW Right Calibration
+                if state.get("calibration_ldw_right_start_time") is not None:
+                    elapsed = time.time() - state["calibration_ldw_right_start_time"]
+                    if elapsed < LDW_CALIBRATION_SECONDS:
+                        state["calib_ldw_right_dists"].append(float(d_right))
+                    else:
+                        finalize_ldw_right_calibration()
+
+                # Get comfortable thresholds in meters
+                ldw_calibration = state.get("ldw_calibration")
+                if not ldw_calibration:
+                    left_comfort = 1.1
+                    right_comfort = 1.1
+                else:
+                    left_comfort = ldw_calibration.get("left_comfort_dist", 1.1)
+                    right_comfort = ldw_calibration.get("right_comfort_dist", 1.1)
+                    if left_comfort > 10.0:
+                        left_comfort = 1.1
+                    if right_comfort > 10.0:
+                        right_comfort = 1.1
+
+                if state["adas_enabled"]:
+                    if d_left <= left_comfort:
+                        left_severity = (left_comfort - d_left) / 0.3
+                        left_severity = float(np.clip(left_severity, 0.0, 1.0))
+                    if d_right <= right_comfort:
+                        right_severity = (right_comfort - d_right) / 0.3
+                        right_severity = float(np.clip(right_severity, 0.0, 1.0))
+
+                    if left_severity > 0.8 or right_severity > 0.8:
+                        ldw_triggered = True
+
+                # Warp camera image to BEV
+                im_bev = cv2.warpPerspective(im_infer, H_cam2bev, (BEV_WIDTH, BEV_HEIGHT))
+
+                # Warp and draw drivable area mask
+                if da_mask is not None:
+                    da_bev = cv2.warpPerspective(da_mask, H_cam2bev, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
+                    da_indices = da_bev > 0
                     if np.any(da_indices):
-                        overlay = np.zeros_like(im_infer)
-                        overlay[da_indices] = (0, 120, 0)
-                        alpha = 0.18
-                        im_infer[da_indices] = cv2.addWeighted(
-                            im_infer[da_indices], 1.0 - alpha,
+                        overlay = np.zeros_like(im_bev)
+                        overlay[da_indices] = (0, 100, 0)
+                        alpha = 0.22
+                        im_bev[da_indices] = cv2.addWeighted(
+                            im_bev[da_indices], 1.0 - alpha,
                             overlay[da_indices], alpha, 0
                         )
 
-                    ll_indices = ll_mask > 0
+                # Warp and draw lane lines points
+                if ll_mask is not None:
+                    ll_bev = cv2.warpPerspective(ll_mask, H_cam2bev, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
+                    ll_indices = ll_bev > 0
                     if np.any(ll_indices):
-                        im_infer[ll_indices] = (0, 255, 255)
+                        im_bev[ll_indices] = (0, 200, 200)
 
-                    cv2.line(im_infer, (0, seed_row), (w_im - 1, seed_row), (255, 255, 255), 1)
+                # Draw ego car center line
+                car_center_bev_x = int(road_to_bev(np.array([[car_center_x_meters, 1.0]]))[0, 0])
+                cv2.line(im_bev, (car_center_bev_x, 0), (car_center_bev_x, BEV_HEIGHT - 1), (100, 100, 100), 1)
 
-                    eval_y = min(h_im - 1, seed_row + 80)
-                    left_x = sample_line_position(left_line_mask, eval_y, 'left')
-                    right_x = sample_line_position(right_line_mask, eval_y, 'right')
+                # Draw ego vehicle representation
+                ego_corners_road = np.array([
+                    [car_center_x_meters - 0.9, 1.0],
+                    [car_center_x_meters - 0.9, 2.8],
+                    [car_center_x_meters + 0.9, 2.8],
+                    [car_center_x_meters + 0.9, 1.0]
+                ], dtype=np.float32)
+                ego_corners_bev = road_to_bev(ego_corners_road).astype(np.int32)
+                
+                overlay = im_bev.copy()
+                cv2.fillPoly(overlay, [ego_corners_bev], (60, 60, 60))
+                cv2.polylines(overlay, [ego_corners_bev], True, (255, 120, 0), 2)
+                cv2.addWeighted(overlay, 0.6, im_bev, 0.4, 0, dst=im_bev)
 
-                    left_severity = 0.0
-                    right_severity = 0.0
-
-                    # 1. LDW Left Calibration
-                    if state.get("calibration_ldw_left_start_time") is not None:
-                        elapsed = time.time() - state["calibration_ldw_left_start_time"]
-                        if elapsed < LDW_CALIBRATION_SECONDS:
-                            if left_x is not None:
-                                dist = car_center_x - left_x
-                                state["calib_ldw_left_dists"].append(dist)
-                        else:
-                            finalize_ldw_left_calibration()
-
-                    # 2. LDW Right Calibration
-                    if state.get("calibration_ldw_right_start_time") is not None:
-                        elapsed = time.time() - state["calibration_ldw_right_start_time"]
-                        if elapsed < LDW_CALIBRATION_SECONDS:
-                            if right_x is not None:
-                                dist = right_x - car_center_x
-                                state["calib_ldw_right_dists"].append(dist)
-                        else:
-                            finalize_ldw_right_calibration()
-
-                    ldw_calibration = state.get("ldw_calibration")
-                    if not ldw_calibration:
-                        left_comfort = 50.0
-                        right_comfort = 50.0
-                        eval_y_stored = int(h_im * 0.75)
-                    else:
-                        left_comfort = ldw_calibration.get("left_comfort_dist", 50.0)
-                        right_comfort = ldw_calibration.get("right_comfort_dist", 50.0)
-                        eval_y_stored = ldw_calibration.get("eval_y", int(h_im * 0.75))
-
-                    if state["adas_enabled"]:
-                        if left_x is not None and right_x is not None:
-                            d_left = car_center_x - left_x
-                            d_right = right_x - car_center_x
-
-                            # Approaching Left edge
-                            if d_right >= 1.5 * d_left:
-                                d_start = d_right / 1.5
-                                if d_start > left_comfort:
-                                    left_severity = (d_start - d_left) / (d_start - left_comfort)
-                                    left_severity = float(np.clip(left_severity, 0.0, 1.0))
-                                else:
-                                    left_severity = 1.0 if d_left <= left_comfort else 0.0
-
-                            # Approaching Right edge
-                            if d_left >= 1.5 * d_right:
-                                d_start = d_left / 1.5
-                                if d_start > right_comfort:
-                                    right_severity = (d_start - d_right) / (d_start - right_comfort)
-                                    right_severity = float(np.clip(right_severity, 0.0, 1.0))
-                                else:
-                                    right_severity = 1.0 if d_right <= right_comfort else 0.0
-                        else:
-                            # Fallback if only single line is detected: warn (severity = 1.0) if crossed comfortable limit
-                            if left_x is not None:
-                                d_left = car_center_x - left_x
-                                if d_left <= left_comfort:
-                                    left_severity = 1.0
-                            if right_x is not None:
-                                d_right = right_x - car_center_x
-                                if d_right <= right_comfort:
-                                    right_severity = 1.0
-
-                        if left_severity > 0.8 or right_severity > 0.8:
-                            ldw_triggered = True
-
-                        cv2.line(im_infer, (0, int(eval_y_stored)), (w_im - 1, int(eval_y_stored)), (0, 255, 255), 1)
-
-                    lane_overlay_payload = build_lane_overlay_payload(
-                        left_line_mask,
-                        right_line_mask,
-                        da_lane_mask,
-                        row_bounds,
-                        left_severity=left_severity,
-                        right_severity=right_severity,
-                        fcw_warning=fcw_triggered,
-                        fcw_boxes=fcw_overlay_boxes,
-                    )
+                # Build final payload
+                lane_overlay_payload = build_lane_overlay_payload(
+                    left_poly_smoothed,
+                    right_poly_smoothed,
+                    left_severity=left_severity,
+                    right_severity=right_severity,
+                    fcw_warning=fcw_triggered,
+                    fcw_boxes=fcw_overlay_boxes,
+                )
+            else:
+                # ADAS disabled fallback: just show warped BEV frame and ego-car
+                im_bev = cv2.warpPerspective(im_infer, H_cam2bev, (BEV_WIDTH, BEV_HEIGHT))
+                car_center_bev_x = int(road_to_bev(np.array([[car_center_x_meters, 1.0]]))[0, 0])
+                cv2.line(im_bev, (car_center_bev_x, 0), (car_center_bev_x, BEV_HEIGHT - 1), (100, 100, 100), 1)
+                
+                ego_corners_road = np.array([
+                    [car_center_x_meters - 0.9, 1.0],
+                    [car_center_x_meters - 0.9, 2.8],
+                    [car_center_x_meters + 0.9, 2.8],
+                    [car_center_x_meters + 0.9, 1.0]
+                ], dtype=np.float32)
+                ego_corners_bev = road_to_bev(ego_corners_road).astype(np.int32)
+                
+                overlay = im_bev.copy()
+                cv2.fillPoly(overlay, [ego_corners_bev], (60, 60, 60))
+                cv2.polylines(overlay, [ego_corners_bev], True, (255, 120, 0), 2)
+                cv2.addWeighted(overlay, 0.6, im_bev, 0.4, 0, dst=im_bev)
 
             # Update global state for UI alerts
             state["fcw_warning"] = fcw_triggered
             state["ldw_warning"] = ldw_triggered
 
             # Encode to JPEG for the web interface
-            _, buf = cv2.imencode('.jpg', im_infer, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            _, buf = cv2.imencode('.jpg', im_bev, [cv2.IMWRITE_JPEG_QUALITY, 70])
             with frame_lock:
                 latest_web_frame = buf.tobytes()
                 latest_lane_overlay = lane_overlay_payload
