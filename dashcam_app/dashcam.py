@@ -107,6 +107,14 @@ K_INFER = np.array([
 H = None
 H_inv = None
 H_cam2bev = None
+ROAD_TO_CAMERA_MATRIX = None
+
+
+def undistort_image_points(pts):
+    if len(pts) == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    pts = np.asarray(pts, dtype=np.float32).reshape(-1, 1, 2)
+    return cv2.undistortPoints(pts, K_INFER, DIST_COEFF, P=K_INFER).reshape(-1, 2)
 
 # --- State ---
 latest_web_frame = None
@@ -155,7 +163,7 @@ state = {
 }
 
 def update_homography():
-    global H, H_inv, H_cam2bev
+    global H, H_inv, H_cam2bev, ROAD_TO_CAMERA_MATRIX
     vp = state.get("calibration")
     if vp is not None:
         vp_x = vp["vp_x"]
@@ -163,6 +171,8 @@ def update_homography():
     else:
         vp_x = K_INFER[0, 2] # Default center
         vp_y = 160.0 # Default vanishing point y (approx 1.86 deg pitch down)
+
+    vp_x, vp_y = undistort_image_points(np.array([[vp_x, vp_y]], dtype=np.float32))[0]
         
     K_inv = np.linalg.inv(K_INFER)
     
@@ -174,15 +184,16 @@ def update_homography():
     u_x = np.array([u_y[2], 0.0, -u_y[0]], dtype=np.float32)
     u_x = u_x / np.linalg.norm(u_x)
     
-    # Up/Normal unit vector (points DOWN in camera coords, since road is below camera)
+    # Plane normal points upward in the OpenCV camera frame.
     u_z = np.cross(u_x, u_y)
-    if u_z[1] < 0:
+    if u_z[1] > 0:
         u_z = -u_z
         
     h = CAMERA_HEIGHT
     
     # Transform matrix from road to camera coordinates
     M = np.stack([u_x, u_y, h * u_z], axis=1)
+    ROAD_TO_CAMERA_MATRIX = M
     
     # Homography H mapping road plane (X, Y) to image coordinates
     H = K_INFER @ M
@@ -206,10 +217,11 @@ def update_homography():
 def image_to_road(pts):
     if len(pts) == 0:
         return np.zeros((0, 2), dtype=np.float32)
-    pts_h = np.hstack([pts, np.ones((len(pts), 1), dtype=np.float32)])
+    pts_undist = undistort_image_points(pts)
+    pts_h = np.hstack([pts_undist, np.ones((len(pts_undist), 1), dtype=np.float32)])
     road_h = (H_inv @ pts_h.T).T
     valid = road_h[:, 2] > 1e-5
-    road = np.zeros((len(pts), 2), dtype=np.float32)
+    road = np.zeros((len(pts_undist), 2), dtype=np.float32)
     road[valid, 0] = road_h[valid, 0] / road_h[valid, 2]
     road[valid, 1] = road_h[valid, 1] / road_h[valid, 2]
     road[~valid] = np.nan
@@ -228,11 +240,18 @@ def road_to_image(pts_road):
     if len(pts_road) == 0:
         return np.zeros((0, 2), dtype=np.float32)
     pts_h = np.hstack([pts_road[:, 0:1], pts_road[:, 1:2], np.ones((len(pts_road), 1), dtype=np.float32)])
-    img_h = (H @ pts_h.T).T
-    valid = img_h[:, 2] > 1e-5
+    cam_pts = (ROAD_TO_CAMERA_MATRIX @ pts_h.T).T
+    valid = cam_pts[:, 2] > 1e-5
     img = np.zeros((len(pts_road), 2), dtype=np.float32)
-    img[valid, 0] = img_h[valid, 0] / img_h[valid, 2]
-    img[valid, 1] = img_h[valid, 1] / img_h[valid, 2]
+    if np.any(valid):
+        img_valid, _ = cv2.projectPoints(
+            cam_pts[valid].reshape(-1, 1, 3),
+            np.zeros(3, dtype=np.float32),
+            np.zeros(3, dtype=np.float32),
+            K_INFER,
+            DIST_COEFF,
+        )
+        img[valid] = img_valid.reshape(-1, 2)
     img[~valid] = np.nan
     return img
 
@@ -633,7 +652,7 @@ def inference_loop():
                 # Run YOLOpv2 inference
                 det_boxes, da_mask, ll_mask = yolop_detector.detect(im_infer)
                 
-                # Undistort masks for BEV and polynomial fitting
+                # Undistort masks only for BEV warping. Point projection now undistorts on demand.
                 da_mask_undist = (cv2.undistort((da_mask * 255).astype(np.uint8), K_INFER, DIST_COEFF) > 127).astype(np.uint8) if da_mask is not None else None
                 ll_mask_undist = (cv2.undistort((ll_mask * 255).astype(np.uint8), K_INFER, DIST_COEFF) > 127).astype(np.uint8) if ll_mask is not None else None
 
@@ -673,8 +692,8 @@ def inference_loop():
 
                 # Fit lane lines in road plane
                 left_poly, right_poly = None, None
-                if ll_mask_undist is not None:
-                    left_poly, right_poly = fit_lane_polynomials(ll_mask_undist, car_center_x)
+                if ll_mask is not None:
+                    left_poly, right_poly = fit_lane_polynomials(ll_mask, car_center_x)
 
                 # Smooth polynomials using history
                 def smooth_poly(poly, history, max_history=8):
@@ -698,10 +717,7 @@ def inference_loop():
                         u_bot = (x1 + x2) / 2.0
                         v_bot = y2
                         
-                        # Undistort the bottom center point before projection
-                        pts_bot = np.array([[[u_bot, v_bot]]], dtype=np.float32)
-                        pts_bot_undist = cv2.undistortPoints(pts_bot, K_INFER, DIST_COEFF, P=K_INFER)[0]
-                        road_bot = image_to_road(pts_bot_undist)[0]
+                        road_bot = image_to_road(np.array([[u_bot, v_bot]], dtype=np.float32))[0]
                         X_veh = road_bot[0]
                         Y_veh = road_bot[1]
                         
