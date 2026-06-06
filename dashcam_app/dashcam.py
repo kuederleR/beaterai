@@ -60,7 +60,7 @@ BEV_HEIGHT = 400
 X_MIN = -6.0
 X_MAX = 6.0
 Y_MIN = 1.0
-Y_MAX = 100.0
+Y_MAX = 30.0
 
 # --- Camera Calibration Matrix and Distortion Coefficients ---
 def load_camera_calibration():
@@ -482,8 +482,8 @@ def fit_lane_polynomials(ll_mask, car_center_x):
     valid = ~np.isnan(pts_road[:, 0]) & ~np.isnan(pts_road[:, 1])
     pts_road = pts_road[valid]
     
-    # Only keep points in Y range [1.0, 100.0] meters and lateral range [-6.0, 6.0]
-    in_range = (pts_road[:, 1] >= 1.0) & (pts_road[:, 1] <= 100.0) & (pts_road[:, 0] >= -6.0) & (pts_road[:, 0] <= 6.0)
+    # Keep points within the BEV road window so the fitted lanes use the same depth range as the map.
+    in_range = (pts_road[:, 1] >= Y_MIN) & (pts_road[:, 1] <= Y_MAX) & (pts_road[:, 0] >= X_MIN) & (pts_road[:, 0] <= X_MAX)
     pts_road = pts_road[in_range]
     if len(pts_road) < 15:
         return None, None
@@ -534,7 +534,7 @@ def build_lane_overlay_payload(left_poly, right_poly, left_severity=0.0, right_s
         }
 
     # Evaluate polynomials to build BEV points
-    eval_ys = np.arange(1.0, 100.0, 1.0, dtype=np.float32)
+    eval_ys = np.arange(Y_MIN, Y_MAX, 1.0, dtype=np.float32)
     
     if left_poly is not None:
         left_xs = np.polyval(left_poly, eval_ys)
