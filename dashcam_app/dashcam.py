@@ -60,7 +60,7 @@ BEV_HEIGHT = 400
 X_MIN = -6.0
 X_MAX = 6.0
 Y_MIN = 1.0
-Y_MAX = 30.0
+Y_MAX = 100.0
 
 # --- Camera Calibration Matrix and Distortion Coefficients ---
 def load_camera_calibration():
@@ -462,8 +462,8 @@ def fit_lane_polynomials(ll_mask, car_center_x):
     valid = ~np.isnan(pts_road[:, 0]) & ~np.isnan(pts_road[:, 1])
     pts_road = pts_road[valid]
     
-    # Only keep points in Y range [1.0, 30.0] meters and lateral range [-6.0, 6.0]
-    in_range = (pts_road[:, 1] >= 1.0) & (pts_road[:, 1] <= 30.0) & (pts_road[:, 0] >= -6.0) & (pts_road[:, 0] <= 6.0)
+    # Only keep points in Y range [1.0, 100.0] meters and lateral range [-6.0, 6.0]
+    in_range = (pts_road[:, 1] >= 1.0) & (pts_road[:, 1] <= 100.0) & (pts_road[:, 0] >= -6.0) & (pts_road[:, 0] <= 6.0)
     pts_road = pts_road[in_range]
     if len(pts_road) < 15:
         return None, None
@@ -504,20 +504,42 @@ def fit_lane_polynomials(ll_mask, car_center_x):
     return left_poly, right_poly
 
 def build_lane_overlay_payload(left_poly, right_poly, left_severity=0.0, right_severity=0.0, fcw_warning=False, fcw_boxes=None):
+    if left_poly is None and right_poly is None:
+        return {
+            "width": BEV_WIDTH, "height": BEV_HEIGHT, "top_y": 0, "bottom_y": BEV_HEIGHT - 1,
+            "left_points": [], "right_points": [], "center_points": [], "polygon": [],
+            "left_zone": [], "right_zone": [],
+            "left_severity": float(left_severity), "right_severity": float(right_severity),
+            "fcw_warning": bool(fcw_warning), "fcw_boxes": fcw_boxes or [],
+        }
+
     # Evaluate polynomials to build BEV points
-    eval_ys = np.arange(1.0, 30.0, 0.5, dtype=np.float32)
-    left_xs = np.polyval(left_poly, eval_ys)
-    right_xs = np.polyval(right_poly, eval_ys)
+    eval_ys = np.arange(1.0, 100.0, 1.0, dtype=np.float32)
     
-    left_pts_road = np.stack([left_xs, eval_ys], axis=1)
-    right_pts_road = np.stack([right_xs, eval_ys], axis=1)
-    center_xs = 0.5 * (left_xs + right_xs)
-    center_pts_road = np.stack([center_xs, eval_ys], axis=1)
-    
-    # Map to BEV pixels
-    left_pts_bev = road_to_bev(left_pts_road)
-    right_pts_bev = road_to_bev(right_pts_road)
-    center_pts_bev = road_to_bev(center_pts_road)
+    if left_poly is not None:
+        left_xs = np.polyval(left_poly, eval_ys)
+        left_pts_road = np.stack([left_xs, eval_ys], axis=1)
+        left_pts_bev = road_to_bev(left_pts_road)
+        left_points = left_pts_bev.tolist()
+    else:
+        left_points = []
+        left_xs = None
+        
+    if right_poly is not None:
+        right_xs = np.polyval(right_poly, eval_ys)
+        right_pts_road = np.stack([right_xs, eval_ys], axis=1)
+        right_pts_bev = road_to_bev(right_pts_road)
+        right_points = right_pts_bev.tolist()
+    else:
+        right_points = []
+        right_xs = None
+        
+    center_points = []
+    if left_xs is not None and right_xs is not None:
+        center_xs = 0.5 * (left_xs + right_xs)
+        center_pts_road = np.stack([center_xs, eval_ys], axis=1)
+        center_pts_bev = road_to_bev(center_pts_road)
+        center_points = center_pts_bev.tolist()
     
     left_points = left_pts_bev.tolist()
     right_points = right_pts_bev.tolist()
@@ -584,9 +606,8 @@ def inference_loop():
             elif len(im0.shape) == 3 and im0.shape[2] == 4:
                 im0 = cv2.cvtColor(im0, cv2.COLOR_BGRA2BGR)
 
-            # Undistort and resize
-            im0_undistorted = cv2.undistort(im0, CAMERA_MATRIX, DIST_COEFF)
-            im_infer = cv2.resize(im0_undistorted, (INFER_WIDTH, INFER_HEIGHT), interpolation=cv2.INTER_LINEAR)
+            # Resize for inference (raw feed)
+            im_infer = cv2.resize(im0, (INFER_WIDTH, INFER_HEIGHT), interpolation=cv2.INTER_LINEAR)
             im_debug = im_infer.copy()
 
             fcw_triggered = False
@@ -611,6 +632,10 @@ def inference_loop():
             if state["adas_enabled"] or lane_perception_active:
                 # Run YOLOpv2 inference
                 det_boxes, da_mask, ll_mask = yolop_detector.detect(im_infer)
+                
+                # Undistort masks for BEV and polynomial fitting
+                da_mask_undist = cv2.undistort(da_mask, K_INFER, DIST_COEFF) if da_mask is not None else None
+                ll_mask_undist = cv2.undistort(ll_mask, K_INFER, DIST_COEFF) if ll_mask is not None else None
 
                 # Lens Calibration VP update
                 if state["calibration_frames_left"] > 0 and ll_mask is not None:
@@ -648,8 +673,8 @@ def inference_loop():
 
                 # Fit lane lines in road plane
                 left_poly, right_poly = None, None
-                if ll_mask is not None:
-                    left_poly, right_poly = fit_lane_polynomials(ll_mask, car_center_x)
+                if ll_mask_undist is not None:
+                    left_poly, right_poly = fit_lane_polynomials(ll_mask_undist, car_center_x)
 
                 # Smooth polynomials using history
                 def smooth_poly(poly, history, max_history=8):
@@ -664,16 +689,7 @@ def inference_loop():
                 left_poly_smoothed = smooth_poly(left_poly, state["left_poly_history"])
                 right_poly_smoothed = smooth_poly(right_poly, state["right_poly_history"])
 
-                # Fallback to straight parallel lanes
-                if left_poly_smoothed is None and right_poly_smoothed is None:
-                    left_poly_smoothed = np.array([0.0, 0.0, car_center_x_meters - 1.85], dtype=np.float32)
-                    right_poly_smoothed = np.array([0.0, 0.0, car_center_x_meters + 1.85], dtype=np.float32)
-                elif left_poly_smoothed is None:
-                    left_poly_smoothed = right_poly_smoothed.copy()
-                    left_poly_smoothed[2] -= 3.7
-                elif right_poly_smoothed is None:
-                    right_poly_smoothed = left_poly_smoothed.copy()
-                    right_poly_smoothed[2] += 3.7
+                # No fallback to straight lines if none detected
 
                 # Project vehicles to road plane and calculate FCW
                 if state["adas_enabled"] and det_boxes is not None:
@@ -682,8 +698,10 @@ def inference_loop():
                         u_bot = (x1 + x2) / 2.0
                         v_bot = y2
                         
-                        pts_bot = np.array([[u_bot, v_bot]], dtype=np.float32)
-                        road_bot = image_to_road(pts_bot)[0]
+                        # Undistort the bottom center point before projection
+                        pts_bot = np.array([[[u_bot, v_bot]]], dtype=np.float32)
+                        pts_bot_undist = cv2.undistortPoints(pts_bot, K_INFER, DIST_COEFF, P=K_INFER)[0]
+                        road_bot = image_to_road(pts_bot_undist)[0]
                         X_veh = road_bot[0]
                         Y_veh = road_bot[1]
                         
@@ -714,11 +732,18 @@ def inference_loop():
 
                 # Calculate LDW severities in road plane
                 y_eval = 5.0
-                left_x_at_eval = np.polyval(left_poly_smoothed, y_eval)
-                right_x_at_eval = np.polyval(right_poly_smoothed, y_eval)
                 
-                d_left = car_center_x_meters - left_x_at_eval
-                d_right = right_x_at_eval - car_center_x_meters
+                if left_poly_smoothed is not None:
+                    left_x_at_eval = np.polyval(left_poly_smoothed, y_eval)
+                    d_left = car_center_x_meters - left_x_at_eval
+                else:
+                    d_left = 999.0
+                    
+                if right_poly_smoothed is not None:
+                    right_x_at_eval = np.polyval(right_poly_smoothed, y_eval)
+                    d_right = right_x_at_eval - car_center_x_meters
+                else:
+                    d_right = 999.0
                 
                 left_severity = 0.0
                 right_severity = 0.0
@@ -763,12 +788,12 @@ def inference_loop():
                     if left_severity > 0.8 or right_severity > 0.8:
                         ldw_triggered = True
 
-                # Warp camera image to BEV
-                im_bev = cv2.warpPerspective(im_infer, H_cam2bev, (BEV_WIDTH, BEV_HEIGHT))
+                # Use a blank background for the BEV map
+                im_bev = np.zeros((BEV_HEIGHT, BEV_WIDTH, 3), dtype=np.uint8)
 
                 # Warp and draw drivable area mask
-                if da_mask is not None:
-                    da_bev = cv2.warpPerspective(da_mask, H_cam2bev, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
+                if da_mask_undist is not None:
+                    da_bev = cv2.warpPerspective(da_mask_undist, H_cam2bev, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
                     da_indices = da_bev > 0
                     if np.any(da_indices):
                         overlay = np.zeros_like(im_bev)
@@ -780,8 +805,8 @@ def inference_loop():
                         )
 
                 # Warp and draw lane lines points
-                if ll_mask is not None:
-                    ll_bev = cv2.warpPerspective(ll_mask, H_cam2bev, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
+                if ll_mask_undist is not None:
+                    ll_bev = cv2.warpPerspective(ll_mask_undist, H_cam2bev, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
                     ll_indices = ll_bev > 0
                     if np.any(ll_indices):
                         im_bev[ll_indices] = (0, 200, 200)
@@ -830,8 +855,8 @@ def inference_loop():
                         bx1, by1, bx2, by2 = int(box["x1"]), int(box["y1"]), int(box["x2"]), int(box["y2"])
                         cv2.rectangle(im_debug, (bx1, by1), (bx2, by2), (0, 255, 0), 2)
             else:
-                # ADAS disabled fallback: just show warped BEV frame and ego-car
-                im_bev = cv2.warpPerspective(im_infer, H_cam2bev, (BEV_WIDTH, BEV_HEIGHT))
+                # ADAS disabled fallback: just show blank BEV frame and ego-car
+                im_bev = np.zeros((BEV_HEIGHT, BEV_WIDTH, 3), dtype=np.uint8)
                 car_center_bev_x = int(road_to_bev(np.array([[car_center_x_meters, 1.0]]))[0, 0])
                 cv2.line(im_bev, (car_center_bev_x, 0), (car_center_bev_x, BEV_HEIGHT - 1), (100, 100, 100), 1)
                 
