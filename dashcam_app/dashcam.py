@@ -977,51 +977,70 @@ def inference_loop():
                     if left_severity > 0.8 or right_severity > 0.8:
                         ldw_triggered = True
 
-                # Use a blank background for the BEV map
-                im_bev = np.zeros((BEV_HEIGHT, BEV_WIDTH, 3), dtype=np.uint8)
+                # Render only the bottom 30m of the BEV map (600px)
+                RENDER_H = 600
+                im_bev = np.zeros((RENDER_H, BEV_WIDTH, 3), dtype=np.uint8)
 
-                # Warp and draw drivable area mask
+                # Warp and draw drivable area mask in gray
                 if da_mask_undist is not None:
-                    da_bev = cv2.warpPerspective(da_mask_undist, bev_display_h, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
-                    da_indices = da_bev > 0
-                    if np.any(da_indices):
-                        overlay = im_bev.copy()
-                        overlay[da_indices] = (0, 100, 0)
-                        alpha = 0.22
-                        cv2.addWeighted(overlay, alpha, im_bev, 1.0 - alpha, 0, dst=im_bev)
+                    da_bev_full = cv2.warpPerspective(da_mask_undist, bev_display_h, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
+                    da_bev = da_bev_full[-RENDER_H:]
+                    im_bev[da_bev > 0] = (40, 40, 40) # Dark gray road
 
-                # Warp and draw lane lines points
-                if ll_mask_undist is not None:
-                    ll_bev = cv2.warpPerspective(ll_mask_undist, bev_display_h, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
-                    ll_indices = ll_bev > 0
-                    if np.any(ll_indices):
-                        im_bev[ll_indices] = (0, 200, 200)
+                # Draw clean vectorized ego lanes
+                if left_poly_smoothed is not None and right_poly_smoothed is not None:
+                    eval_ys = np.arange(1.0, 31.0, 1.0, dtype=np.float32)
+                    left_xs = np.polyval(left_poly_smoothed, eval_ys)
+                    right_xs = np.polyval(right_poly_smoothed, eval_ys)
+                    
+                    left_pts_road = np.stack([left_xs, eval_ys], axis=1)
+                    right_pts_road = np.stack([right_xs, eval_ys], axis=1)
+                    
+                    left_pts_bev = road_to_bev(left_pts_road)
+                    right_pts_bev = road_to_bev(right_pts_road)
+                    
+                    # Adjust for RENDER_H
+                    left_pts_bev[:, 1] -= (BEV_HEIGHT - RENDER_H)
+                    right_pts_bev[:, 1] -= (BEV_HEIGHT - RENDER_H)
+                    
+                    left_pts_int = left_pts_bev.astype(np.int32)
+                    right_pts_int = right_pts_bev.astype(np.int32)
+                    
+                    # Fill ego lane with blue tint
+                    ego_poly = np.vstack((left_pts_int, right_pts_int[::-1]))
+                    overlay = im_bev.copy()
+                    cv2.fillPoly(overlay, [ego_poly], (120, 60, 30)) # BGR for bluish tint
+                    cv2.addWeighted(overlay, 0.4, im_bev, 0.6, 0, dst=im_bev)
+                    
+                    # Draw clean lane lines
+                    cv2.polylines(im_bev, [left_pts_int], False, (220, 220, 220), 2, cv2.LINE_AA)
+                    cv2.polylines(im_bev, [right_pts_int], False, (220, 220, 220), 2, cv2.LINE_AA)
 
-                # Draw ego center guide. For the lane-rectified view, keep the guide centered.
-                if lane_lines_undist is not None:
-                    car_center_bev_x = BEV_WIDTH // 2
-                    ego_corners_bev = np.array([
-                        [BEV_WIDTH * 0.43, BEV_HEIGHT - 1],
-                        [BEV_WIDTH * 0.43, BEV_HEIGHT * 0.88],
-                        [BEV_WIDTH * 0.57, BEV_HEIGHT * 0.88],
-                        [BEV_WIDTH * 0.57, BEV_HEIGHT - 1],
-                    ], dtype=np.int32)
-                else:
-                    car_center_bev_x = int(road_to_bev(np.array([[car_center_x_meters, 1.0]]))[0, 0])
-                    ego_corners_road = np.array([
-                        [car_center_x_meters - 0.9, 1.0],
-                        [car_center_x_meters - 0.9, 2.8],
-                        [car_center_x_meters + 0.9, 2.8],
-                        [car_center_x_meters + 0.9, 1.0]
-                    ], dtype=np.float32)
-                    ego_corners_bev = road_to_bev(ego_corners_road).astype(np.int32)
+                # Draw ego center guide and ego car
+                car_center_bev_x = int(road_to_bev(np.array([[car_center_x_meters, 1.0]]))[0, 0])
+                ego_corners_road = np.array([
+                    [car_center_x_meters - 0.9, 1.0],
+                    [car_center_x_meters - 0.9, 2.8],
+                    [car_center_x_meters + 0.9, 2.8],
+                    [car_center_x_meters + 0.9, 1.0]
+                ], dtype=np.float32)
+                ego_corners_bev = road_to_bev(ego_corners_road)
+                ego_corners_bev[:, 1] -= (BEV_HEIGHT - RENDER_H)
+                ego_corners_int = ego_corners_bev.astype(np.int32)
 
-                cv2.line(im_bev, (car_center_bev_x, 0), (car_center_bev_x, BEV_HEIGHT - 1), (100, 100, 100), 1)
+                cv2.line(im_bev, (car_center_bev_x, 0), (car_center_bev_x, RENDER_H - 1), (100, 100, 100), 1)
                 
-                overlay = im_bev.copy()
-                cv2.fillPoly(overlay, [ego_corners_bev], (60, 60, 60))
-                cv2.polylines(overlay, [ego_corners_bev], True, (255, 120, 0), 2)
-                cv2.addWeighted(overlay, 0.6, im_bev, 0.4, 0, dst=im_bev)
+                cv2.fillPoly(im_bev, [ego_corners_int], (60, 60, 60))
+                cv2.polylines(im_bev, [ego_corners_int], True, (255, 120, 0), 2)
+
+                # Draw vehicles as red dots
+                for box in fcw_overlay_boxes:
+                    v_bev = box["y2"] # y2 corresponds to the bottom of the vehicle in full BEV
+                    v_render = v_bev - (BEV_HEIGHT - RENDER_H)
+                    if v_render >= 0 and v_render < RENDER_H:
+                        u_bev = (box["x1"] + box["x2"]) / 2.0
+                        cv2.circle(im_bev, (int(u_bev), int(v_render)), 6, (0, 0, 255), -1, cv2.LINE_AA)
+                        cv2.circle(im_bev, (int(u_bev), int(v_render)), 6, (255, 255, 255), 1, cv2.LINE_AA)
 
                 # Build final payload
                 lane_overlay_payload = build_lane_overlay_payload(
