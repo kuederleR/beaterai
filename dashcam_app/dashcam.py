@@ -56,12 +56,12 @@ LENS_CALIBRATION_FRAMES = 30
 
 # --- Road Plane / Bird's Eye View (BEV) Geometry Configuration ---
 CAMERA_HEIGHT = 1.2192 # 4 feet off the ground in meters
-BEV_WIDTH = 640
-BEV_HEIGHT = 400
+BEV_WIDTH = 240
+BEV_HEIGHT = 1980
 X_MIN = -6.0
 X_MAX = 6.0
 Y_MIN = 1.0
-Y_MAX = 30.0
+Y_MAX = 100.0
 
 # --- Camera Calibration Matrix and Distortion Coefficients ---
 def load_camera_calibration():
@@ -608,57 +608,96 @@ def finalize_ldw_right_calibration():
     save_calibration_state()
     print(f"[INFO] Calibrated right comfortable distance: {right_comfort_dist:.2f} m", flush=True)
 
-def fit_lane_polynomials(ll_mask, car_center_x):
-    v_coords, u_coords = np.where(ll_mask > 0)
-    if len(v_coords) < 20:
+def find_lanes_sliding_window(ll_mask_undist, bev_display_h, car_center_x_meters):
+    if ll_mask_undist is None:
         return None, None
-        
-    pts = np.stack([u_coords, v_coords], axis=1).astype(np.float32)
-    pts_road = image_to_road(pts)
+
+    # Warp to BEV to do sliding window
+    ll_bev = cv2.warpPerspective(ll_mask_undist, bev_display_h, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
     
-    # Filter valid coordinates in road range
-    valid = ~np.isnan(pts_road[:, 0]) & ~np.isnan(pts_road[:, 1])
-    pts_road = pts_road[valid]
+    # Histogram of the bottom quarter of the image
+    histogram = np.sum(ll_bev[int(BEV_HEIGHT*3/4):, :], axis=0)
     
-    # Keep points within the BEV road window so the fitted lanes use the same depth range as the map.
-    in_range = (pts_road[:, 1] >= Y_MIN) & (pts_road[:, 1] <= Y_MAX) & (pts_road[:, 0] >= X_MIN) & (pts_road[:, 0] <= X_MAX)
-    pts_road = pts_road[in_range]
-    if len(pts_road) < 15:
-        return None, None
-        
-    # Get car center in meters
-    car_center_pts = np.array([[car_center_x, INFER_HEIGHT - 1]], dtype=np.float32)
-    car_center_road = image_to_road(car_center_pts)[0]
-    car_center_x_meters = car_center_road[0] if not np.isnan(car_center_road[0]) else 0.0
+    # Find peaks in the histogram
+    peaks = []
+    threshold = np.max(histogram) * 0.1
+    if threshold > 0:
+        for i in range(1, BEV_WIDTH - 1):
+            if histogram[i] > threshold and histogram[i] >= histogram[i-1] and histogram[i] >= histogram[i+1]:
+                # Non-maximum suppression
+                if not peaks or i - peaks[-1] > 20:
+                    peaks.append(i)
+                elif histogram[i] > histogram[peaks[-1]]:
+                    peaks[-1] = i
+
+    nwindows = 20
+    window_height = int(BEV_HEIGHT / nwindows)
+    margin = 20
+    minpix = 5
     
-    # Segment left and right lane points relative to car center
-    left_mask = (pts_road[:, 0] - car_center_x_meters >= -3.0) & (pts_road[:, 0] - car_center_x_meters <= -0.4)
-    right_mask = (pts_road[:, 0] - car_center_x_meters >= 0.4) & (pts_road[:, 0] - car_center_x_meters <= 3.0)
+    nonzero = ll_bev.nonzero()
+    nonzeroy = np.array(nonzero[0])
+    nonzerox = np.array(nonzero[1])
     
-    left_pts = pts_road[left_mask]
-    right_pts = pts_road[right_mask]
+    lane_points = {p: ([], []) for p in peaks}
     
-    def fit_single_lane(lane_pts):
-        if len(lane_pts) < 10:
-            return None
-        ys = lane_pts[:, 1]
-        xs = lane_pts[:, 0]
-        try:
-            poly = np.polyfit(ys, xs, 2)
-            # Outlier rejection
-            fit_xs = np.polyval(poly, ys)
-            residuals = np.abs(xs - fit_xs)
-            inliers = residuals < 0.25 # within 25 cm
-            if np.sum(inliers) >= 8:
-                poly = np.polyfit(ys[inliers], xs[inliers], 2)
-                return poly
-        except Exception:
-            pass
-        return None
-        
-    left_poly = fit_single_lane(left_pts)
-    right_poly = fit_single_lane(right_pts)
+    for peak in peaks:
+        current_x = peak
+        for window in range(nwindows):
+            win_y_low = BEV_HEIGHT - (window + 1) * window_height
+            win_y_high = BEV_HEIGHT - window * window_height
+            win_x_low = current_x - margin
+            win_x_high = current_x + margin
+            
+            good_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & 
+                         (nonzerox >= win_x_low) &  (nonzerox < win_x_high)).nonzero()[0]
+            
+            if len(good_inds) > 0:
+                lane_points[peak][0].extend(nonzerox[good_inds])
+                lane_points[peak][1].extend(nonzeroy[good_inds])
+                
+            if len(good_inds) > minpix:
+                current_x = int(np.mean(nonzerox[good_inds]))
+                
+    s_x = (BEV_WIDTH - 1) / (X_MAX - X_MIN)
+    s_y = (BEV_HEIGHT - 1) / (Y_MAX - Y_MIN)
     
+    lane_polys = []
+    for peak, (xs, ys) in lane_points.items():
+        if len(xs) > 20:
+            xs = np.array(xs)
+            ys = np.array(ys)
+            
+            road_Xs = xs / s_x + X_MIN
+            road_Ys = Y_MAX - ys / s_y
+            
+            try:
+                poly = np.polyfit(road_Ys, road_Xs, 2)
+                fit_Xs = np.polyval(poly, road_Ys)
+                residuals = np.abs(road_Xs - fit_Xs)
+                inliers = residuals < 0.25 # within 25 cm
+                if np.sum(inliers) >= 10:
+                    poly = np.polyfit(road_Ys[inliers], road_Xs[inliers], 2)
+                    lane_polys.append(poly)
+            except Exception:
+                pass
+                
+    left_poly = None
+    right_poly = None
+    eval_y = 5.0
+    best_left_diff = -999.0
+    best_right_diff = 999.0
+    
+    for poly in lane_polys:
+        x_at_eval = np.polyval(poly, eval_y)
+        diff = x_at_eval - car_center_x_meters
+        if diff < -0.3 and diff > best_left_diff:
+            best_left_diff = diff
+            left_poly = poly
+        elif diff > 0.3 and diff < best_right_diff:
+            best_right_diff = diff
+            right_poly = poly
+            
     return left_poly, right_poly
 
 def build_lane_overlay_payload(left_poly, right_poly, left_severity=0.0, right_severity=0.0, fcw_warning=False, fcw_boxes=None):
@@ -819,10 +858,15 @@ def inference_loop():
                 car_center_road = image_to_road(car_center_pts)[0]
                 car_center_x_meters = car_center_road[0] if not np.isnan(car_center_road[0]) else 0.0
 
+                # Calculate BEV homography FIRST to pass to sliding window
+                bev_display_h = build_lane_rectification_homography(lane_lines_undist)
+                if bev_display_h is None:
+                    bev_display_h = H_cam2bev
+
                 # Fit lane lines in road plane
                 left_poly, right_poly = None, None
-                if ll_mask is not None:
-                    left_poly, right_poly = fit_lane_polynomials(ll_mask, car_center_x)
+                if ll_mask_undist is not None:
+                    left_poly, right_poly = find_lanes_sliding_window(ll_mask_undist, bev_display_h, car_center_x_meters)
 
                 # Smooth polynomials using history
                 def smooth_poly(poly, history, max_history=8):
@@ -935,9 +979,6 @@ def inference_loop():
 
                 # Use a blank background for the BEV map
                 im_bev = np.zeros((BEV_HEIGHT, BEV_WIDTH, 3), dtype=np.uint8)
-                bev_display_h = build_lane_rectification_homography(lane_lines_undist)
-                if bev_display_h is None:
-                    bev_display_h = H_cam2bev
 
                 # Warp and draw drivable area mask
                 if da_mask_undist is not None:
