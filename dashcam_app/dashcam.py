@@ -634,8 +634,8 @@ def inference_loop():
                 det_boxes, da_mask, ll_mask = yolop_detector.detect(im_infer)
                 
                 # Undistort masks for BEV and polynomial fitting
-                da_mask_undist = cv2.undistort(da_mask, K_INFER, DIST_COEFF) if da_mask is not None else None
-                ll_mask_undist = cv2.undistort(ll_mask, K_INFER, DIST_COEFF) if ll_mask is not None else None
+                da_mask_undist = cv2.undistort(da_mask.astype(np.uint8), K_INFER, DIST_COEFF) if da_mask is not None else None
+                ll_mask_undist = cv2.undistort(ll_mask.astype(np.uint8), K_INFER, DIST_COEFF) if ll_mask is not None else None
 
                 # Lens Calibration VP update
                 if state["calibration_frames_left"] > 0 and ll_mask is not None:
