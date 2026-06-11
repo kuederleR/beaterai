@@ -666,6 +666,20 @@ def find_lanes_sliding_window(ll_mask_undist, bev_display_h, car_center_x_meters
             xs = np.array(xs)
             ys = np.array(ys)
 
+            # Filter to inner edge of lane marking to avoid road edge bias
+            median_x = np.median(xs)
+            if peak > BEV_WIDTH // 2:
+                # Right side: keep leftmost (innermost) half of points
+                inner = xs < median_x
+            else:
+                # Left side: keep rightmost (innermost) half of points
+                inner = xs > median_x
+            if np.sum(inner) >= 10:
+                xs = xs[inner]
+                ys = ys[inner]
+            else:
+                continue
+
             road_Xs = xs / s_x + X_MIN
             road_Ys = Y_MAX - ys / s_y
 
