@@ -485,6 +485,19 @@
         </div>
 
         <div class="control-card">
+            <div class="toggle-container" onclick="document.getElementById('debugFeedToggle').click()">
+                <span class="toggle-label">Perspective Feed</span>
+                <label class="switch" onclick="event.stopPropagation()">
+                    <input type="checkbox" id="debugFeedToggle" checked onchange="toggleDebugFeed(this)">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div style="font-size: 12px; color: var(--text-secondary); text-align: center; margin-top: 8px;">
+                Disable to free encoding CPU — BEV always streams.
+            </div>
+        </div>
+
+        <div class="control-card">
             <div class="toggle-container">
                 <span class="toggle-label">Audio Mode</span>
                 <select id="audioModeSelect" onchange="changeAudioMode(this.value)" style="background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: white; padding: 6px 12px; border-radius: 8px; font-size: 14px; outline: none; cursor: pointer;">
@@ -513,6 +526,7 @@
         // State
         let isRecording = false;
         let isAdasEnabled = false;
+        let isDebugFeedActive = true;
         let isUpdatingCenter = false;
         let statusPollHandle = null;
         let statusRequestInFlight = false;
@@ -789,6 +803,12 @@
                     adasToggle.checked = isAdasEnabled;
                 }
 
+                // Update Debug Feed UI based on server state
+                if (data.debug_feed_active !== undefined && data.debug_feed_active !== isDebugFeedActive) {
+                    isDebugFeedActive = data.debug_feed_active;
+                    document.getElementById('debugFeedToggle').checked = isDebugFeedActive;
+                }
+
                 // Update Lens Calibration UI
                 if (data.calibrating_lens) {
                     calibrateBtn.style.opacity = '0.5';
@@ -864,6 +884,24 @@
                 // Revert on error
                 isRecording = !isRecording;
                 updateRecordingUI();
+            }
+        }
+
+        async function toggleDebugFeed(checkbox) {
+            isDebugFeedActive = checkbox.checked;
+            
+            try {
+                const res = await fetch('/api/toggle_debug_feed', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: isDebugFeedActive })
+                });
+                const data = await res.json();
+                isDebugFeedActive = data.debug_feed_active;
+                checkbox.checked = isDebugFeedActive;
+            } catch(e) {
+                isDebugFeedActive = !isDebugFeedActive;
+                checkbox.checked = isDebugFeedActive;
             }
         }
 

@@ -169,6 +169,7 @@ state = {
     "hood_detection_frames_left": HOOD_CALIBRATION_FRAMES,
     "lane_position": 0.5,
     "lane_width": 0.0,
+    "debug_feed_active": True,
 }
 
 def update_homography(vp_override=None):
@@ -1184,12 +1185,14 @@ def inference_loop():
             state["fcw_warning"] = fcw_triggered
             state["ldw_warning"] = ldw_triggered
 
-            # Encode to BMP for the web interface (no compression overhead)
+            # Encode BEV frame to BMP always; debug frame only if active
             _, buf = cv2.imencode('.bmp', im_bev)
-            _, buf_debug = cv2.imencode('.bmp', im_debug)
+            if state["debug_feed_active"]:
+                _, buf_debug = cv2.imencode('.bmp', im_debug)
             with frame_lock:
                 latest_web_frame = buf.tobytes()
-                latest_debug_frame = buf_debug.tobytes()
+                if state["debug_feed_active"]:
+                    latest_debug_frame = buf_debug.tobytes()
                 latest_lane_overlay = lane_overlay_payload
 
             fps_counter += 1
@@ -1230,10 +1233,21 @@ def video_feed():
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
 def generate_debug_mjpeg():
+    no_feed_frame = None
     while True:
         with frame_lock:
+            is_active = state.get("debug_feed_active", True)
             frame = latest_debug_frame
-        if frame is None:
+        if not is_active:
+            if no_feed_frame is None:
+                img = np.zeros((400, 640, 3), dtype=np.uint8)
+                cv2.putText(img, "Perspective feed disabled",
+                            (40, 200), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                            (100, 100, 100), 2)
+                _, buf = cv2.imencode('.bmp', img)
+                no_feed_frame = buf.tobytes()
+            frame = no_feed_frame
+        elif frame is None:
             wait_img = np.zeros((400, 640, 3), dtype=np.uint8)
             cv2.putText(wait_img, "Initializing Debug Feed...",
                         (40, 200), cv2.FONT_HERSHEY_SIMPLEX, 1,
@@ -1326,6 +1340,7 @@ def status():
         "ldw_calibrated_right": state["ldw_calibration"] is not None and "right_comfort_dist" in state["ldw_calibration"],
         "lane_position": state.get("lane_position", 0.5),
         "lane_width": state.get("lane_width", 0.0),
+        "debug_feed_active": state.get("debug_feed_active", True),
     })
 
 @app.route('/api/toggle_recording', methods=['POST'])
@@ -1341,6 +1356,13 @@ def api_toggle_adas():
     state["adas_enabled"] = data.get('enabled', False)
     return jsonify({"adas_enabled": state["adas_enabled"]})
 
+
+@app.route('/api/toggle_debug_feed', methods=['POST'])
+def api_toggle_debug_feed():
+    global state
+    data = request.json
+    state["debug_feed_active"] = data.get('enabled', not state["debug_feed_active"])
+    return jsonify({"debug_feed_active": state["debug_feed_active"]})
 
 @app.route('/api/calibrate', methods=['POST'])
 def api_calibrate():
