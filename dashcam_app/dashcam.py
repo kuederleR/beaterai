@@ -529,6 +529,32 @@ def capture_loop():
 # --- Thread 2: AI Inference and Web Encoding ---
 import warnings
 
+class StepTimer:
+    def __init__(self, window_size=30, log_interval=30):
+        self.times = {}
+        self.window_size = window_size
+        self.log_interval = log_interval
+        self.frame_count = 0
+
+    def track(self, name, elapsed):
+        if name not in self.times:
+            self.times[name] = []
+        self.times[name].append(elapsed)
+        if len(self.times[name]) > self.window_size:
+            self.times[name].pop(0)
+
+    def avg(self, name):
+        vals = self.times.get(name, [])
+        return sum(vals) / len(vals) if vals else 0.0
+
+    def maybe_log(self):
+        self.frame_count += 1
+        if self.frame_count % self.log_interval != 0:
+            return
+        ordered = ["total", "preprocess", "inference", "remap", "lane_est", "sliding_win", "fcw", "bev_render", "encode"]
+        parts = [f"{n}: {self.avg(n)*1000:.1f}ms" for n in ordered if n in self.times]
+        total_avg = self.avg("total")
+        print(f"[PERF] {' | '.join(parts)} | total: {total_avg*1000:.1f}ms ({1.0/total_avg:.1f}fps)", flush=True)
 
 
 def auto_calculate_lane_center_bias():
@@ -819,6 +845,8 @@ def inference_loop():
     state["yolop_device"] = str(yolop_detector.device)
     print(f"\n{'='*50}\n[DEBUG - GPU CHECK]\nCUDA Available: {state['cuda_available']}\nGPU Name: {state['gpu_device_name']}\nYOLOpv2 Device Target: {yolop_detector.device}\n{'='*50}\n", flush=True)
 
+    timer = StepTimer()
+
     while True:
         try:
             has_frame = False
@@ -831,7 +859,9 @@ def inference_loop():
             if not has_frame:
                 time.sleep(0.01)
                 continue
-                
+
+            _t_frame = time.perf_counter()
+
             # Ensure im0 is strictly 3-channel BGR
             if len(im0.shape) == 2:
                 im0 = cv2.cvtColor(im0, cv2.COLOR_GRAY2BGR)
@@ -841,6 +871,7 @@ def inference_loop():
             # Resize for inference (raw feed)
             im_infer = cv2.resize(im0, (INFER_WIDTH, INFER_HEIGHT), interpolation=cv2.INTER_LINEAR)
             im_debug = im_infer.copy()
+            timer.track("preprocess", time.perf_counter() - _t_frame)
 
             fcw_triggered = False
             ldw_triggered = False
@@ -861,11 +892,15 @@ def inference_loop():
 
             if state["adas_enabled"] or lane_perception_active:
                 # Run YOLOpv2 inference
+                _t_inf = time.perf_counter()
                 det_boxes, da_mask, ll_mask = yolop_detector.detect(im_infer)
+                timer.track("inference", time.perf_counter() - _t_inf)
                 
                 # Undistort binary masks via precomputed remap (no float conversion needed)
+                _t_remap = time.perf_counter()
                 da_mask_undist = cv2.remap(da_mask, UNDIST_MAP1, UNDIST_MAP2, cv2.INTER_NEAREST) if da_mask is not None else None
                 ll_mask_undist = cv2.remap(ll_mask, UNDIST_MAP1, UNDIST_MAP2, cv2.INTER_NEAREST) if ll_mask is not None else None
+                timer.track("remap", time.perf_counter() - _t_remap)
 
                 is_calibrated = state["calibration"] is not None and state["calibration_frames_left"] == 0
 
@@ -874,10 +909,12 @@ def inference_loop():
                 detected_vp = None
                 lane_lines_undist = None
                 if not is_calibrated and ll_mask is not None:
+                    _t_est = time.perf_counter()
                     lane_lines_raw = estimate_lane_lines_in_image(ll_mask, car_center_x)
                     detected_vp = None if lane_lines_raw is None else (lane_lines_raw["vp_x"], lane_lines_raw["vp_y"])
                     if ll_mask_undist is not None:
                         lane_lines_undist = estimate_lane_lines_in_image(ll_mask_undist, car_center_x)
+                    timer.track("lane_est", time.perf_counter() - _t_est)
 
                 # Lens Calibration VP update
                 if state["calibration_frames_left"] > 0 and detected_vp is not None:
@@ -911,7 +948,9 @@ def inference_loop():
                 # Fit lane lines in road plane
                 left_poly, right_poly = None, None
                 if ll_mask_undist is not None:
+                    _t_sw = time.perf_counter()
                     left_poly, right_poly = find_lanes_sliding_window(ll_mask_undist, bev_display_h, car_center_x_meters)
+                    timer.track("sliding_win", time.perf_counter() - _t_sw)
 
                 # Smooth polynomials using history
                 def smooth_poly(poly, history, max_history=8):
@@ -930,6 +969,7 @@ def inference_loop():
 
                 # Project vehicles to road plane and calculate FCW
                 if state["adas_enabled"] and det_boxes is not None:
+                    _t_fcw = time.perf_counter()
                     for box in det_boxes:
                         x1, y1, x2, y2 = box["x1"], box["y1"], box["x2"], box["y2"]
                         u_bot = (x1 + x2) / 2.0
@@ -963,6 +1003,7 @@ def inference_loop():
                                 "y2": round(float(y2_bev), 2),
                                 "threat": is_threat,
                             })
+                    timer.track("fcw", time.perf_counter() - _t_fcw)
 
                 # Calculate LDW severities in road plane
                 y_eval = 5.0
@@ -1023,6 +1064,7 @@ def inference_loop():
                         ldw_triggered = True
 
                 # Render only the bottom 30m of the BEV map (600px)
+                _t_render = time.perf_counter()
                 RENDER_H = 600
                 im_bev = np.zeros((RENDER_H, BEV_WIDTH, 3), dtype=np.uint8)
 
@@ -1162,8 +1204,10 @@ def inference_loop():
                     for box in det_boxes:
                         bx1, by1, bx2, by2 = int(box["x1"]), int(box["y1"]), int(box["x2"]), int(box["y2"])
                         cv2.rectangle(im_debug, (bx1, by1), (bx2, by2), (0, 255, 0), 2)
+                timer.track("bev_render", time.perf_counter() - _t_render)
             else:
                 # ADAS disabled fallback: just show blank BEV frame and ego-car
+                _t_render = time.perf_counter()
                 im_bev = np.zeros((BEV_HEIGHT, BEV_WIDTH, 3), dtype=np.uint8)
                 car_center_bev_x = int(road_to_bev(np.array([[car_center_x_meters, 1.0]]))[0, 0])
                 cv2.line(im_bev, (car_center_bev_x, 0), (car_center_bev_x, BEV_HEIGHT - 1), (100, 100, 100), 1)
@@ -1180,20 +1224,26 @@ def inference_loop():
                 cv2.fillPoly(overlay, [ego_corners_bev], (60, 60, 60))
                 cv2.polylines(overlay, [ego_corners_bev], True, (255, 120, 0), 2)
                 cv2.addWeighted(overlay, 0.6, im_bev, 0.4, 0, dst=im_bev)
+                timer.track("bev_render", time.perf_counter() - _t_render)
 
             # Update global state for UI alerts
             state["fcw_warning"] = fcw_triggered
             state["ldw_warning"] = ldw_triggered
 
             # Encode BEV frame to BMP always; debug frame only if active
+            _t_enc = time.perf_counter()
             _, buf = cv2.imencode('.bmp', im_bev)
             if state["debug_feed_active"]:
                 _, buf_debug = cv2.imencode('.bmp', im_debug)
+            timer.track("encode", time.perf_counter() - _t_enc)
             with frame_lock:
                 latest_web_frame = buf.tobytes()
                 if state["debug_feed_active"]:
                     latest_debug_frame = buf_debug.tobytes()
                 latest_lane_overlay = lane_overlay_payload
+
+            timer.track("total", time.perf_counter() - _t_frame)
+            timer.maybe_log()
 
             fps_counter += 1
             elapsed = time.time() - fps_start
