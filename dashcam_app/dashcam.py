@@ -110,6 +110,12 @@ H_inv = None
 H_cam2bev = None
 ROAD_TO_CAMERA_MATRIX = None
 
+# Precomputed undistortion remap maps for faster binary mask processing
+UNDIST_MAP1, UNDIST_MAP2 = cv2.initUndistortRectifyMap(
+    K_INFER, DIST_COEFF, None, K_INFER,
+    (INFER_WIDTH, INFER_HEIGHT), cv2.CV_32FC1
+)
+
 
 def undistort_image_points(pts):
     if len(pts) == 0:
@@ -856,13 +862,21 @@ def inference_loop():
                 # Run YOLOpv2 inference
                 det_boxes, da_mask, ll_mask = yolop_detector.detect(im_infer)
                 
-                # Undistort masks only for BEV warping. Point projection now undistorts on demand.
-                da_mask_undist = (cv2.undistort((da_mask * 255).astype(np.uint8), K_INFER, DIST_COEFF) > 127).astype(np.uint8) if da_mask is not None else None
-                ll_mask_undist = (cv2.undistort((ll_mask * 255).astype(np.uint8), K_INFER, DIST_COEFF) > 127).astype(np.uint8) if ll_mask is not None else None
+                # Undistort binary masks via precomputed remap (no float conversion needed)
+                da_mask_undist = cv2.remap(da_mask, UNDIST_MAP1, UNDIST_MAP2, cv2.INTER_NEAREST) if da_mask is not None else None
+                ll_mask_undist = cv2.remap(ll_mask, UNDIST_MAP1, UNDIST_MAP2, cv2.INTER_NEAREST) if ll_mask is not None else None
 
-                lane_lines_raw = estimate_lane_lines_in_image(ll_mask, car_center_x) if ll_mask is not None else None
-                detected_vp = None if lane_lines_raw is None else (lane_lines_raw["vp_x"], lane_lines_raw["vp_y"])
-                lane_lines_undist = estimate_lane_lines_in_image(ll_mask_undist, car_center_x) if ll_mask_undist is not None else None
+                is_calibrated = state["calibration"] is not None and state["calibration_frames_left"] == 0
+
+                # Skip expensive image-space lane estimation when calibration is done
+                lane_lines_raw = None
+                detected_vp = None
+                lane_lines_undist = None
+                if not is_calibrated and ll_mask is not None:
+                    lane_lines_raw = estimate_lane_lines_in_image(ll_mask, car_center_x)
+                    detected_vp = None if lane_lines_raw is None else (lane_lines_raw["vp_x"], lane_lines_raw["vp_y"])
+                    if ll_mask_undist is not None:
+                        lane_lines_undist = estimate_lane_lines_in_image(ll_mask_undist, car_center_x)
 
                 # Lens Calibration VP update
                 if state["calibration_frames_left"] > 0 and detected_vp is not None:
@@ -886,10 +900,12 @@ def inference_loop():
                 car_center_road = image_to_road(car_center_pts)[0]
                 car_center_x_meters = car_center_road[0] if not np.isnan(car_center_road[0]) else 0.0
 
-                # Calculate BEV homography FIRST to pass to sliding window
-                bev_display_h = build_lane_rectification_homography(lane_lines_undist)
-                if bev_display_h is None:
-                    bev_display_h = H_cam2bev
+                # Use pre-calibrated homography when done; update from lane lines during calibration
+                bev_display_h = H_cam2bev
+                if not is_calibrated and lane_lines_undist is not None:
+                    h_rect = build_lane_rectification_homography(lane_lines_undist)
+                    if h_rect is not None:
+                        bev_display_h = h_rect
 
                 # Fit lane lines in road plane
                 left_poly, right_poly = None, None
@@ -1117,8 +1133,8 @@ def inference_loop():
                     lane_width=lane_width,
                 )
                 
-                # Draw debug overlays on im_debug
-                im_debug = im_infer.copy()
+                # Draw debug overlays on im_debug (reuse im_infer, no copy needed)
+                im_debug = im_infer
                 vp = state.get("calibration")
                 if vp is not None:
                     cv2.circle(im_debug, (int(vp["vp_x"]), int(vp["vp_y"])), 5, (0, 0, 255), -1)
@@ -1126,9 +1142,8 @@ def inference_loop():
                     cv2.circle(im_debug, (int(K_INFER[0, 2]), 160), 5, (0, 0, 255), -1)
 
                 if da_mask is not None:
-                    road_overlay = im_debug.copy()
-                    road_overlay[da_mask > 0] = (0, 140, 0)
-                    cv2.addWeighted(road_overlay, 0.28, im_debug, 0.72, 0, dst=im_debug)
+                    da_bool = da_mask.astype(bool, copy=False)
+                    im_debug[da_bool] = (im_debug[da_bool].astype(np.float32) * 0.72 + np.array([0, 100, 0], dtype=np.float32) * 0.28).astype(np.uint8)
                 
                 if ll_mask is not None:
                     im_debug[ll_mask > 0] = (0, 255, 255)
@@ -1169,9 +1184,9 @@ def inference_loop():
             state["fcw_warning"] = fcw_triggered
             state["ldw_warning"] = ldw_triggered
 
-            # Encode to JPEG for the web interface
-            _, buf = cv2.imencode('.jpg', im_bev, [cv2.IMWRITE_JPEG_QUALITY, 70])
-            _, buf_debug = cv2.imencode('.jpg', im_debug, [cv2.IMWRITE_JPEG_QUALITY, 60])
+            # Encode to JPEG for the web interface (lower quality = faster encode)
+            _, buf = cv2.imencode('.jpg', im_bev, [cv2.IMWRITE_JPEG_QUALITY, 30])
+            _, buf_debug = cv2.imencode('.jpg', im_debug, [cv2.IMWRITE_JPEG_QUALITY, 20])
             with frame_lock:
                 latest_web_frame = buf.tobytes()
                 latest_debug_frame = buf_debug.tobytes()
