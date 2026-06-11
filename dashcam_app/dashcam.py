@@ -670,25 +670,37 @@ def find_lanes_sliding_window(ll_mask_undist, bev_display_h, car_center_x_meters
     nonzeroy = np.array(nonzero[0])
     nonzerox = np.array(nonzero[1])
 
+    # Pre-group pixels by which y-window they fall into.
+    # This avoids O(n_peaks * n_windows * n_nonzero) boolean indexing.
+    win_ids = (BEV_HEIGHT - 1 - nonzeroy) // window_height
+    win_ids = np.clip(win_ids, 0, nwindows - 1)
+    order = np.argsort(win_ids)
+    sorted_wids = win_ids[order]
+    sorted_x = nonzerox[order]
+    sorted_y = nonzeroy[order]
+    splits = np.searchsorted(sorted_wids, np.arange(1, nwindows))
+
     lane_points = {p: ([], []) for p in peaks}
 
     for peak in peaks:
         current_x = peak
-        for window in range(nwindows):
-            win_y_low = BEV_HEIGHT - (window + 1) * window_height
-            win_y_high = BEV_HEIGHT - window * window_height
-            win_x_low = current_x - margin
-            win_x_high = current_x + margin
+        for w in range(nwindows):
+            w_start = 0 if w == 0 else splits[w - 1]
+            w_end = splits[w] if w < len(splits) else len(sorted_x)
+            if w_start >= w_end:
+                continue
+            w_x = sorted_x[w_start:w_end]
+            w_y = sorted_y[w_start:w_end]
 
-            good_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
-                         (nonzerox >= win_x_low) &  (nonzerox < win_x_high)).nonzero()[0]
+            x_mask = (w_x >= current_x - margin) & (w_x < current_x + margin)
+            good_inds = np.flatnonzero(x_mask)
 
             if len(good_inds) > 0:
-                lane_points[peak][0].extend(nonzerox[good_inds])
-                lane_points[peak][1].extend(nonzeroy[good_inds])
+                lane_points[peak][0].extend(w_x[good_inds].tolist())
+                lane_points[peak][1].extend(w_y[good_inds].tolist())
 
             if len(good_inds) > minpix:
-                current_x = int(np.mean(nonzerox[good_inds]))
+                current_x = int(np.mean(w_x[good_inds]))
 
     s_x = (BEV_WIDTH - 1) / (X_MAX - X_MIN)
     s_y = (BEV_HEIGHT - 1) / (Y_MAX - Y_MIN)
