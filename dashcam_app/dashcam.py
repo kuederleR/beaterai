@@ -160,7 +160,9 @@ state = {
     "ldw_right_counter": 0,
     "hood_y": None,
     "hood_row_history": [],
-    "hood_detection_frames_left": HOOD_CALIBRATION_FRAMES
+    "hood_detection_frames_left": HOOD_CALIBRATION_FRAMES,
+    "lane_position": 0.5,
+    "lane_width": 0.0,
 }
 
 def update_homography(vp_override=None):
@@ -612,35 +614,31 @@ def find_lanes_sliding_window(ll_mask_undist, bev_display_h, car_center_x_meters
     if ll_mask_undist is None:
         return None, None
 
-    # Warp to BEV to do sliding window
     ll_bev = cv2.warpPerspective(ll_mask_undist, bev_display_h, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
-    
-    # Histogram of the bottom quarter of the image
+
     histogram = np.sum(ll_bev[int(BEV_HEIGHT*3/4):, :], axis=0)
-    
-    # Find peaks in the histogram
+
     peaks = []
     threshold = np.max(histogram) * 0.1
     if threshold > 0:
         for i in range(1, BEV_WIDTH - 1):
             if histogram[i] > threshold and histogram[i] >= histogram[i-1] and histogram[i] >= histogram[i+1]:
-                # Non-maximum suppression
-                if not peaks or i - peaks[-1] > 20:
+                if not peaks or i - peaks[-1] > 30:
                     peaks.append(i)
                 elif histogram[i] > histogram[peaks[-1]]:
                     peaks[-1] = i
 
     nwindows = 20
     window_height = int(BEV_HEIGHT / nwindows)
-    margin = 20
-    minpix = 5
-    
+    margin = 40
+    minpix = 8
+
     nonzero = ll_bev.nonzero()
     nonzeroy = np.array(nonzero[0])
     nonzerox = np.array(nonzero[1])
-    
+
     lane_points = {p: ([], []) for p in peaks}
-    
+
     for peak in peaks:
         current_x = peak
         for window in range(nwindows):
@@ -648,59 +646,75 @@ def find_lanes_sliding_window(ll_mask_undist, bev_display_h, car_center_x_meters
             win_y_high = BEV_HEIGHT - window * window_height
             win_x_low = current_x - margin
             win_x_high = current_x + margin
-            
-            good_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & 
+
+            good_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
                          (nonzerox >= win_x_low) &  (nonzerox < win_x_high)).nonzero()[0]
-            
+
             if len(good_inds) > 0:
                 lane_points[peak][0].extend(nonzerox[good_inds])
                 lane_points[peak][1].extend(nonzeroy[good_inds])
-                
+
             if len(good_inds) > minpix:
                 current_x = int(np.mean(nonzerox[good_inds]))
-                
+
     s_x = (BEV_WIDTH - 1) / (X_MAX - X_MIN)
     s_y = (BEV_HEIGHT - 1) / (Y_MAX - Y_MIN)
-    
+
     lane_polys = []
     for peak, (xs, ys) in lane_points.items():
         if len(xs) > 20:
             xs = np.array(xs)
             ys = np.array(ys)
-            
+
             road_Xs = xs / s_x + X_MIN
             road_Ys = Y_MAX - ys / s_y
-            
+
             try:
                 poly = np.polyfit(road_Ys, road_Xs, 2)
                 fit_Xs = np.polyval(poly, road_Ys)
                 residuals = np.abs(road_Xs - fit_Xs)
-                inliers = residuals < 0.25 # within 25 cm
+                inliers = residuals < 0.25
                 if np.sum(inliers) >= 10:
                     poly = np.polyfit(road_Ys[inliers], road_Xs[inliers], 2)
                     lane_polys.append(poly)
             except Exception:
                 pass
-                
+
     left_poly = None
     right_poly = None
-    eval_y = 5.0
-    best_left_diff = -999.0
-    best_right_diff = 999.0
-    
+    eval_ys = [5.0, 15.0, 25.0]
+    eval_weights = [0.5, 0.3, 0.2]
+
+    best_left_score = -999.0
+    best_right_score = 999.0
+
     for poly in lane_polys:
-        x_at_eval = np.polyval(poly, eval_y)
-        diff = x_at_eval - car_center_x_meters
-        if diff < -0.3 and diff > best_left_diff:
-            best_left_diff = diff
+        weighted_diff = 0.0
+        for ey, w in zip(eval_ys, eval_weights):
+            x_at_eval = np.polyval(poly, ey)
+            weighted_diff += w * (x_at_eval - car_center_x_meters)
+
+        if weighted_diff < -0.3 and weighted_diff > best_left_score:
+            best_left_score = weighted_diff
             left_poly = poly
-        elif diff > 0.3 and diff < best_right_diff:
-            best_right_diff = diff
+        elif weighted_diff > 0.3 and weighted_diff < best_right_score:
+            best_right_score = weighted_diff
             right_poly = poly
-            
+
+    if left_poly is not None and right_poly is not None:
+        widths = []
+        for ey in eval_ys:
+            lx = np.polyval(left_poly, ey)
+            rx = np.polyval(right_poly, ey)
+            w = rx - lx
+            if 2.0 < w < 6.0:
+                widths.append(w)
+        if len(widths) < 2:
+            return None, None
+
     return left_poly, right_poly
 
-def build_lane_overlay_payload(left_poly, right_poly, left_severity=0.0, right_severity=0.0, fcw_warning=False, fcw_boxes=None):
+def build_lane_overlay_payload(left_poly, right_poly, left_severity=0.0, right_severity=0.0, fcw_warning=False, fcw_boxes=None, lane_position=None, lane_width=None):
     if left_poly is None and right_poly is None:
         return {
             "width": BEV_WIDTH, "height": BEV_HEIGHT, "top_y": 0, "bottom_y": BEV_HEIGHT - 1,
@@ -708,6 +722,8 @@ def build_lane_overlay_payload(left_poly, right_poly, left_severity=0.0, right_s
             "left_zone": [], "right_zone": [],
             "left_severity": float(left_severity), "right_severity": float(right_severity),
             "fcw_warning": bool(fcw_warning), "fcw_boxes": fcw_boxes or [],
+            "lane_position": lane_position if lane_position is not None else 0.5,
+            "lane_width": lane_width if lane_width is not None else 0.0,
         }
 
     # Evaluate polynomials to build BEV points
@@ -737,11 +753,7 @@ def build_lane_overlay_payload(left_poly, right_poly, left_severity=0.0, right_s
         center_pts_road = np.stack([center_xs, eval_ys], axis=1)
         center_pts_bev = road_to_bev(center_pts_road)
         center_points = center_pts_bev.tolist()
-    
-    left_points = left_pts_bev.tolist()
-    right_points = right_pts_bev.tolist()
-    center_points = center_pts_bev.tolist()
-    
+
     polygon = []
     if len(left_points) >= 2 and len(right_points) >= 2:
         polygon = left_points + list(reversed(right_points))
@@ -768,6 +780,8 @@ def build_lane_overlay_payload(left_poly, right_poly, left_severity=0.0, right_s
         "right_severity": float(right_severity),
         "fcw_warning": bool(fcw_warning),
         "fcw_boxes": fcw_boxes or [],
+        "lane_position": lane_position if lane_position is not None else 0.5,
+        "lane_width": lane_width if lane_width is not None else 0.0,
     }
 
 def inference_loop():
@@ -1033,6 +1047,26 @@ def inference_loop():
                 cv2.fillPoly(im_bev, [ego_corners_int], (60, 60, 60))
                 cv2.polylines(im_bev, [ego_corners_int], True, (255, 120, 0), 2)
 
+                # Draw lane position indicator bar at top of BEV
+                if left_poly_smoothed is not None and right_poly_smoothed is not None:
+                    y_lane = 5.0
+                    lx = np.polyval(left_poly_smoothed, y_lane)
+                    rx = np.polyval(right_poly_smoothed, y_lane)
+                    lw = rx - lx
+                    if lw > 0.5:
+                        pos = (car_center_x_meters - lx) / lw
+                        pos = float(np.clip(pos, 0.0, 1.0))
+                        bar_y = 8
+                        bar_h = 8
+                        bar_margin = 30
+                        bar_left = bar_margin
+                        bar_right = BEV_WIDTH - bar_margin
+                        bar_mid = int(bar_left + pos * (bar_right - bar_left))
+                        cv2.rectangle(im_bev, (bar_left, bar_y), (bar_right, bar_y + bar_h), (60, 60, 60), -1)
+                        cv2.rectangle(im_bev, (bar_left, bar_y), (bar_right, bar_y + bar_h), (180, 180, 180), 1)
+                        cv2.drawMarker(im_bev, (bar_mid, bar_y + bar_h // 2), (0, 255, 255),
+                                       cv2.MARKER_TRIANGLE_DOWN, 10, 2)
+
                 # Draw vehicles as red dots
                 for box in fcw_overlay_boxes:
                     v_bev = box["y2"] # y2 corresponds to the bottom of the vehicle in full BEV
@@ -1042,6 +1076,21 @@ def inference_loop():
                         cv2.circle(im_bev, (int(u_bev), int(v_render)), 6, (0, 0, 255), -1, cv2.LINE_AA)
                         cv2.circle(im_bev, (int(u_bev), int(v_render)), 6, (255, 255, 255), 1, cv2.LINE_AA)
 
+                # Calculate vehicle lane position (0=left line, 1=right line)
+                lane_position = 0.5
+                lane_width = 0.0
+                if left_poly_smoothed is not None and right_poly_smoothed is not None:
+                    y_lane = 5.0
+                    lx = np.polyval(left_poly_smoothed, y_lane)
+                    rx = np.polyval(right_poly_smoothed, y_lane)
+                    lw = rx - lx
+                    if lw > 0.5:
+                        lane_width = lw
+                        lane_position = (car_center_x_meters - lx) / lw
+                        lane_position = float(np.clip(lane_position, 0.0, 1.0))
+                state["lane_position"] = lane_position
+                state["lane_width"] = lane_width
+
                 # Build final payload
                 lane_overlay_payload = build_lane_overlay_payload(
                     left_poly_smoothed,
@@ -1050,6 +1099,8 @@ def inference_loop():
                     right_severity=right_severity,
                     fcw_warning=fcw_triggered,
                     fcw_boxes=fcw_overlay_boxes,
+                    lane_position=lane_position,
+                    lane_width=lane_width,
                 )
                 
                 # Draw debug overlays on im_debug
@@ -1243,7 +1294,9 @@ def status():
         "lens_calibrated": state["calibration"] is not None,
         "ldw_calibrated": state["ldw_calibration"] is not None,
         "ldw_calibrated_left": state["ldw_calibration"] is not None and "left_comfort_dist" in state["ldw_calibration"],
-        "ldw_calibrated_right": state["ldw_calibration"] is not None and "right_comfort_dist" in state["ldw_calibration"]
+        "ldw_calibrated_right": state["ldw_calibration"] is not None and "right_comfort_dist" in state["ldw_calibration"],
+        "lane_position": state.get("lane_position", 0.5),
+        "lane_width": state.get("lane_width", 0.0),
     })
 
 @app.route('/api/toggle_recording', methods=['POST'])
