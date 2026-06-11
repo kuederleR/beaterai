@@ -169,6 +169,7 @@ state = {
     "hood_detection_frames_left": HOOD_CALIBRATION_FRAMES,
     "lane_position": 0.5,
     "lane_width": 0.0,
+    "feeds_active": True,
 }
 
 def update_homography(vp_override=None):
@@ -1184,12 +1185,14 @@ def inference_loop():
             state["fcw_warning"] = fcw_triggered
             state["ldw_warning"] = ldw_triggered
 
-            # Encode to JPEG for the web interface (lower quality = faster encode)
-            _, buf = cv2.imencode('.jpg', im_bev, [cv2.IMWRITE_JPEG_QUALITY, 30])
-            _, buf_debug = cv2.imencode('.jpg', im_debug, [cv2.IMWRITE_JPEG_QUALITY, 20])
+            # Encode to JPEG for the web interface (skip entirely when feeds disabled)
+            if state["feeds_active"]:
+                _, buf = cv2.imencode('.jpg', im_bev, [cv2.IMWRITE_JPEG_QUALITY, 30])
+                _, buf_debug = cv2.imencode('.jpg', im_debug, [cv2.IMWRITE_JPEG_QUALITY, 20])
             with frame_lock:
-                latest_web_frame = buf.tobytes()
-                latest_debug_frame = buf_debug.tobytes()
+                if state["feeds_active"]:
+                    latest_web_frame = buf.tobytes()
+                    latest_debug_frame = buf_debug.tobytes()
                 latest_lane_overlay = lane_overlay_payload
 
             fps_counter += 1
@@ -1204,10 +1207,21 @@ def inference_loop():
 
 
 def generate_mjpeg():
+    no_feed_frame = None
     while True:
         with frame_lock:
+            feeds_active = state.get("feeds_active", True)
             frame = latest_web_frame
-        if frame is None:
+        if not feeds_active:
+            if no_feed_frame is None:
+                img = np.zeros((480, 800, 3), dtype=np.uint8)
+                cv2.putText(img, "Video feeds disabled",
+                            (40, 240), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                            (100, 100, 100), 2)
+                _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                no_feed_frame = buf.tobytes()
+            frame = no_feed_frame
+        elif frame is None:
             wait_img = np.zeros((480, 800, 3), dtype=np.uint8)
             cv2.putText(wait_img, "Initializing ADAS models...",
                         (40, 240), cv2.FONT_HERSHEY_SIMPLEX, 1,
@@ -1230,10 +1244,21 @@ def video_feed():
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
 def generate_debug_mjpeg():
+    no_feed_frame = None
     while True:
         with frame_lock:
+            feeds_active = state.get("feeds_active", True)
             frame = latest_debug_frame
-        if frame is None:
+        if not feeds_active:
+            if no_feed_frame is None:
+                img = np.zeros((400, 640, 3), dtype=np.uint8)
+                cv2.putText(img, "Debug feed disabled",
+                            (40, 200), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                            (100, 100, 100), 2)
+                _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                no_feed_frame = buf.tobytes()
+            frame = no_feed_frame
+        elif frame is None:
             wait_img = np.zeros((400, 640, 3), dtype=np.uint8)
             cv2.putText(wait_img, "Initializing Debug Feed...",
                         (40, 200), cv2.FONT_HERSHEY_SIMPLEX, 1,
@@ -1326,6 +1351,7 @@ def status():
         "ldw_calibrated_right": state["ldw_calibration"] is not None and "right_comfort_dist" in state["ldw_calibration"],
         "lane_position": state.get("lane_position", 0.5),
         "lane_width": state.get("lane_width", 0.0),
+        "feeds_active": state.get("feeds_active", True),
     })
 
 @app.route('/api/toggle_recording', methods=['POST'])
@@ -1342,6 +1368,13 @@ def api_toggle_adas():
     return jsonify({"adas_enabled": state["adas_enabled"]})
 
 
+
+@app.route('/api/toggle_feeds', methods=['POST'])
+def api_toggle_feeds():
+    global state
+    data = request.json
+    state["feeds_active"] = data.get('enabled', not state["feeds_active"])
+    return jsonify({"feeds_active": state["feeds_active"]})
 
 @app.route('/api/calibrate', methods=['POST'])
 def api_calibrate():

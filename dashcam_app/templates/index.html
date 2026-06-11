@@ -412,8 +412,11 @@
                 <div id="lanePosDisplay">Lane Pos: --</div>
                 <div id="durationDisplay" style="display:none; color: #fca5a5;">REC: 00:00</div>
             </div>
-            <img id="videoFeed" src="/debug_feed" class="video-feed" alt="Perspective Mask Feed" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjgwIiBoZWlnaHQ9IjgwMCI+PHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsbD0iIzIyMiIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LWZhbWlseT0iYXJpYWwiIGZvbnQtc2l6ZT0iMjQiIGZpbGw9IiM2NjYiIGRvbWluYW50LWJhc2VsaW5lPSJtaWRkbGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPlBlcnNwZWN0aXZlIEZlZWQgT2ZmbGluZTwvdGV4dD48L3N2Zz4='" />
-        </div>
+            <div id="feedsOverlay" style="display:none; position:absolute; inset:0; background:rgba(0,0,0,0.75); z-index:3; align-items:center; justify-content:center; flex-direction:column; gap:8px;">
+                <span style="color:#64748b; font-size:24px; font-weight:600;">Feeds Disabled</span>
+                <span style="color:#475569; font-size:13px;">Processing continues in background</span>
+            </div>
+            <img id="videoFeed" src="/debug_feed" class="video-feed" alt="Perspective Mask Feed" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjgwIiBoZWlnaHQ9IjgwMCI+PHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsbD0iIzIyMiIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LWZhbWlseT0iYXJpYWlsIiBmb250LXNpemU9IjI0IiBmaWxsPSIjNjY2IiBkb21pbmFudC1iYXNlbGluZT0ibWlkZGxlIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5QZXJzcGVjdGl2ZSBGZWVkIE9mZmxpbmU8L3RleHQ+PC9zdmc+' />
     </div>
 
     <div class="video-container" style="margin-bottom: 24px;">
@@ -422,6 +425,10 @@
             <span style="color: var(--text-secondary); font-size: 11px;">Current BEV output for comparison</span>
         </div>
         <div style="position: relative; width: 100%; display: flex; justify-content: center; background: #000; overflow: hidden; padding: 10px 0;">
+            <div id="feedsOverlayBev" style="display:none; position:absolute; inset:0; background:rgba(0,0,0,0.75); z-index:3; align-items:center; justify-content:center; flex-direction:column; gap:8px;">
+                <span style="color:#64748b; font-size:24px; font-weight:600;">Feeds Disabled</span>
+                <span style="color:#475569; font-size:13px;">Processing continues in background</span>
+            </div>
             <img id="debugFeed" src="/video_feed" style="max-width: 100%; max-height: 600px; object-fit: contain;" alt="Bird's-Eye Feed" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NDAiIGhlaWdodD0iNDAwIj48cmVjdCB3aWR0aD0iMTAwJSIgZmlsbD0iIzIyMiIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LWZhbWlseT0iYXJpYWwiIGZvbnQtc2l6ZT0iMTYiIGZpbGw9IiM2NjYiIGRvbWluYW50LWJhc2VsaW5lPSJtaWRkbGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkJFViBGZWVkIE9mZmxpbmU8L3RleHQ+PC9zdmc+='" />
         </div>
     </div>
@@ -486,6 +493,19 @@
         </div>
 
         <div class="control-card">
+            <div class="toggle-container" onclick="document.getElementById('feedsToggle').click()">
+                <span class="toggle-label">Video Feeds</span>
+                <label class="switch" onclick="event.stopPropagation()">
+                    <input type="checkbox" id="feedsToggle" checked onchange="toggleFeeds(this)">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div style="font-size: 12px; color: var(--text-secondary); text-align: center; margin-top: 8px;">
+                Disable to free CPU/GPU from JPEG encoding.
+            </div>
+        </div>
+
+        <div class="control-card">
             <div class="toggle-container">
                 <span class="toggle-label">Audio Mode</span>
                 <select id="audioModeSelect" onchange="changeAudioMode(this.value)" style="background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: white; padding: 6px 12px; border-radius: 8px; font-size: 14px; outline: none; cursor: pointer;">
@@ -514,6 +534,7 @@
         // State
         let isRecording = false;
         let isAdasEnabled = false;
+        let isFeedsActive = true;
         let isUpdatingCenter = false;
         let statusPollHandle = null;
         let statusRequestInFlight = false;
@@ -784,6 +805,13 @@
                     statusText.innerText = 'Live View';
                 }
 
+                // Update Feeds UI based on server state
+                if (data.feeds_active !== undefined && data.feeds_active !== isFeedsActive) {
+                    isFeedsActive = data.feeds_active;
+                    document.getElementById('feedsToggle').checked = isFeedsActive;
+                    updateFeedsUI();
+                }
+
                 // Update ADAS UI based on server state
                 if (data.adas_enabled !== isAdasEnabled) {
                     isAdasEnabled = data.adas_enabled;
@@ -837,6 +865,14 @@
             statusPollHandle = window.setTimeout(pollStatus, 700);
         }
 
+        function updateFeedsUI() {
+            const overlay = document.getElementById('feedsOverlay');
+            const overlayBev = document.getElementById('feedsOverlayBev');
+            const display = isFeedsActive ? 'none' : 'flex';
+            if (overlay) overlay.style.display = display;
+            if (overlayBev) overlayBev.style.display = display;
+        }
+
         function updateRecordingUI() {
             if (isRecording) {
                 recordBtn.classList.add('active');
@@ -865,6 +901,24 @@
                 // Revert on error
                 isRecording = !isRecording;
                 updateRecordingUI();
+            }
+        }
+
+        async function toggleFeeds(checkbox) {
+            isFeedsActive = checkbox.checked;
+            
+            try {
+                const res = await fetch('/api/toggle_feeds', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: isFeedsActive })
+                });
+                const data = await res.json();
+                isFeedsActive = data.feeds_active;
+                checkbox.checked = isFeedsActive;
+            } catch(e) {
+                isFeedsActive = !isFeedsActive;
+                checkbox.checked = isFeedsActive;
             }
         }
 
