@@ -237,6 +237,47 @@ class YolopDetector:
             opset_version=12,
             do_constant_folding=True,
         )
+        # Post-process ONNX to remove SequenceConstruct ops (not supported by TRT)
+        try:
+            self._flatten_onnx_sequences(onnx_path)
+        except Exception as e:
+            print(f"[WARN] ONNX sequence flattening failed: {e}. TRT build may fail.", flush=True)
+
+    @staticmethod
+    def _flatten_onnx_sequences(onnx_path):
+        import onnx
+        from onnx import helper, TensorProto
+
+        model = onnx.load(onnx_path)
+        graph = model.graph
+
+        seq_outputs = {}
+        for node in list(graph.node):
+            if node.op_type == 'SequenceConstruct':
+                seq_outputs[node.output[0]] = list(node.input)
+                graph.node.remove(node)
+
+        original_outputs = list(graph.output)
+        del graph.output[:]
+        for output in original_outputs:
+            if output.name in seq_outputs:
+                for inp_name in seq_outputs[output.name]:
+                    val_info = next(
+                        (vi for vi in graph.value_info if vi.name == inp_name),
+                        None
+                    )
+                    shape = None
+                    if val_info and val_info.type.tensor_type.shape:
+                        shape = [d.dim_value for d in val_info.type.tensor_type.shape.dim]
+                    new_out = helper.make_tensor_value_info(
+                        inp_name, TensorProto.FLOAT, shape
+                    )
+                    graph.output.append(new_out)
+            else:
+                graph.output.append(output)
+
+        onnx.save(model, onnx_path)
+        print(f"[INFO] ONNX sequences flattened: {seq_outputs}", flush=True)
 
     def download_model_if_missing(self):
         if not os.path.exists(self.model_path):
