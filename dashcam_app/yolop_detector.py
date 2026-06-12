@@ -319,15 +319,21 @@ class YolopDetector:
             # --- TensorRT path ---
             try:
                 out = trt.infer(img_chw)
+                t0 = time.perf_counter()
                 pred = [torch.from_numpy(out[i]).to(self.device) for i in range(3)]
                 n = len(out)
                 seg = torch.from_numpy(out[n - 2]).to(self.device)
                 ll = torch.from_numpy(out[n - 1]).to(self.device)
+                print(f"[TRT] {n} outputs, seg={seg.shape} ll={ll.shape} "
+                      f"ll_range=[{ll.min().item():.4f}, {ll.max().item():.4f}] "
+                      f"ll_nan={torch.isnan(ll).sum().item()}", flush=True)
                 # Use cached anchor_grid (TRT may fold out these constants)
                 anchor_grid = None
                 if self._anchor_grid is not None:
                     anchor_grid = [ag.to(self.device) for ag in self._anchor_grid]
                 pred = split_for_trace_model(pred, anchor_grid)
+                t1 = time.perf_counter()
+                print(f"[TIMING] TRT path: {((t1 - t0) * 1000):.1f}ms", flush=True)
             except Exception as e:
                 print(f"[WARN] TRT inference failed, falling back to PyTorch: {e}", flush=True)
                 self.trt_runner = None
@@ -335,12 +341,17 @@ class YolopDetector:
 
         if trt is None:
             # --- PyTorch path ---
+            t0 = time.perf_counter()
             img_tensor = torch.from_numpy(img_chw.astype(np.float32)).to(self.device, dtype=self.model_dtype)
             with torch.inference_mode():
                 [pred, anchor_grid], seg, ll = self.model(img_tensor)
                 pred = list(pred)
                 anchor_grid = list(anchor_grid)
             pred = split_for_trace_model(pred, anchor_grid)
+            t1 = time.perf_counter()
+            print(f"[TIMING] PyTorch path: {((t1 - t0) * 1000):.1f}ms", flush=True)
+            print(f"[PYTORCH] seg={seg.shape} ll={ll.shape} "
+                  f"ll_range=[{ll.min().item():.4f}, {ll.max().item():.4f}]", flush=True)
         pred = non_max_suppression(pred, conf_thres=0.3, iou_thres=0.45, classes=[2, 3, 4])
 
         det_boxes = []
