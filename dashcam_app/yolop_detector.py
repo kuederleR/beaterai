@@ -167,10 +167,12 @@ class YolopDetector:
             return
 
         # Warmup is optional — skip on failure rather than discarding the model
+        self._anchor_grid = None
         try:
             with torch.inference_mode():
                 dummy = torch.zeros(1, 3, self.img_size, self.img_size, dtype=self.model_dtype).to(self.device)
-                self.model(dummy)
+                [_, anchor_grid], _, _ = self.model(dummy)
+                self._anchor_grid = [ag.cpu().float() for ag in anchor_grid]
             print("[INFO] YOLOpv2 model warmed up. Ready for inference.", flush=True)
         except Exception as e:
             import traceback
@@ -321,13 +323,10 @@ class YolopDetector:
                 n = len(out)
                 seg = torch.from_numpy(out[n - 2]).to(self.device)
                 ll = torch.from_numpy(out[n - 1]).to(self.device)
-                # anchor_grid: after ONNX flattening, may be 3 tensors or 1 (or constant-folded = 0)
-                if n == 8:
-                    anchor_grid = [torch.from_numpy(out[i]).to(self.device) for i in range(3, 6)]
-                elif n >= 5:
-                    anchor_grid = torch.from_numpy(out[3]).to(self.device)
-                else:
-                    anchor_grid = None
+                # Use cached anchor_grid (TRT may fold out these constants)
+                anchor_grid = None
+                if self._anchor_grid is not None:
+                    anchor_grid = [ag.to(self.device) for ag in self._anchor_grid]
                 pred = split_for_trace_model(pred, anchor_grid)
             except Exception as e:
                 print(f"[WARN] TRT inference failed, falling back to PyTorch: {e}", flush=True)
