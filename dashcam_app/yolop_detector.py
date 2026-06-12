@@ -243,8 +243,7 @@ class YolopDetector:
         except Exception as e:
             print(f"[WARN] ONNX sequence flattening failed: {e}. TRT build may fail.", flush=True)
 
-    @staticmethod
-    def _flatten_onnx_sequences(onnx_path):
+    def _flatten_onnx_sequences(self, onnx_path):
         import onnx
         from onnx import helper, TensorProto
 
@@ -277,6 +276,11 @@ class YolopDetector:
                 graph.output.append(output)
 
         onnx.save(model, onnx_path)
+
+        # Log final output structure for use by TRT inference path
+        final_out = [(o.name, [d.dim_value for d in o.type.tensor_type.shape.dim] if o.type.tensor_type.shape else []) for o in graph.output]
+        print(f"[INFO] ONNX final outputs: {final_out}", flush=True)
+        self._trt_output_names = [o.name for o in graph.output]
         print(f"[INFO] ONNX sequences flattened: {seq_outputs}", flush=True)
 
     def download_model_if_missing(self):
@@ -304,13 +308,20 @@ class YolopDetector:
 
         trt = self.trt_runner
         if trt is not None:
-            # --- TensorRT path (flat outputs: pred0-2, ag0-2, seg, ll) ---
+            # --- TensorRT path ---
             try:
                 out = trt.infer(img_chw)
                 pred = [torch.from_numpy(out[i]).to(self.device) for i in range(3)]
-                anchor_grid = [torch.from_numpy(out[i]).to(self.device) for i in range(3, 6)]
-                seg = torch.from_numpy(out[6]).to(self.device)
-                ll = torch.from_numpy(out[7]).to(self.device)
+                n = len(out)
+                seg = torch.from_numpy(out[n - 2]).to(self.device)
+                ll = torch.from_numpy(out[n - 1]).to(self.device)
+                # anchor_grid: after ONNX flattening, may be 3 tensors or 1 (or constant-folded = 0)
+                if n == 8:
+                    anchor_grid = [torch.from_numpy(out[i]).to(self.device) for i in range(3, 6)]
+                elif n >= 5:
+                    anchor_grid = torch.from_numpy(out[3]).to(self.device)
+                else:
+                    anchor_grid = None
             except Exception as e:
                 print(f"[WARN] TRT inference failed, falling back: {e}", flush=True)
                 self.trt_runner = None
