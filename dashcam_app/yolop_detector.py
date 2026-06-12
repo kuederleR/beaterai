@@ -163,10 +163,7 @@ class YolopDetector:
         # Warmup is optional — skip on failure rather than discarding the model
         try:
             with torch.inference_mode():
-                dummy = torch.zeros(1, 3, self.img_size, self.img_size).to(self.device)
-                if self.half:
-                    dummy = dummy.half()
-                dummy = dummy.type_as(next(self.model.parameters()))
+                dummy = torch.zeros(1, 3, self.img_size, self.img_size, dtype=torch.float16 if self.half else torch.float32).to(self.device)
                 self.model(dummy)
             print("[INFO] YOLOpv2 model warmed up. Ready for inference.", flush=True)
         except Exception as e:
@@ -218,10 +215,8 @@ class YolopDetector:
         t.start()
 
     def _export_onnx(self, onnx_path):
-        dummy = torch.zeros(1, 3, self.img_size, self.img_size).to(self.device)
-        if self.half:
-            dummy = dummy.half()
-        dummy = dummy.type_as(next(self.model.parameters()))
+        dtype = torch.float16 if self.half else torch.float32
+        dummy = torch.zeros(1, 3, self.img_size, self.img_size, dtype=dtype).to(self.device)
         torch.onnx.export(
             self.model, dummy, onnx_path,
             input_names=["input"],
@@ -269,10 +264,8 @@ class YolopDetector:
 
         if trt is None:
             # --- PyTorch path ---
-            img_tensor = torch.from_numpy(img_chw).to(self.device)
-            if self.half:
-                img_tensor = img_tensor.half()
-            img_tensor = img_tensor.type_as(next(self.model.parameters()))
+            dtype = torch.float16 if self.half else torch.float32
+            img_tensor = torch.from_numpy(img_chw.astype(np.float32)).to(self.device, dtype=dtype)
             with torch.inference_mode():
                 [pred, anchor_grid], seg, ll = self.model(img_tensor)
                 pred = list(pred)
