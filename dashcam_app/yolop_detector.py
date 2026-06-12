@@ -6,6 +6,7 @@ import urllib.request
 import os
 import time
 import subprocess
+import threading
 import warnings
 
 # --- TensorRT import (optional) ---
@@ -74,43 +75,36 @@ def non_max_suppression(prediction, conf_thres=0.25, iou_thres=0.45, classes=Non
 
 def scale_coords(img1_shape, coords, img0_shape):
     gain = min(img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[1])
-    pad_x = (img1_shape[1] - img0_shape[1] * gain) / 2
-    pad_y = (img1_shape[0] - img0_shape[0] * gain) / 2
-    coords[:, [0, 2]] -= pad_x
-    coords[:, [1, 3]] -= pad_y
+    padx = (img1_shape[1] - img0_shape[1] * gain) / 2
+    pady = (img1_shape[0] - img0_shape[0] * gain) / 2
+    coords[:, [0, 2]] -= padx
+    coords[:, [1, 3]] -= pady
     coords[:, :4] /= gain
     coords[:, [0, 2]].clamp_(0, img0_shape[1])
     coords[:, [1, 3]].clamp_(0, img0_shape[0])
     return coords
 
 
-# --- TensorRT engine runner (uses PyTorch tensors for device memory, no pycuda) ---
+# --- TensorRT engine runner (PyTorch tensors for device memory, no pycuda) ---
 
 class TrtRunner:
     def __init__(self, engine_path):
-        self.engine = None
-        self.context = None
-        self.input_idx = None
-        self.output_idxs = []
+        logger = trt.Logger(trt.Logger.WARNING)
+        with open(engine_path, 'rb') as f:
+            runtime = trt.Runtime(logger)
+            self.engine = runtime.deserialize_cuda_engine(f.read())
+        self.context = self.engine.create_execution_context()
         self.input_shape = None
         self.output_shapes = []
         self.d_input = None
         self.d_outputs = []
         self.bindings = []
 
-        logger = trt.Logger(trt.Logger.WARNING)
-        with open(engine_path, 'rb') as f:
-            runtime = trt.Runtime(logger)
-            self.engine = runtime.deserialize_cuda_engine(f.read())
-        self.context = self.engine.create_execution_context()
-
         for i in range(self.engine.num_bindings):
             shape = tuple(self.engine.get_binding_shape(i))
             if self.engine.binding_is_input(i):
-                self.input_idx = i
                 self.input_shape = shape
             else:
-                self.output_idxs.append(i)
                 self.output_shapes.append(shape)
 
     def infer(self, input_np):
@@ -118,14 +112,8 @@ class TrtRunner:
             self.d_input = torch.empty(self.input_shape, dtype=torch.float32, device='cuda')
             self.d_outputs = [torch.empty(s, dtype=torch.float32, device='cuda') for s in self.output_shapes]
             self.bindings = [self.d_input.data_ptr()] + [o.data_ptr() for o in self.d_outputs]
-
-        # Copy input to GPU
         self.d_input.copy_(torch.from_numpy(np.ascontiguousarray(input_np)).cuda())
-
-        # Run
         self.context.execute_v2(self.bindings)
-
-        # Copy outputs back
         return [o.cpu().numpy() for o in self.d_outputs]
 
 
@@ -148,10 +136,12 @@ class YolopDetector:
             torch.backends.cudnn.benchmark = True
             print("[INFO] Enabled cudnn.benchmark", flush=True)
 
-        self._load_model()
+        # Load PyTorch model immediately so inference can start.
+        # TensorRT build is kicked off in a background thread.
+        self._load_pytorch()
+        self._maybe_build_trt_async()
 
-    def _load_model(self):
-        # Load TorchScript model (always needed for warmup + fallback)
+    def _load_pytorch(self):
         try:
             self.model = torch.jit.load(self.model_path, map_location=self.device)
             if self.half:
@@ -170,48 +160,53 @@ class YolopDetector:
                     dummy = dummy.half()
                 dummy = dummy.type_as(next(self.model.parameters()))
                 self.model(dummy)
-            print("[INFO] YOLOpv2 model warmed up.", flush=True)
+            print("[INFO] YOLOpv2 model warmed up. Ready for inference.", flush=True)
         except Exception as e:
             print(f"[ERROR] Failed to load YOLOpv2 model: {e}", flush=True)
             self.model = None
-            return
 
-        # --- Try to build/load TensorRT engine ---
-        if not TRT_AVAILABLE or self.device.type != 'cuda':
+    def _maybe_build_trt_async(self):
+        # Only bother on CUDA with TensorRT installed
+        if not TRT_AVAILABLE or self.device.type != 'cuda' or self.model is None:
             return
 
         engine_path = self.model_path.replace('.pt', '.trt')
-        onnx_path = self.model_path.replace('.pt', '.onnx')
 
+        # Load cached engine instantly
         if os.path.exists(engine_path):
             try:
                 self.trt_runner = TrtRunner(engine_path)
                 print("[INFO] Loaded cached TensorRT engine.", flush=True)
                 return
             except Exception as e:
-                print(f"[WARN] Failed to load TRT engine: {e}", flush=True)
+                print(f"[WARN] Failed to load cached TRT engine: {e}", flush=True)
 
-        # Build TRT engine via trtexec (comes with every JetPack)
-        print("[INFO] Building TensorRT engine via trtexec (may take several minutes)...", flush=True)
-        try:
-            self._export_onnx(onnx_path)
-            cmd = [
-                'trtexec',
-                f'--onnx={onnx_path}',
-                f'--saveEngine={engine_path}',
-                '--fp16',
-                '--workspace=1024',
-                '--useCudaGraph',
-                '--noDataTransfers',
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            if result.returncode != 0:
-                raise RuntimeError(f"trtexec failed: {result.stderr[:500]}")
-            self.trt_runner = TrtRunner(engine_path)
-            print("[INFO] TensorRT engine built and loaded.", flush=True)
-        except Exception as e:
-            print(f"[WARN] TensorRT build failed, using PyTorch: {e}", flush=True)
-            self.trt_runner = None
+        # Build engine in background — inference continues with PyTorch in the meantime
+        def _build():
+            try:
+                print("[INFO] Exporting ONNX for TensorRT (background)...", flush=True)
+                onnx_path = self.model_path.replace('.pt', '.onnx')
+                self._export_onnx(onnx_path)
+                print("[INFO] Building TensorRT engine via trtexec (background, may take minutes)...", flush=True)
+                cmd = [
+                    'trtexec',
+                    f'--onnx={onnx_path}',
+                    f'--saveEngine={engine_path}',
+                    '--fp16',
+                    '--workspace=1024',
+                    '--useCudaGraph',
+                    '--noDataTransfers',
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                if result.returncode != 0:
+                    raise RuntimeError(f"trtexec failed: {result.stderr[:500]}")
+                self.trt_runner = TrtRunner(engine_path)
+                print("[INFO] TensorRT engine ready. Switched to TRT inference.", flush=True)
+            except Exception as e:
+                print(f"[WARN] TensorRT build failed, sticking with PyTorch: {e}", flush=True)
+
+        t = threading.Thread(target=_build, daemon=True)
+        t.start()
 
     def _export_onnx(self, onnx_path):
         dummy = torch.zeros(1, 3, self.img_size, self.img_size).to(self.device)
@@ -225,7 +220,6 @@ class YolopDetector:
             opset_version=11,
             do_constant_folding=True,
         )
-        print(f"[INFO] ONNX exported to {onnx_path}", flush=True)
 
     def download_model_if_missing(self):
         if not os.path.exists(self.model_path):
@@ -250,14 +244,21 @@ class YolopDetector:
         img_norm = img_rgb.astype(np.float32) / 255.0
         img_chw = np.transpose(img_norm, (2, 0, 1))[np.newaxis, ...]
 
-        if self.trt_runner is not None:
+        trt = self.trt_runner
+        if trt is not None:
             # --- TensorRT path ---
-            pred_np, anchor_grid_np, seg_np, ll_np = self.trt_runner.infer(img_chw)
-            pred = [torch.from_numpy(p).to(self.device) for p in pred_np]
-            anchor_grid = [torch.from_numpy(a).to(self.device) for a in anchor_grid_np]
-            seg = torch.from_numpy(seg_np).to(self.device)
-            ll = torch.from_numpy(ll_np).to(self.device)
-        else:
+            try:
+                pred_np, anchor_grid_np, seg_np, ll_np = trt.infer(img_chw)
+                pred = [torch.from_numpy(p).to(self.device) for p in pred_np]
+                anchor_grid = [torch.from_numpy(a).to(self.device) for a in anchor_grid_np]
+                seg = torch.from_numpy(seg_np).to(self.device)
+                ll = torch.from_numpy(ll_np).to(self.device)
+            except Exception as e:
+                print(f"[WARN] TRT inference failed, falling back: {e}", flush=True)
+                self.trt_runner = None
+                trt = None
+
+        if trt is None:
             # --- PyTorch path ---
             img_tensor = torch.from_numpy(img_chw).to(self.device)
             if self.half:
@@ -272,7 +273,6 @@ class YolopDetector:
         pred = split_for_trace_model(pred, anchor_grid)
         pred = non_max_suppression(pred, conf_thres=0.3, iou_thres=0.45, classes=[2, 3, 4])
 
-        # Scale boxes back to original image size
         det_boxes = []
         if len(pred) > 0 and pred[0] is not None and len(pred[0]) > 0:
             det = pred[0].clone()
@@ -287,7 +287,6 @@ class YolopDetector:
                     "class": int(cls.cpu().numpy())
                 })
 
-        # Segmentation masks
         _, da_predict_idx = torch.max(seg, 1)
         da_mask = da_predict_idx.squeeze().cpu().numpy().astype(np.uint8)
         ll_mask = torch.round(ll).squeeze().cpu().numpy().astype(np.uint8)
