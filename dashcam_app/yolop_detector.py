@@ -233,7 +233,6 @@ class YolopDetector:
         torch.onnx.export(
             self.model, dummy, onnx_path,
             input_names=["input"],
-            output_names=["pred", "anchor_grid", "seg", "ll"],
             opset_version=12,
             do_constant_folding=True,
         )
@@ -249,6 +248,10 @@ class YolopDetector:
 
         model = onnx.load(onnx_path)
         graph = model.graph
+
+        # Log original outputs before flattening
+        orig_out = [(o.name, [d.dim_value for d in o.type.tensor_type.shape.dim] if o.type.tensor_type.shape else []) for o in graph.output]
+        print(f"[INFO] ONNX original outputs: {orig_out}", flush=True)
 
         seq_outputs = {}
         for node in list(graph.node):
