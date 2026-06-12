@@ -328,8 +328,9 @@ class YolopDetector:
                     anchor_grid = torch.from_numpy(out[3]).to(self.device)
                 else:
                     anchor_grid = None
+                pred = split_for_trace_model(pred, anchor_grid)
             except Exception as e:
-                print(f"[WARN] TRT inference failed, falling back: {e}", flush=True)
+                print(f"[WARN] TRT inference failed, falling back to PyTorch: {e}", flush=True)
                 self.trt_runner = None
                 trt = None
 
@@ -340,9 +341,7 @@ class YolopDetector:
                 [pred, anchor_grid], seg, ll = self.model(img_tensor)
                 pred = list(pred)
                 anchor_grid = list(anchor_grid)
-
-        # --- Common post-processing ---
-        pred = split_for_trace_model(pred, anchor_grid)
+            pred = split_for_trace_model(pred, anchor_grid)
         pred = non_max_suppression(pred, conf_thres=0.3, iou_thres=0.45, classes=[2, 3, 4])
 
         det_boxes = []
