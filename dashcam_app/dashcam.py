@@ -22,6 +22,7 @@ if not hasattr(cv2, 'IMREAD_UNCHANGED'):
     cv2.IMREAD_UNCHANGED = -1
 
 from flask import Flask, Response, jsonify, request, render_template
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 # Import YolopDetector for unified GPU inference
 from yolop_detector import YolopDetector
