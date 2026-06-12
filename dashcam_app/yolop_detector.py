@@ -277,6 +277,10 @@ class YolopDetector:
             else:
                 graph.output.append(output)
 
+        # Run shape inference to propagate shapes for flattened outputs
+        model = onnx.shape_inference.infer_shapes(model)
+        graph = model.graph
+
         onnx.save(model, onnx_path)
 
         # Log final output structure for use by TRT inference path
