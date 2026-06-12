@@ -170,6 +170,7 @@ state = {
     "hood_detection_frames_left": HOOD_CALIBRATION_FRAMES,
     "lane_position": 0.5,
     "lane_width": 0.0,
+    "car_center_offset": 0.0,   # running lateral offset (m) to center car in lane
     "debug_feed_active": True,
 }
 
@@ -678,11 +679,11 @@ def find_lanes_sliding_window(ll_mask_undist, bev_display_h, car_center_x_meters
             return None
         road_Ys = road_Ys.astype(np.float64)
         road_Xs = road_Xs.astype(np.float64)
-        for _ in range(2):
+        for _ in range(3):
             try:
                 poly = np.polyfit(road_Ys, road_Xs, 2)
                 residuals = np.abs(road_Xs - np.polyval(poly, road_Ys))
-                inliers = residuals < 0.5
+                inliers = residuals < 0.3
                 if np.sum(inliers) < 12:
                     return None
                 road_Ys = road_Ys[inliers]
@@ -697,6 +698,8 @@ def find_lanes_sliding_window(ll_mask_undist, bev_display_h, car_center_x_meters
     left_poly = fit_robust_poly(road_Y[left_mask], road_X[left_mask])
     right_poly = fit_robust_poly(road_Y[right_mask], road_X[right_mask])
 
+    # Divergence check: reject fits where lane width changes too fast
+    # at close range (stable) vs far range (should not fan out)
     if left_poly is not None and right_poly is not None:
         widths = []
         for ey in [5.0, 15.0, 25.0]:
@@ -707,6 +710,23 @@ def find_lanes_sliding_window(ll_mask_undist, bev_display_h, car_center_x_meters
                 widths.append(w)
         if len(widths) < 2:
             return None, None
+        # Reject if width changes by more than 1.5m between 5m and 25m
+        if len(widths) >= 2 and abs(widths[-1] - widths[0]) > 1.5:
+            return None, None
+        # Reject if either polynomial has excessive curvature
+        # (a[0] > 0.01 means >1m lateral shift over 10m)
+        for poly in (left_poly, right_poly):
+            if poly is not None and abs(poly[0]) > 0.01:
+                return None, None
+
+    # One-sided fallback: if only one side is valid, mirror the other side
+    # based on a plausible lane width (3.5m) to keep both lines visible
+    if left_poly is not None and right_poly is None:
+        right_poly = left_poly.copy()
+        right_poly[1] = left_poly[1] + 3.5  # shift right by lane width
+    elif right_poly is not None and left_poly is None:
+        left_poly = right_poly.copy()
+        left_poly[1] = right_poly[1] - 3.5
 
     return left_poly, right_poly
 
@@ -914,6 +934,20 @@ def inference_loop():
                 left_poly_smoothed = smooth_poly(left_poly, state["left_poly_history"])
                 right_poly_smoothed = smooth_poly(right_poly, state["right_poly_history"])
 
+                # Car-center lateral compensation: if lane is known, shift reported
+                # car position toward lane center to correct for calibration bias.
+                car_center_x_compensated = car_center_x_meters
+                if left_poly_smoothed is not None and right_poly_smoothed is not None:
+                    y_lane = 5.0
+                    lx = np.polyval(left_poly_smoothed, y_lane)
+                    rx = np.polyval(right_poly_smoothed, y_lane)
+                    lw = rx - lx
+                    if lw > 1.0:
+                        desired_center = (lx + rx) / 2.0
+                        offset = desired_center - car_center_x_meters
+                        state["car_center_offset"] = 0.95 * state["car_center_offset"] + 0.05 * offset
+                        car_center_x_compensated = car_center_x_meters + state["car_center_offset"]
+
                 # No fallback to straight lines if none detected
 
                 # Project vehicles to road plane and calculate FCW
@@ -931,7 +965,7 @@ def inference_loop():
                         is_threat = False
                         if not np.isnan(X_veh) and not np.isnan(Y_veh):
                             # Ego lane check
-                            if abs(X_veh - car_center_x_meters) < 1.6:
+                            if abs(X_veh - car_center_x_compensated) < 1.6:
                                 if Y_veh < 15.0:
                                     fcw_triggered = True
                                     is_threat = True
@@ -959,13 +993,13 @@ def inference_loop():
                 
                 if left_poly_smoothed is not None:
                     left_x_at_eval = np.polyval(left_poly_smoothed, y_eval)
-                    d_left = car_center_x_meters - left_x_at_eval
+                    d_left = car_center_x_compensated - left_x_at_eval
                 else:
                     d_left = 999.0
                     
                 if right_poly_smoothed is not None:
                     right_x_at_eval = np.polyval(right_poly_smoothed, y_eval)
-                    d_right = right_x_at_eval - car_center_x_meters
+                    d_right = right_x_at_eval - car_center_x_compensated
                 else:
                     d_right = 999.0
                 
@@ -1053,12 +1087,12 @@ def inference_loop():
                     cv2.polylines(im_bev, [right_pts_int], False, (220, 220, 220), 2, cv2.LINE_AA)
 
                 # Draw ego center guide and ego car
-                car_center_bev_x = int(road_to_bev(np.array([[car_center_x_meters, 1.0]]))[0, 0])
+                car_center_bev_x = int(road_to_bev(np.array([[car_center_x_compensated, 1.0]]))[0, 0])
                 ego_corners_road = np.array([
-                    [car_center_x_meters - 0.9, 1.0],
-                    [car_center_x_meters - 0.9, 2.8],
-                    [car_center_x_meters + 0.9, 2.8],
-                    [car_center_x_meters + 0.9, 1.0]
+                    [car_center_x_compensated - 0.9, 1.0],
+                    [car_center_x_compensated - 0.9, 2.8],
+                    [car_center_x_compensated + 0.9, 2.8],
+                    [car_center_x_compensated + 0.9, 1.0]
                 ], dtype=np.float32)
                 ego_corners_bev = road_to_bev(ego_corners_road)
                 ego_corners_bev[:, 1] -= (BEV_HEIGHT - RENDER_H)
@@ -1076,7 +1110,7 @@ def inference_loop():
                     rx = np.polyval(right_poly_smoothed, y_lane)
                     lw = rx - lx
                     if lw > 0.5:
-                        pos = (car_center_x_meters - lx) / lw
+                        pos = (car_center_x_compensated - lx) / lw
                         pos = float(np.clip(pos, 0.0, 1.0))
                         bar_y = 8
                         bar_h = 8
@@ -1108,7 +1142,7 @@ def inference_loop():
                     lw = rx - lx
                     if lw > 0.5:
                         lane_width = lw
-                        lane_position = (car_center_x_meters - lx) / lw
+                        lane_position = (car_center_x_compensated - lx) / lw
                         lane_position = float(np.clip(lane_position, 0.0, 1.0))
                 state["lane_position"] = lane_position
                 state["lane_width"] = lane_width
@@ -1158,14 +1192,14 @@ def inference_loop():
                 # ADAS disabled fallback: just show blank BEV frame and ego-car
                 _t_render = time.perf_counter()
                 im_bev = np.zeros((BEV_HEIGHT, BEV_WIDTH, 3), dtype=np.uint8)
-                car_center_bev_x = int(road_to_bev(np.array([[car_center_x_meters, 1.0]]))[0, 0])
+                car_center_bev_x = int(road_to_bev(np.array([[car_center_x_compensated, 1.0]]))[0, 0])
                 cv2.line(im_bev, (car_center_bev_x, 0), (car_center_bev_x, BEV_HEIGHT - 1), (100, 100, 100), 1)
                 
                 ego_corners_road = np.array([
-                    [car_center_x_meters - 0.9, 1.0],
-                    [car_center_x_meters - 0.9, 2.8],
-                    [car_center_x_meters + 0.9, 2.8],
-                    [car_center_x_meters + 0.9, 1.0]
+                    [car_center_x_compensated - 0.9, 1.0],
+                    [car_center_x_compensated - 0.9, 2.8],
+                    [car_center_x_compensated + 0.9, 2.8],
+                    [car_center_x_compensated + 0.9, 1.0]
                 ], dtype=np.float32)
                 ego_corners_bev = road_to_bev(ego_corners_road).astype(np.int32)
                 
