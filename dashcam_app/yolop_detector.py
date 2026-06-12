@@ -321,10 +321,19 @@ class YolopDetector:
                 out = trt.infer(img_chw)
                 t0 = time.perf_counter()
                 pred = [torch.from_numpy(out[i]).to(self.device) for i in range(3)]
-                n = len(out)
-                seg = torch.from_numpy(out[n - 2]).to(self.device)
-                ll = torch.from_numpy(out[n - 1]).to(self.device)
-                print(f"[TRT] {n} outputs, seg={seg.shape} ll={ll.shape} "
+                # Find seg and ll by shape (TRT may reorder bindings)
+                seg = ll = None
+                H = self.img_size
+                for arr in out:
+                    s = arr.shape
+                    if len(s) == 4 and s[1] == 2 and s[2] == H and s[3] == H:
+                        seg = torch.from_numpy(arr).to(self.device)
+                    elif len(s) == 4 and s[1] == 1 and s[2] == H and s[3] == H:
+                        ll = torch.from_numpy(arr).to(self.device)
+                if seg is None or ll is None:
+                    raise RuntimeError(f"Could not locate seg/ll in {len(out)} TRT outputs: "
+                                       f"{[o.shape for o in out]}")
+                print(f"[TRT] {len(out)} outputs, seg={seg.shape} ll={ll.shape} "
                       f"ll_range=[{ll.min().item():.4f}, {ll.max().item():.4f}] "
                       f"ll_nan={torch.isnan(ll).sum().item()}", flush=True)
                 # Use cached anchor_grid (TRT may fold out these constants)
