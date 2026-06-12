@@ -215,9 +215,12 @@ class YolopDetector:
                     '--fp16',
                     '--memPoolSize=workspace:1024',
                 ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-                if result.returncode != 0:
-                    raise RuntimeError(f"trtexec failed: {result.stderr[:500]}")
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                for line in proc.stdout:
+                    print(f"[trtexec] {line.rstrip()}", flush=True)
+                proc.wait(timeout=600)
+                if proc.returncode != 0:
+                    raise RuntimeError(f"trtexec failed with code {proc.returncode}")
                 self.trt_runner = TrtRunner(engine_path)
                 print("[INFO] TensorRT engine ready. Switched to TRT inference.", flush=True)
             except Exception as e:
