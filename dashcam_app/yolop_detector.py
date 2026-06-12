@@ -256,10 +256,15 @@ class YolopDetector:
         print(f"[INFO] ONNX original outputs: {orig_out}", flush=True)
 
         seq_outputs = {}
+        graph_output_names = set(o.name for o in graph.output)
         for node in list(graph.node):
             if node.op_type == 'SequenceConstruct':
-                seq_outputs[node.output[0]] = list(node.input)
-                graph.node.remove(node)
+                if node.output[0] in graph_output_names:
+                    seq_outputs[node.output[0]] = list(node.input)
+                    graph.node.remove(node)
+                # Internal SequenceConstruct nodes must stay — removing them
+                # breaks the model's internal list operations (e.g. multi-scale
+                # feature concatenation), causing TensorRT to produce NaN.
 
         original_outputs = list(graph.output)
         del graph.output[:]
