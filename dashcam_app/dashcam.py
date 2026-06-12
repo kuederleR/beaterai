@@ -57,11 +57,11 @@ LENS_CALIBRATION_FRAMES = 30
 # --- Road Plane / Bird's Eye View (BEV) Geometry Configuration ---
 CAMERA_HEIGHT = 1.2192 # 4 feet off the ground in meters
 BEV_WIDTH = 240
-BEV_HEIGHT = 1980
+BEV_HEIGHT = 1001
 X_MIN = -6.0
 X_MAX = 6.0
 Y_MIN = 1.0
-Y_MAX = 100.0
+Y_MAX = 51.0
 
 # --- Camera Calibration Matrix and Distortion Coefficients ---
 def load_camera_calibration():
