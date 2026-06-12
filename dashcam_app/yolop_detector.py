@@ -213,9 +213,7 @@ class YolopDetector:
                     f'--onnx={onnx_path}',
                     f'--saveEngine={engine_path}',
                     '--fp16',
-                    '--workspace=1024',
-                    '--useCudaGraph',
-                    '--noDataTransfers',
+                    '--memPoolSize=workspace:1024',
                 ]
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
                 if result.returncode != 0:
@@ -231,11 +229,21 @@ class YolopDetector:
         t.start()
 
     def _export_onnx(self, onnx_path):
+        # Wrap model to flatten list outputs — TensorRT cannot handle SequenceConstruct ops
+        class _ExportWrapper(torch.nn.Module):
+            def __init__(self, model):
+                super().__init__()
+                self.model = model
+            def forward(self, x):
+                [pred, anchor_grid], seg, ll = self.model(x)
+                return pred[0], pred[1], pred[2], anchor_grid[0], anchor_grid[1], anchor_grid[2], seg, ll
+
+        wrapper = _ExportWrapper(self.model).eval()
         dummy = torch.zeros(1, 3, self.img_size, self.img_size, dtype=self.model_dtype).to(self.device)
         torch.onnx.export(
-            self.model, dummy, onnx_path,
+            wrapper, dummy, onnx_path,
             input_names=["input"],
-            output_names=["pred", "anchor_grid", "seg", "ll"],
+            output_names=["pred0", "pred1", "pred2", "ag0", "ag1", "ag2", "seg", "ll"],
             opset_version=11,
             do_constant_folding=True,
         )
@@ -265,13 +273,13 @@ class YolopDetector:
 
         trt = self.trt_runner
         if trt is not None:
-            # --- TensorRT path ---
+            # --- TensorRT path (flat outputs: pred0-2, ag0-2, seg, ll) ---
             try:
-                pred_np, anchor_grid_np, seg_np, ll_np = trt.infer(img_chw)
-                pred = [torch.from_numpy(p).to(self.device) for p in pred_np]
-                anchor_grid = [torch.from_numpy(a).to(self.device) for a in anchor_grid_np]
-                seg = torch.from_numpy(seg_np).to(self.device)
-                ll = torch.from_numpy(ll_np).to(self.device)
+                out = trt.infer(img_chw)
+                pred = [torch.from_numpy(out[i]).to(self.device) for i in range(3)]
+                anchor_grid = [torch.from_numpy(out[i]).to(self.device) for i in range(3, 6)]
+                seg = torch.from_numpy(out[6]).to(self.device)
+                ll = torch.from_numpy(out[7]).to(self.device)
             except Exception as e:
                 print(f"[WARN] TRT inference failed, falling back: {e}", flush=True)
                 self.trt_runner = None
