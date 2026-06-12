@@ -229,25 +229,12 @@ class YolopDetector:
         t.start()
 
     def _export_onnx(self, onnx_path):
-        # Script a wrapper that flattens list outputs — TensorRT cannot handle
-        # SequenceConstruct ops produced by Python list returns.
-        class _ExportWrapper(torch.nn.Module):
-            def __init__(self, model):
-                super().__init__()
-                self.model = model
-            def forward(self, x):
-                result = self.model(x)
-                pred, anchor_grid = result[0][0], result[0][1]
-                seg, ll = result[1], result[2]
-                return pred[0], pred[1], pred[2], anchor_grid[0], anchor_grid[1], anchor_grid[2], seg, ll
-
-        wrapper = torch.jit.script(_ExportWrapper(self.model))
         dummy = torch.zeros(1, 3, self.img_size, self.img_size, dtype=self.model_dtype).to(self.device)
         torch.onnx.export(
-            wrapper, dummy, onnx_path,
+            self.model, dummy, onnx_path,
             input_names=["input"],
-            output_names=["pred0", "pred1", "pred2", "ag0", "ag1", "ag2", "seg", "ll"],
-            opset_version=11,
+            output_names=["pred", "anchor_grid", "seg", "ll"],
+            opset_version=12,
             do_constant_folding=True,
         )
 
