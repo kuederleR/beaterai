@@ -233,6 +233,7 @@ class YolopDetector:
         torch.onnx.export(
             self.model, dummy, onnx_path,
             input_names=["input"],
+            output_names=["pred", "ag0", "ag1", "ag2", "seg", "ll"],
             opset_version=12,
             do_constant_folding=True,
         )
