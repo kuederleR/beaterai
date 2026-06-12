@@ -6,7 +6,6 @@ import urllib.request
 import os
 import time
 import subprocess
-import threading
 import warnings
 
 # --- TensorRT import (optional) ---
@@ -137,10 +136,8 @@ class YolopDetector:
             torch.backends.cudnn.benchmark = True
             print("[INFO] Enabled cudnn.benchmark", flush=True)
 
-        # Load PyTorch model immediately so inference can start.
-        # TensorRT build is kicked off in a background thread.
         self._load_pytorch()
-        self._maybe_build_trt_async()
+        self._build_trt()
 
     def _load_pytorch(self):
         try:
@@ -180,9 +177,10 @@ class YolopDetector:
             traceback.print_exc()
             print(f"[WARN] Model warmup failed (continuing without warmup): {e}", flush=True)
 
-    def _maybe_build_trt_async(self):
+    def _build_trt(self):
         # Only bother on CUDA with TensorRT installed
         if not TRT_AVAILABLE or self.device.type != 'cuda' or self.model is None:
+            print("[INFO] TensorRT not available, using PyTorch inference.", flush=True)
             return
 
         engine_path = self.model_path.replace('.pt', '.trt')
@@ -196,40 +194,36 @@ class YolopDetector:
             except Exception as e:
                 print(f"[WARN] Failed to load cached TRT engine: {e}", flush=True)
 
-        # Build engine in background — inference continues with PyTorch in the meantime
-        def _build():
-            try:
-                print("[INFO] Exporting ONNX for TensorRT (background)...", flush=True)
-                onnx_path = self.model_path.replace('.pt', '.onnx')
-                self._export_onnx(onnx_path)
+        # Build engine (synchronous — inference waits for this to complete)
+        try:
+            print("[INFO] Exporting ONNX for TensorRT...", flush=True)
+            onnx_path = self.model_path.replace('.pt', '.onnx')
+            self._export_onnx(onnx_path)
 
-                # Check trtexec availability
-                if subprocess.run('which trtexec', shell=True, capture_output=True).returncode != 0:
-                    raise RuntimeError("trtexec not found on PATH — install TensorRT or use 'apt install nvidia-tensorrt'")
+            # Check trtexec availability
+            if subprocess.run('which trtexec', shell=True, capture_output=True).returncode != 0:
+                raise RuntimeError("trtexec not found on PATH — install via 'apt install nvidia-tensorrt'")
 
-                print("[INFO] Building TensorRT engine via trtexec (background, may take minutes)...", flush=True)
-                cmd = [
-                    'trtexec',
-                    f'--onnx={onnx_path}',
-                    f'--saveEngine={engine_path}',
-                    '--fp16',
-                    '--memPoolSize=workspace:1024',
-                ]
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-                for line in proc.stdout:
-                    print(f"[trtexec] {line.rstrip()}", flush=True)
-                proc.wait(timeout=600)
-                if proc.returncode != 0:
-                    raise RuntimeError(f"trtexec failed with code {proc.returncode}")
-                self.trt_runner = TrtRunner(engine_path)
-                print("[INFO] TensorRT engine ready. Switched to TRT inference.", flush=True)
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                print(f"[WARN] TensorRT build failed, sticking with PyTorch: {e}", flush=True)
-
-        t = threading.Thread(target=_build, daemon=True)
-        t.start()
+            print("[INFO] Building TensorRT engine via trtexec...", flush=True)
+            cmd = [
+                'trtexec',
+                f'--onnx={onnx_path}',
+                f'--saveEngine={engine_path}',
+                '--fp16',
+                '--memPoolSize=workspace:1024',
+            ]
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            for line in proc.stdout:
+                print(f"[trtexec] {line.rstrip()}", flush=True)
+            proc.wait(timeout=600)
+            if proc.returncode != 0:
+                raise RuntimeError(f"trtexec failed with code {proc.returncode}")
+            self.trt_runner = TrtRunner(engine_path)
+            print("[INFO] TensorRT engine ready. Switched to TRT inference.", flush=True)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"[WARN] TensorRT build failed, using PyTorch: {e}", flush=True)
 
     def _export_onnx(self, onnx_path):
         dummy = torch.zeros(1, 3, self.img_size, self.img_size, dtype=self.model_dtype).to(self.device)
