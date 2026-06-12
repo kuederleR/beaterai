@@ -649,120 +649,50 @@ def find_lanes_sliding_window(ll_mask_undist, bev_display_h, car_center_x_meters
 
     ll_bev = cv2.warpPerspective(ll_mask_undist, bev_display_h, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
 
-    histogram = np.sum(ll_bev[int(BEV_HEIGHT*3/4):, :], axis=0)
-
-    peaks = []
-    threshold = np.max(histogram) * 0.1
-    if threshold > 0:
-        for i in range(1, BEV_WIDTH - 1):
-            if histogram[i] > threshold and histogram[i] >= histogram[i-1] and histogram[i] >= histogram[i+1]:
-                if not peaks or i - peaks[-1] > 30:
-                    peaks.append(i)
-                elif histogram[i] > histogram[peaks[-1]]:
-                    peaks[-1] = i
-
-    nwindows = 20
-    window_height = int(BEV_HEIGHT / nwindows)
-    margin = 40
-    minpix = 8
-
     nonzero = ll_bev.nonzero()
-    nonzeroy = np.array(nonzero[0])
-    nonzerox = np.array(nonzero[1])
+    if len(nonzero[0]) < 30:
+        return None, None
 
-    # Pre-group pixels by which y-window they fall into.
-    # This avoids O(n_peaks * n_windows * n_nonzero) boolean indexing.
-    win_ids = (BEV_HEIGHT - 1 - nonzeroy) // window_height
-    win_ids = np.clip(win_ids, 0, nwindows - 1)
-    order = np.argsort(win_ids)
-    sorted_wids = win_ids[order]
-    sorted_x = nonzerox[order]
-    sorted_y = nonzeroy[order]
-    splits = np.searchsorted(sorted_wids, np.arange(1, nwindows))
+    ys = nonzero[0].astype(np.float32)
+    xs = nonzero[1].astype(np.float32)
 
-    lane_points = {p: ([], []) for p in peaks}
-
-    for peak in peaks:
-        current_x = peak
-        for w in range(nwindows):
-            w_start = 0 if w == 0 else splits[w - 1]
-            w_end = splits[w] if w < len(splits) else len(sorted_x)
-            if w_start >= w_end:
-                continue
-            w_x = sorted_x[w_start:w_end]
-            w_y = sorted_y[w_start:w_end]
-
-            x_mask = (w_x >= current_x - margin) & (w_x < current_x + margin)
-            good_inds = np.flatnonzero(x_mask)
-
-            if len(good_inds) > 0:
-                lane_points[peak][0].extend(w_x[good_inds].tolist())
-                lane_points[peak][1].extend(w_y[good_inds].tolist())
-
-            if len(good_inds) > minpix:
-                current_x = int(np.mean(w_x[good_inds]))
-
+    # Convert BEV pixel coordinates to road-plane meters
     s_x = (BEV_WIDTH - 1) / (X_MAX - X_MIN)
     s_y = (BEV_HEIGHT - 1) / (Y_MAX - Y_MIN)
+    road_X = xs / s_x + X_MIN
+    road_Y = Y_MAX - ys / s_y
 
-    lane_polys = []
-    for peak, (xs, ys) in lane_points.items():
-        if len(xs) > 20:
-            xs = np.array(xs)
-            ys = np.array(ys)
+    # Separate into left/right by road X relative to car center
+    left_mask = road_X < car_center_x_meters - 0.3
+    right_mask = road_X > car_center_x_meters + 0.3
 
-            # Filter to inner edge of lane marking to avoid road edge bias
-            median_x = np.median(xs)
-            if peak > BEV_WIDTH // 2:
-                # Right side: keep leftmost (innermost) half of points
-                inner = xs < median_x
-            else:
-                # Left side: keep rightmost (innermost) half of points
-                inner = xs > median_x
-            if np.sum(inner) >= 10:
-                xs = xs[inner]
-                ys = ys[inner]
-            else:
-                continue
-
-            road_Xs = xs / s_x + X_MIN
-            road_Ys = Y_MAX - ys / s_y
-
+    def fit_robust_poly(road_Ys, road_Xs):
+        if len(road_Ys) < 15:
+            return None
+        road_Ys = road_Ys.astype(np.float64)
+        road_Xs = road_Xs.astype(np.float64)
+        for _ in range(2):
             try:
                 poly = np.polyfit(road_Ys, road_Xs, 2)
-                fit_Xs = np.polyval(poly, road_Ys)
-                residuals = np.abs(road_Xs - fit_Xs)
-                inliers = residuals < 0.25
-                if np.sum(inliers) >= 10:
-                    poly = np.polyfit(road_Ys[inliers], road_Xs[inliers], 2)
-                    lane_polys.append(poly)
+                residuals = np.abs(road_Xs - np.polyval(poly, road_Ys))
+                inliers = residuals < 0.5
+                if np.sum(inliers) < 12:
+                    return None
+                road_Ys = road_Ys[inliers]
+                road_Xs = road_Xs[inliers]
             except Exception:
-                pass
+                return None
+        try:
+            return np.polyfit(road_Ys, road_Xs, 2)
+        except Exception:
+            return None
 
-    left_poly = None
-    right_poly = None
-    eval_ys = [5.0, 15.0, 25.0]
-    eval_weights = [0.5, 0.3, 0.2]
-
-    best_left_score = -999.0
-    best_right_score = 999.0
-
-    for poly in lane_polys:
-        weighted_diff = 0.0
-        for ey, w in zip(eval_ys, eval_weights):
-            x_at_eval = np.polyval(poly, ey)
-            weighted_diff += w * (x_at_eval - car_center_x_meters)
-
-        if weighted_diff < -0.3 and weighted_diff > best_left_score:
-            best_left_score = weighted_diff
-            left_poly = poly
-        elif weighted_diff > 0.3 and weighted_diff < best_right_score:
-            best_right_score = weighted_diff
-            right_poly = poly
+    left_poly = fit_robust_poly(road_Y[left_mask], road_X[left_mask])
+    right_poly = fit_robust_poly(road_Y[right_mask], road_X[right_mask])
 
     if left_poly is not None and right_poly is not None:
         widths = []
-        for ey in eval_ys:
+        for ey in [5.0, 15.0, 25.0]:
             lx = np.polyval(left_poly, ey)
             rx = np.polyval(right_poly, ey)
             w = rx - lx

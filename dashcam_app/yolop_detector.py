@@ -208,17 +208,13 @@ class YolopDetector:
             
         h_orig, w_orig = img.shape[:2]
         
-        # 1. Preprocess with letterbox
-        img_padded, ratio, (dw, dh) = letterbox(img, new_shape=(self.img_size, self.img_size), auto=False)
-        
-        # Determine padding
-        top_pad = int(round(dh - 0.1))
-        bottom_pad = int(round(dh + 0.1))
-        left_pad = int(round(dw - 0.1))
-        right_pad = int(round(dw + 0.1))
+        # 1. Preprocess: direct resize to model input size (no letterbox padding).
+        #    This avoids wasting ~37% of inference compute on black padding rows
+        #    while maintaining the same pixel count for the model.
+        img_resized = cv2.resize(img, (self.img_size, self.img_size), interpolation=cv2.INTER_LINEAR)
         
         # Convert image to RGB and normalize
-        img_rgb = cv2.cvtColor(img_padded, cv2.COLOR_BGR2RGB)
+        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
         img_norm = img_rgb.astype(np.float32) / 255.0
         img_chw = np.transpose(img_norm, (2, 0, 1))
         img_tensor = torch.from_numpy(img_chw).unsqueeze(0).to(self.device)
@@ -254,28 +250,15 @@ class YolopDetector:
                     })
                     
         # 3. Post-process segmentation masks
-        # seg is [1, 2, H_padded, W_padded]
-        # ll is [1, 1, H_padded, W_padded]
-        
-        # Remove padding
-        h_model_out, w_model_out = seg.shape[2], seg.shape[3]
-        h_end = h_model_out - bottom_pad
-        w_end = w_model_out - right_pad
-        
-        da_predict = seg[:, :, top_pad:h_end, left_pad:w_end]
-        ll_predict = ll[:, :, top_pad:h_end, left_pad:w_end]
-        
         # Process drivable area (channels=2: background, road) -> get argmax
-        _, da_predict_idx = torch.max(da_predict, 1)
-        da_mask = da_predict_idx.squeeze().cpu().numpy().astype(np.uint8) # shape [H_unpad, W_unpad]
+        _, da_predict_idx = torch.max(seg, 1)
+        da_mask_model = da_predict_idx.squeeze().cpu().numpy().astype(np.uint8)
         
         # Process lane line area (channels=1) -> round to get binary mask
-        ll_mask = torch.round(ll_predict).squeeze().cpu().numpy().astype(np.uint8) # shape [H_unpad, W_unpad]
+        ll_mask_model = torch.round(ll).squeeze().cpu().numpy().astype(np.uint8)
         
-        # Resize masks back to original image size if needed
-        if da_mask.shape[:2] != (h_orig, w_orig):
-            da_mask = cv2.resize(da_mask, (w_orig, h_orig), interpolation=cv2.INTER_NEAREST)
-        if ll_mask.shape[:2] != (h_orig, w_orig):
-            ll_mask = cv2.resize(ll_mask, (w_orig, h_orig), interpolation=cv2.INTER_NEAREST)
+        # Resize masks back to original image size
+        da_mask = cv2.resize(da_mask_model, (w_orig, h_orig), interpolation=cv2.INTER_NEAREST)
+        ll_mask = cv2.resize(ll_mask_model, (w_orig, h_orig), interpolation=cv2.INTER_NEAREST)
             
         return det_boxes, da_mask, ll_mask
