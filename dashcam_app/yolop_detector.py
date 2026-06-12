@@ -206,6 +206,7 @@ class YolopDetector:
 
             print("[INFO] Building TensorRT engine via trtexec...", flush=True)
             cmd = [
+                'stdbuf', '-oL',
                 'trtexec',
                 f'--onnx={onnx_path}',
                 f'--saveEngine={engine_path}',
