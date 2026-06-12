@@ -153,7 +153,15 @@ class YolopDetector:
                 except Exception:
                     pass
             print("[INFO] YOLOpv2 TorchScript model loaded.", flush=True)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"[ERROR] Failed to load YOLOpv2 model: {e}", flush=True)
+            self.model = None
+            return
 
+        # Warmup is optional — skip on failure rather than discarding the model
+        try:
             with torch.inference_mode():
                 dummy = torch.zeros(1, 3, self.img_size, self.img_size).to(self.device)
                 if self.half:
@@ -162,8 +170,9 @@ class YolopDetector:
                 self.model(dummy)
             print("[INFO] YOLOpv2 model warmed up. Ready for inference.", flush=True)
         except Exception as e:
-            print(f"[ERROR] Failed to load YOLOpv2 model: {e}", flush=True)
-            self.model = None
+            import traceback
+            traceback.print_exc()
+            print(f"[WARN] Model warmup failed (continuing without warmup): {e}", flush=True)
 
     def _maybe_build_trt_async(self):
         # Only bother on CUDA with TensorRT installed
