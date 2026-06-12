@@ -662,9 +662,15 @@ def find_lanes_sliding_window(ll_mask_undist, bev_display_h, car_center_x_meters
     road_X = xs / s_x + X_MIN
     road_Y = Y_MAX - ys / s_y
 
-    # Separate into left/right by road X relative to car center
-    left_mask = road_X < car_center_x_meters - 0.3
-    right_mask = road_X > car_center_x_meters + 0.3
+    # Separate into left/right by road X relative to car center.
+    # Constrain the search to a plausible lane-width corridor (0.5–3.5m away)
+    # to avoid latching onto distant road edges, barriers, or adjacent lane markings.
+    LANE_SEARCH_MIN = 0.5
+    LANE_SEARCH_MAX = 3.5
+    left_mask = (road_X < car_center_x_meters - LANE_SEARCH_MIN) & \
+                (road_X > car_center_x_meters - LANE_SEARCH_MAX)
+    right_mask = (road_X > car_center_x_meters + LANE_SEARCH_MIN) & \
+                 (road_X < car_center_x_meters + LANE_SEARCH_MAX)
 
     def fit_robust_poly(road_Ys, road_Xs):
         if len(road_Ys) < 15:
