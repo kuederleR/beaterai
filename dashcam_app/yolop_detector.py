@@ -212,7 +212,8 @@ class YolopDetector:
                 'trtexec',
                 f'--onnx={onnx_path}',
                 f'--saveEngine={engine_path}',
-                '--fp16',
+                # FP16 causes NaN outputs for lane/seg heads on Orin, stick with FP32
+                # '--fp16',
                 '--memPoolSize=workspace:1024',
             ]
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -333,9 +334,14 @@ class YolopDetector:
                 if seg is None or ll is None:
                     raise RuntimeError(f"Could not locate seg/ll in {len(out)} TRT outputs: "
                                        f"{[o.shape for o in out]}")
+                ll_nan = torch.isnan(ll).sum().item()
+                seg_nan = torch.isnan(seg).sum().item()
+                if ll_nan > 0 or seg_nan > 0:
+                    raise RuntimeError(f"TRT produced NaN (ll_nan={ll_nan}/{ll.numel()}, "
+                                       f"seg_nan={seg_nan}/{seg.numel()})")
                 print(f"[TRT] {len(out)} outputs, seg={seg.shape} ll={ll.shape} "
                       f"ll_range=[{ll.min().item():.4f}, {ll.max().item():.4f}] "
-                      f"ll_nan={torch.isnan(ll).sum().item()}", flush=True)
+                      f"ll_nan={ll_nan}", flush=True)
                 # Use cached anchor_grid (TRT may fold out these constants)
                 anchor_grid = None
                 if self._anchor_grid is not None:
@@ -345,6 +351,11 @@ class YolopDetector:
                 print(f"[TIMING] TRT path: {((t1 - t0) * 1000):.1f}ms", flush=True)
             except Exception as e:
                 print(f"[WARN] TRT inference failed, falling back to PyTorch: {e}", flush=True)
+                # Delete bad engine so next restart rebuilds without FP16
+                engine_path = self.model_path.replace('.pt', '.trt')
+                if os.path.exists(engine_path):
+                    os.remove(engine_path)
+                    print("[INFO] Deleted bad TRT engine, will rebuild on next startup.", flush=True)
                 self.trt_runner = None
                 trt = None
 
