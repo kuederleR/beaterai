@@ -357,8 +357,10 @@ class YolopDetector:
                     "class": int(cls.cpu().numpy())
                 })
 
+        seg = torch.nan_to_num(seg, 0)
         _, da_predict_idx = torch.max(seg, 1)
         da_mask = da_predict_idx.squeeze().cpu().numpy().astype(np.uint8)
+        ll = torch.nan_to_num(ll, 0).clamp(0, 1)
         ll_mask = torch.round(ll).squeeze().cpu().numpy().astype(np.uint8)
 
         da_mask = cv2.resize(da_mask, (w_orig, h_orig), interpolation=cv2.INTER_NEAREST)
