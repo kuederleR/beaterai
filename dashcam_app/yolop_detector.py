@@ -122,13 +122,14 @@ class TrtRunner:
 class YolopDetector:
     def __init__(self, model_path="data/weights/yolopv2.pt"):
         self.model_path = model_path
-        self.img_size = 640
+        self.img_size = 480
         self.download_model_if_missing()
 
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         print(f"[INFO] YolopDetector using device: {self.device}", flush=True)
 
         self.half = self.device.type != 'cpu'
+        self.model_dtype = None  # determined after loading
         self.model = None
         self.trt_runner = None
 
@@ -153,6 +154,14 @@ class YolopDetector:
                 except Exception:
                     pass
             print("[INFO] YOLOpv2 TorchScript model loaded.", flush=True)
+
+            try:
+                param = next(self.model.parameters())
+                self.model_dtype = param.dtype
+            except StopIteration:
+                self.model_dtype = torch.float16 if self.half else torch.float32
+            print(f"[INFO] Model parameter dtype: {self.model_dtype}", flush=True)
+
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -163,7 +172,7 @@ class YolopDetector:
         # Warmup is optional — skip on failure rather than discarding the model
         try:
             with torch.inference_mode():
-                dummy = torch.zeros(1, 3, self.img_size, self.img_size, dtype=torch.float16 if self.half else torch.float32).to(self.device)
+                dummy = torch.zeros(1, 3, self.img_size, self.img_size, dtype=self.model_dtype).to(self.device)
                 self.model(dummy)
             print("[INFO] YOLOpv2 model warmed up. Ready for inference.", flush=True)
         except Exception as e:
@@ -193,6 +202,11 @@ class YolopDetector:
                 print("[INFO] Exporting ONNX for TensorRT (background)...", flush=True)
                 onnx_path = self.model_path.replace('.pt', '.onnx')
                 self._export_onnx(onnx_path)
+
+                # Check trtexec availability
+                if subprocess.run('which trtexec', shell=True, capture_output=True).returncode != 0:
+                    raise RuntimeError("trtexec not found on PATH — install TensorRT or use 'apt install nvidia-tensorrt'")
+
                 print("[INFO] Building TensorRT engine via trtexec (background, may take minutes)...", flush=True)
                 cmd = [
                     'trtexec',
@@ -209,14 +223,15 @@ class YolopDetector:
                 self.trt_runner = TrtRunner(engine_path)
                 print("[INFO] TensorRT engine ready. Switched to TRT inference.", flush=True)
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 print(f"[WARN] TensorRT build failed, sticking with PyTorch: {e}", flush=True)
 
         t = threading.Thread(target=_build, daemon=True)
         t.start()
 
     def _export_onnx(self, onnx_path):
-        dtype = torch.float16 if self.half else torch.float32
-        dummy = torch.zeros(1, 3, self.img_size, self.img_size, dtype=dtype).to(self.device)
+        dummy = torch.zeros(1, 3, self.img_size, self.img_size, dtype=self.model_dtype).to(self.device)
         torch.onnx.export(
             self.model, dummy, onnx_path,
             input_names=["input"],
@@ -264,8 +279,7 @@ class YolopDetector:
 
         if trt is None:
             # --- PyTorch path ---
-            dtype = torch.float16 if self.half else torch.float32
-            img_tensor = torch.from_numpy(img_chw.astype(np.float32)).to(self.device, dtype=dtype)
+            img_tensor = torch.from_numpy(img_chw.astype(np.float32)).to(self.device, dtype=self.model_dtype)
             with torch.inference_mode():
                 [pred, anchor_grid], seg, ll = self.model(img_tensor)
                 pred = list(pred)
