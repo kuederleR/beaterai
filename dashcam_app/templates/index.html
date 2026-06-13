@@ -521,6 +521,28 @@
                 Shift the center probe left or right if lane selection keeps favoring the wrong side.
             </div>
         </div>
+
+        <div class="control-card slider-card">
+            <div class="slider-header">
+                <span class="toggle-label">Crop Top (crop_y)</span>
+                <span class="slider-value" id="cropYValue">28 px</span>
+            </div>
+            <input type="range" id="cropYSlider" class="range-input" min="0" max="200" value="28" oninput="previewCropY(this.value)" onchange="updateCrop(this.value, null)">
+            <div style="font-size: 12px; color: var(--text-secondary); text-align: center;">
+                Pixels to skip from top of inference frame (sky). Adjust so road fills the crop window.
+            </div>
+        </div>
+
+        <div class="control-card slider-card">
+            <div class="slider-header">
+                <span class="toggle-label">Crop Height (crop_h)</span>
+                <span class="slider-value" id="cropHValue">360 px</span>
+            </div>
+            <input type="range" id="cropHSlider" class="range-input" min="200" max="416" value="360" oninput="previewCropH(this.value)" onchange="updateCrop(null, this.value)">
+            <div style="font-size: 12px; color: var(--text-secondary); text-align: center;">
+                Height of the crop window sent to TwinLiteNet. Taller = more context but more sky/hood.
+            </div>
+        </div>
     </div>
 
     <script>
@@ -725,6 +747,30 @@
             centerSliderValue.innerText = `${value}px`;
         }
 
+        function previewCropY(value) {
+            document.getElementById('cropYValue').innerText = `${value} px`;
+        }
+
+        function previewCropH(value) {
+            document.getElementById('cropHValue').innerText = `${value} px`;
+        }
+
+        let cropUpdateTimeout = null;
+        function updateCrop(cropY, cropH) {
+            if (cropUpdateTimeout) clearTimeout(cropUpdateTimeout);
+            cropUpdateTimeout = setTimeout(async () => {
+                const y = cropY !== null ? cropY : parseInt(document.getElementById('cropYSlider').value);
+                const h = cropH !== null ? cropH : parseInt(document.getElementById('cropHSlider').value);
+                try {
+                    await fetch('/api/set_crop', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ crop_y: y, crop_h: h })
+                    });
+                } catch(e) {}
+            }, 300);
+        }
+
         function formatDuration(seconds) {
             const m = Math.floor(seconds / 60).toString().padStart(2, '0');
             const s = (seconds % 60).toString().padStart(2, '0');
@@ -778,6 +824,16 @@
                     const pct = (data.lane_position * 100).toFixed(0);
                     const width = data.lane_width ? data.lane_width.toFixed(1) : '--';
                     lanePosEl.innerText = `Lane: ${pct}% (${width}m)`;
+                }
+
+                // Update TwinLiteNet crop sliders
+                if (data.twinlite_crop_y !== undefined) {
+                    document.getElementById('cropYSlider').value = data.twinlite_crop_y;
+                    document.getElementById('cropYValue').innerText = `${data.twinlite_crop_y} px`;
+                }
+                if (data.twinlite_crop_h !== undefined) {
+                    document.getElementById('cropHSlider').value = data.twinlite_crop_h;
+                    document.getElementById('cropHValue').innerText = `${data.twinlite_crop_h} px`;
                 }
 
                 // Update Seg Classes

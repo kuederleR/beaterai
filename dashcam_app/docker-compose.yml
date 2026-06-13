@@ -28,7 +28,7 @@ services:
       - ./dashcam.py:/app/dashcam.py
       - ./trt_runner.py:/app/trt_runner.py
       - ./fcn_detector.py:/app/fcn_detector.py
-      - ./ufld_detector.py:/app/ufld_detector.py
+      - ./twinlite_detector.py:/app/twinlite_detector.py
       - ./build_engines.py:/app/build_engines.py
       - ./models:/app/models
       - ./templates:/app/templates

@@ -27,8 +27,7 @@ if not hasattr(cv2, 'IMREAD_UNCHANGED'):
 from flask import Flask, Response, jsonify, request, render_template
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
-# Import UFLD detector for lane lines
-from ufld_detector import ULFDLaneDetector
+from twinlite_detector import TwinLiteDetector
 
 os.environ['PYTHONUNBUFFERED'] = '1'
 
@@ -44,6 +43,8 @@ TARGET_FPS = 30
 
 INFER_WIDTH = 640
 INFER_HEIGHT = 416  # multiple of 32 (model stride) — avoids padding warnings
+TWINLITE_CROP_Y = 28
+TWINLITE_CROP_H = 360
 
 # FCW Settings
 FCW_WARNING_WIDTH = 200  # If a car's bounding box is wider than this in pixels, it's very close
@@ -175,6 +176,8 @@ state = {
     "lane_width": 0.0,
     "car_center_offset": 0.0,   # running lateral offset (m) to center car in lane
     "debug_feed_active": True,
+    "twinlite_crop_y": TWINLITE_CROP_Y,
+    "twinlite_crop_h": TWINLITE_CROP_H,
 }
 
 def update_homography(vp_override=None):
@@ -673,7 +676,7 @@ def inference_loop():
     state["cuda_available"] = torch.cuda.is_available()
     state["gpu_device_name"] = torch.cuda.get_device_name(0) if state["cuda_available"] else "None"
     
-    print("[INFO] Loading Ultralytics YOLOv8-Seg and UFLD...", flush=True)
+    print("[INFO] Loading Ultralytics YOLOv8-Seg and TwinLiteNet...", flush=True)
     from ultralytics import YOLO
     
     yolo_engine_path = "models/yolov8n-seg.engine"
@@ -685,9 +688,9 @@ def inference_loop():
             shutil.move("yolov8n-seg.engine", yolo_engine_path)
             
     det_net = YOLO(yolo_engine_path, task="segment")
-    ufld_detector = ULFDLaneDetector()
-    state["yolop_device"] = "YOLOv8-Seg + UFLD"
-    print(f"\n{'='*50}\n[DEBUG - GPU CHECK]\nCUDA Available: {state['cuda_available']}\nGPU Name: {state['gpu_device_name']}\nModels: YOLOv8-Seg + UFLD\n{'='*50}\n", flush=True)
+    twinlite = TwinLiteDetector(crop_y=TWINLITE_CROP_Y, crop_h=TWINLITE_CROP_H)
+    state["yolop_device"] = "YOLOv8-Seg + TwinLiteNet"
+    print(f"\n{'='*50}\n[DEBUG - GPU CHECK]\nCUDA Available: {state['cuda_available']}\nGPU Name: {state['gpu_device_name']}\nModels: YOLOv8-Seg + TwinLiteNet\n{'='*50}\n", flush=True)
 
     timer = StepTimer()
 
@@ -768,11 +771,12 @@ def inference_loop():
                                         pts = mask_data.astype(np.int32)
                                         cv2.drawContours(im_debug, [pts], -1, (0, 255, 0), 2)
                 
-                # We no longer generate a segmentation mask
-                da_mask = None
+                twinlite.crop_y = state.get("twinlite_crop_y", TWINLITE_CROP_Y)
+                twinlite.crop_h = state.get("twinlite_crop_h", TWINLITE_CROP_H)
+                ll_mask, da_mask = twinlite.detect(im_infer)
                 state["seg_classes"] = []
                 
-                ufld_lanes = ufld_detector.detect(im_infer)
+                ufld_lanes = TwinLiteDetector.lanes_from_mask(ll_mask, car_center_x) if ll_mask is not None else []
                 timer.track("inference", time.perf_counter() - _t_inf)
 
                 _t_remap = time.perf_counter()
@@ -1059,6 +1063,10 @@ def inference_loop():
                 else:
                     cv2.circle(im_debug, (int(K_INFER[0, 2]), 160), 5, (0, 0, 255), -1)
 
+                if da_mask is not None:
+                    da_overlay = np.zeros_like(im_debug)
+                    da_overlay[da_mask > 0] = (40, 40, 40)
+                    cv2.addWeighted(da_overlay, 0.4, im_debug, 0.6, 0, dst=im_debug)
                 if ufld_lanes:
                     for lane_pts in ufld_lanes:
                         pts_int = lane_pts.astype(np.int32)
@@ -1253,6 +1261,8 @@ def status():
         "lane_width": state.get("lane_width", 0.0),
         "debug_feed_active": state.get("debug_feed_active", True),
         "seg_classes": state.get("seg_classes", []),
+        "twinlite_crop_y": state.get("twinlite_crop_y", TWINLITE_CROP_Y),
+        "twinlite_crop_h": state.get("twinlite_crop_h", TWINLITE_CROP_H),
     })
 @app.route('/api/toggle_recording', methods=['POST'])
 def toggle_recording():
@@ -1314,6 +1324,18 @@ def api_set_center_x():
     state["car_center_x"] = int(np.clip(int(center_x), 0, INFER_WIDTH - 1))
     save_calibration_state()
     return jsonify({"success": True, "car_center_x": state["car_center_x"]})
+
+@app.route('/api/set_crop', methods=['POST'])
+def api_set_crop():
+    global state
+    data = request.json or {}
+    crop_y = data.get('crop_y', state.get("twinlite_crop_y", TWINLITE_CROP_Y))
+    crop_h = data.get('crop_h', state.get("twinlite_crop_h", TWINLITE_CROP_H))
+    state["twinlite_crop_y"] = int(np.clip(int(crop_y), 0, INFER_HEIGHT - 1))
+    state["twinlite_crop_h"] = int(np.clip(int(crop_h), 32, INFER_HEIGHT))
+    return jsonify({"success": True,
+                    "crop_y": state["twinlite_crop_y"],
+                    "crop_h": state["twinlite_crop_h"]})
 
 if __name__ == '__main__':
     print("=" * 50, flush=True)

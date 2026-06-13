@@ -1,5 +1,5 @@
 """
-Build TensorRT engines for FCN-ResNet18 and UFLD models.
+Build TensorRT engines for TwinLiteNet.
 
 Can run inside the Docker container or on the host Jetson.
 
@@ -12,11 +12,10 @@ Or on the host Jetson directly:
 Requirements inside container (already satisfied):
     - torch, torchvision  (nvcr.io base image)
     - tensorrt            (nvcr.io base image)
-    - internet for torchhub UFLD model download
+    - internet for model downloads
 
 Output:
-    models/fcn_resnet18.engine
-    models/ufld.engine
+    models/twinlite.engine
 """
 
 import os
@@ -177,51 +176,34 @@ def build_fcn_engine():
 
 
 # ---------------------------------------------------------------------------
-# UFLD v1 (Ultra-Fast-Lane-Detection)
+# TwinLiteNet
 # ---------------------------------------------------------------------------
 
-UFLD_ONNX_URL = (
-    "https://s3.ap-northeast-2.wasabisys.com/pinto-model-zoo/"
-    "140_Ultra-Fast-Lane-Detection/resources_tusimple.tar.gz"
+TWINLITE_ONNX_URL = (
+    "https://raw.githubusercontent.com/harrylal/"
+    "TwinLiteNet-onnxruntime/main/models/best.onnx"
 )
 
-def build_ufld_engine():
-    engine_path = "models/ufld.engine"
-    onnx_path = "models/ufld.onnx"
+def build_twinlite_engine():
+    engine_path = "models/twinlite.engine"
+    onnx_path = "models/twinlite.onnx"
 
     if os.path.exists(engine_path):
         print(f"[build] {engine_path} exists, skipping")
         return
 
-    # Check for a pre-downloaded ONNX first
     if os.path.exists(onnx_path):
         print(f"[build] Using existing {onnx_path}", flush=True)
-        build_engine_from_onnx(onnx_path, engine_path)
-        return
-
-    print("[build] Downloading pre-exported UFLD v1 ONNX (TuSimple) ...", flush=True)
-    import urllib.request
-    import tarfile
-
-    archive_path = "/tmp/ufld_resources.tar.gz"
-    try:
-        urllib.request.urlretrieve(UFLD_ONNX_URL, archive_path)
-        with tarfile.open(archive_path, "r:gz") as tar:
-            members = [m for m in tar.getmembers() if m.name.endswith(".onnx")]
-            if not members:
-                print("[build] No ONNX file found in archive", flush=True)
-                sys.exit(1)
-            onnx_member = members[0]
-            print(f"[build] Extracting {onnx_member.name} ...", flush=True)
-            tar.extract(onnx_member, path="models/")
-            extracted = os.path.join("models", onnx_member.name)
-            os.rename(extracted, onnx_path)
-        os.remove(archive_path)
-        print(f"[build] ONNX saved to {onnx_path}", flush=True)
-    except Exception as e:
-        print(f"[build] Download or extraction failed: {e}", flush=True)
-        print("[build] Place a pre-exported ufld.onnx in models/ and re-run.", flush=True)
-        sys.exit(1)
+    else:
+        print("[build] Downloading TwinLiteNet ONNX ...", flush=True)
+        import urllib.request
+        try:
+            urllib.request.urlretrieve(TWINLITE_ONNX_URL, onnx_path)
+            print(f"[build] ONNX saved to {onnx_path}", flush=True)
+        except Exception as e:
+            print(f"[build] Download failed: {e}", flush=True)
+            print("[build] Place twinlite.onnx in models/ and re-run.", flush=True)
+            sys.exit(1)
 
     build_engine_from_onnx(onnx_path, engine_path)
 
@@ -229,5 +211,5 @@ def build_ufld_engine():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    build_ufld_engine()
+    build_twinlite_engine()
     print("[build] Done. Engines are in models/", flush=True)
