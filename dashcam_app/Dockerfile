@@ -10,6 +10,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
+    python3-opencv \
     && rm -rf /var/lib/apt/lists/*
 
 # Install python requirements
@@ -17,11 +18,9 @@ COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 RUN pip3 install --no-cache-dir ultralytics --extra-index-url https://pypi.org/simple
 
-# Ultralytics can cause OpenCV version conflicts by pulling in opencv-python.
-# We completely wipe any conflicting OpenCV packages and install a pristine 
-# opencv-python-headless to ensure all cv2 functions (like initUndistortRectifyMap) work flawlessly.
-RUN pip3 uninstall -y opencv-python opencv-python-headless opencv-contrib-python && \
-    pip3 install --no-cache-dir opencv-python-headless==4.9.0.80
+# Ultralytics pulls in pip opencv packages which throw cv2.dnn.DictValue errors on Jetson.
+# We uninstall them so the container safely falls back to the native python3-opencv installed via apt!
+RUN pip3 uninstall -y opencv-python opencv-python-headless opencv-contrib-python
 
 # Create model weights and recordings directories
 RUN mkdir -p recordings models
