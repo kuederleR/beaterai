@@ -740,7 +740,7 @@ def inference_loop():
                 jetson.utils.cudaDeviceSynchronize()
                 
                 class_mask_np = jetson.utils.cudaToNumpy(class_mask)
-                da_mask = (class_mask_np == 1).astype(np.uint8)
+                da_mask = (np.squeeze(class_mask_np) == 1).astype(np.uint8)
                 
                 ufld_lanes = ufld_detector.detect(im_infer)
                 det_boxes = []
