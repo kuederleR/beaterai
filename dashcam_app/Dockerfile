@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y \
     curl \
     cmake \
     libpython3-dev \
+    libgstreamer1.0-dev \
+    libgstreamer-plugins-base1.0-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Build jetson-inference from source
