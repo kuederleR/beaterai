@@ -674,11 +674,11 @@ def inference_loop():
     state["cuda_available"] = torch.cuda.is_available()
     state["gpu_device_name"] = torch.cuda.get_device_name(0) if state["cuda_available"] else "None"
     
-    print("[INFO] Loading jetson-inference FCN-ResNet18 and UFLD...", flush=True)
-    fcn_net = jetson.inference.segNet("fcn-resnet18-cityscapes-512x256")
+    print("[INFO] Loading jetson-inference SSD-MobileNet-v2 and UFLD...", flush=True)
+    det_net = jetson.inference.detectNet("ssd-mobilenet-v2", threshold=0.5)
     ufld_detector = ULFDLaneDetector()
-    state["yolop_device"] = "Replaced by FCN-ResNet18 + UFLD"
-    print(f"\n{'='*50}\n[DEBUG - GPU CHECK]\nCUDA Available: {state['cuda_available']}\nGPU Name: {state['gpu_device_name']}\nModels: FCN-ResNet18 + UFLD\n{'='*50}\n", flush=True)
+    state["yolop_device"] = "SSD-MobileNet-v2 + UFLD"
+    print(f"\n{'='*50}\n[DEBUG - GPU CHECK]\nCUDA Available: {state['cuda_available']}\nGPU Name: {state['gpu_device_name']}\nModels: SSD-MobileNet-v2 + UFLD\n{'='*50}\n", flush=True)
 
     timer = StepTimer()
 
@@ -730,33 +730,29 @@ def inference_loop():
             if state["adas_enabled"] or lane_perception_active:
                 _t_inf = time.perf_counter()
                 
-                # jetson-inference Segmentation
+                # jetson-inference Object Detection
                 cuda_img = jetson.utils.cudaFromNumpy(cv2.cvtColor(im_infer, cv2.COLOR_BGR2RGBA))
-                fcn_net.Process(cuda_img)
-                
-                # Extract road mask for BEV (Cityscapes road class is 1)
-                class_mask = jetson.utils.cudaAllocMapped(width=INFER_WIDTH, height=INFER_HEIGHT, format="gray8")
-                fcn_net.Mask(class_mask)
-                
-                # Overlay the full color segmentation onto the original camera frame
-                fcn_net.Overlay(cuda_img, filter_mode="linear")
+                detections = det_net.Detect(cuda_img, overlay="none")
                 jetson.utils.cudaDeviceSynchronize()
                 
-                # Retrieve the composited image for the web UI
-                overlay_np = jetson.utils.cudaToNumpy(cuda_img)
-                im_debug = cv2.cvtColor(overlay_np, cv2.COLOR_RGBA2BGR)
+                det_boxes = []
+                for det in detections:
+                    # SSD-Mobilenet-v2 COCO vehicle classes: 3 (car), 4 (motorcycle), 6 (bus), 8 (truck)
+                    if det.ClassID in [3, 4, 6, 8]:
+                        det_boxes.append({
+                            "x1": det.Left,
+                            "y1": det.Top,
+                            "x2": det.Right,
+                            "y2": det.Bottom,
+                            "class": det.ClassID,
+                            "conf": det.Confidence
+                        })
                 
-                class_mask_np = jetson.utils.cudaToNumpy(class_mask)
-                class_mask_sq = np.squeeze(class_mask_np)
-                
-                unique, counts = np.unique(class_mask_sq, return_counts=True)
-                sorted_indices = np.argsort(-counts)
-                state["seg_classes"] = [f"{int(unique[i])}:{counts[i]}" for i in sorted_indices]
-                
-                da_mask = (class_mask_sq == 1).astype(np.uint8)
+                # We no longer generate a segmentation mask
+                da_mask = None
+                state["seg_classes"] = []
                 
                 ufld_lanes = ufld_detector.detect(im_infer)
-                det_boxes = []
                 timer.track("inference", time.perf_counter() - _t_inf)
 
                 _t_remap = time.perf_counter()
