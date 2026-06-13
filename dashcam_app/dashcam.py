@@ -740,7 +740,7 @@ def inference_loop():
                 _t_inf = time.perf_counter()
                 
                 # Ultralytics YOLOv8 Instance Segmentation
-                results = det_net.predict(im_infer, imgsz=(INFER_HEIGHT, INFER_WIDTH), conf=0.4, verbose=False)
+                results = det_net.predict(im_infer, imgsz=(INFER_HEIGHT, INFER_WIDTH), conf=0.25, verbose=False)
                 
                 det_boxes = []
                 if len(results) > 0:
