@@ -95,12 +95,16 @@ class ULFDLaneDetector:
             for row_idx in range(self.num_row):
                 cls_logits = out[lane_idx, row_idx, :num_col_actual]
                 exist_logit = out[lane_idx, row_idx, num_col_actual]
-                # Apply sigmoid to existence logit for consistent threshold
                 exist_prob = 1.0 / (1.0 + np.exp(-exist_logit))
                 if exist_prob < 0.5:
                     continue
-                cls_prob = np.exp(cls_logits - np.max(cls_logits))
+                # Softmax over column classes
+                cls_max = np.max(cls_logits)
+                cls_prob = np.exp(cls_logits - cls_max)
                 cls_prob = cls_prob / cls_prob.sum()
+                # Skip if no column is clearly preferred (flat distribution)
+                if np.max(cls_prob) < 0.5:
+                    continue
                 col_idx = np.argmax(cls_prob)
                 x_uf = col_sample[col_idx] * scale_x
                 y_uf = self.row_anchor[row_idx] * scale_y
