@@ -735,13 +735,11 @@ def inference_loop():
                 fcn_net.Process(cuda_img)
                 
                 # Extract road mask for BEV (Cityscapes road class is 1)
-                grid_w, grid_h = fcn_net.GetGridSize()
-                class_mask = jetson.utils.cudaAllocMapped(width=grid_w, height=grid_h, format="gray8")
-                fcn_net.Mask(class_mask, grid_w, grid_h)
+                class_mask = jetson.utils.cudaAllocMapped(width=INFER_WIDTH, height=INFER_HEIGHT, format="gray8")
+                fcn_net.Mask(class_mask)
                 jetson.utils.cudaDeviceSynchronize()
                 
                 class_mask_np = jetson.utils.cudaToNumpy(class_mask)
-                class_mask_np = cv2.resize(class_mask_np, (INFER_WIDTH, INFER_HEIGHT), interpolation=cv2.INTER_NEAREST)
                 da_mask = (class_mask_np == 1).astype(np.uint8)
                 
                 ufld_lanes = ufld_detector.detect(im_infer)
@@ -1034,7 +1032,7 @@ def inference_loop():
 
                 if da_mask is not None:
                     da_bool = da_mask.astype(bool, copy=False)
-                    im_debug[da_bool] = (im_debug[da_bool].astype(np.float32) * 0.72 + np.array([0, 100, 0], dtype=np.float32) * 0.28).astype(np.uint8)
+                    im_debug[da_bool] = (im_debug[da_bool].astype(np.float32) * 0.6 + np.array([0, 255, 0], dtype=np.float32) * 0.4).astype(np.uint8)
                 
                 if ufld_lanes:
                     for lane_pts in ufld_lanes:
