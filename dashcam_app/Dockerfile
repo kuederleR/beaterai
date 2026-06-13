@@ -6,10 +6,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /app
 
-# Nuke the broken/headless system cv2 to prevent namespace conflicts with pip
-RUN rm -rf /usr/lib/python3.10/dist-packages/cv2 \
-           /usr/local/lib/python3.10/dist-packages/cv2
-
 # Install requirements
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
