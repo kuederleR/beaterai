@@ -741,7 +741,11 @@ def inference_loop():
                 
                 class_mask_np = jetson.utils.cudaToNumpy(class_mask)
                 class_mask_sq = np.squeeze(class_mask_np)
-                state["seg_classes"] = np.unique(class_mask_sq).tolist()
+                
+                unique, counts = np.unique(class_mask_sq, return_counts=True)
+                sorted_indices = np.argsort(-counts)
+                state["seg_classes"] = [f"{int(unique[i])}:{counts[i]}" for i in sorted_indices]
+                
                 da_mask = (class_mask_sq == 1).astype(np.uint8)
                 
                 ufld_lanes = ufld_detector.detect(im_infer)
