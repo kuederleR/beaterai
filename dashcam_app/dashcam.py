@@ -43,7 +43,7 @@ CAPTURE_HEIGHT = 800
 TARGET_FPS = 30
 
 INFER_WIDTH = 640
-INFER_HEIGHT = 400
+INFER_HEIGHT = 416  # multiple of 32 (model stride) — avoids padding warnings
 
 # FCW Settings
 FCW_WARNING_WIDTH = 200  # If a car's bounding box is wider than this in pixels, it's very close
@@ -102,7 +102,7 @@ def load_camera_calibration():
 
 CAMERA_MATRIX, DIST_COEFF = load_camera_calibration()
 
-# Camera matrix scaled for inference size (640x400)
+    # Camera matrix scaled for inference size (640x416)
 K_INFER = np.array([
     [CAMERA_MATRIX[0, 0] * 0.5, 0.0, CAMERA_MATRIX[0, 2] * 0.5],
     [0.0, CAMERA_MATRIX[1, 1] * 0.5, CAMERA_MATRIX[1, 2] * 0.5],
@@ -1151,7 +1151,7 @@ def generate_debug_mjpeg():
             frame = latest_debug_frame
         if not is_active:
             if no_feed_frame is None:
-                img = np.zeros((400, 640, 3), dtype=np.uint8)
+                img = np.zeros((INFER_HEIGHT, INFER_WIDTH, 3), dtype=np.uint8)
                 cv2.putText(img, "Perspective feed disabled",
                             (40, 200), cv2.FONT_HERSHEY_SIMPLEX, 1,
                             (100, 100, 100), 2)
@@ -1159,7 +1159,7 @@ def generate_debug_mjpeg():
                 no_feed_frame = buf.tobytes()
             frame = no_feed_frame
         elif frame is None:
-            wait_img = np.zeros((400, 640, 3), dtype=np.uint8)
+            wait_img = np.zeros((INFER_HEIGHT, INFER_WIDTH, 3), dtype=np.uint8)
             cv2.putText(wait_img, "Initializing Debug Feed...",
                         (40, 200), cv2.FONT_HERSHEY_SIMPLEX, 1,
                         (255, 255, 255), 2)
