@@ -25,7 +25,8 @@ from flask import Flask, Response, jsonify, request, render_template
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 # Import FCN-ResNet18 and UFLD detectors for scene parse + lane lines
-from fcn_detector import FCNResNetDetector
+import jetson.inference
+import jetson.utils
 from ufld_detector import ULFDLaneDetector
 
 os.environ['PYTHONUNBUFFERED'] = '1'
@@ -671,8 +672,8 @@ def inference_loop():
     state["cuda_available"] = torch.cuda.is_available()
     state["gpu_device_name"] = torch.cuda.get_device_name(0) if state["cuda_available"] else "None"
     
-    print("[INFO] Loading FCN-ResNet18 and UFLD detectors...", flush=True)
-    fcn_detector = FCNResNetDetector()
+    print("[INFO] Loading jetson-inference FCN-ResNet18 and UFLD...", flush=True)
+    fcn_net = jetson.inference.segNet("fcn-resnet18-cityscapes-512x256")
     ufld_detector = ULFDLaneDetector()
     state["yolop_device"] = "Replaced by FCN-ResNet18 + UFLD"
     print(f"\n{'='*50}\n[DEBUG - GPU CHECK]\nCUDA Available: {state['cuda_available']}\nGPU Name: {state['gpu_device_name']}\nModels: FCN-ResNet18 + UFLD\n{'='*50}\n", flush=True)
@@ -726,7 +727,28 @@ def inference_loop():
 
             if state["adas_enabled"] or lane_perception_active:
                 _t_inf = time.perf_counter()
-                da_mask = fcn_detector.detect(im_infer)
+                
+                # jetson-inference Segmentation
+                cuda_img = jetson.utils.cudaFromNumpy(cv2.cvtColor(im_infer, cv2.COLOR_BGR2RGBA))
+                fcn_net.Process(cuda_img)
+                
+                # Extract road mask for BEV (Cityscapes road class is 0)
+                grid_w, grid_h = fcn_net.GetGridSize()
+                class_mask = jetson.utils.cudaAllocMapped(width=grid_w, height=grid_h, format="gray8")
+                fcn_net.Mask(class_mask, grid_w, grid_h)
+                jetson.utils.cudaDeviceSynchronize()
+                
+                class_mask_np = jetson.utils.cudaToNumpy(class_mask)
+                class_mask_np = cv2.resize(class_mask_np, (INFER_WIDTH, INFER_HEIGHT), interpolation=cv2.INTER_NEAREST)
+                da_mask = (class_mask_np == 0).astype(np.uint8)
+                
+                # Overlay segmentation on debug frame
+                overlay_img = jetson.utils.cudaAllocMapped(width=INFER_WIDTH, height=INFER_HEIGHT, format="rgba8")
+                fcn_net.Overlay(overlay_img, filter_mode="linear")
+                jetson.utils.cudaDeviceSynchronize()
+                overlay_np = jetson.utils.cudaToNumpy(overlay_img)
+                im_debug = cv2.cvtColor(overlay_np, cv2.COLOR_RGBA2BGR)
+                
                 ufld_lanes = ufld_detector.detect(im_infer)
                 det_boxes = []
                 timer.track("inference", time.perf_counter() - _t_inf)

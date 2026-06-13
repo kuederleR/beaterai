@@ -16,7 +16,19 @@ RUN apt-get update && apt-get install -y \
     git \
     wget \
     curl \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
+
+# Build jetson-inference from source
+ENV BUILD_INTERACTIVE=0
+RUN git clone --recursive https://github.com/dusty-nv/jetson-inference /opt/jetson-inference && \
+    cd /opt/jetson-inference && \
+    mkdir build && \
+    cd build && \
+    cmake ../ && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
 
 WORKDIR /app
 
