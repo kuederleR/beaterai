@@ -740,7 +740,9 @@ def inference_loop():
                 jetson.utils.cudaDeviceSynchronize()
                 
                 class_mask_np = jetson.utils.cudaToNumpy(class_mask)
-                da_mask = (np.squeeze(class_mask_np) == 1).astype(np.uint8)
+                class_mask_sq = np.squeeze(class_mask_np)
+                state["seg_classes"] = np.unique(class_mask_sq).tolist()
+                da_mask = (class_mask_sq == 1).astype(np.uint8)
                 
                 ufld_lanes = ufld_detector.detect(im_infer)
                 det_boxes = []
@@ -1230,8 +1232,8 @@ def status():
         "lane_position": state.get("lane_position", 0.5),
         "lane_width": state.get("lane_width", 0.0),
         "debug_feed_active": state.get("debug_feed_active", True),
+        "seg_classes": state.get("seg_classes", []),
     })
-
 @app.route('/api/toggle_recording', methods=['POST'])
 def toggle_recording():
     data = request.json

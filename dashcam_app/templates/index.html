@@ -410,6 +410,7 @@
                 <div id="fpsDisplay">FPS: --</div>
                 <div id="centerDisplay">Car Center X: --</div>
                 <div id="lanePosDisplay">Lane Pos: --</div>
+                <div id="segClassesDisplay" style="color: #6ee7b7;">Seg Classes: --</div>
                 <div id="durationDisplay" style="display:none; color: #fca5a5;">REC: 00:00</div>
             </div>
             <img id="videoFeed" src="/debug_feed" class="video-feed" alt="Perspective Mask Feed" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjgwIiBoZWlnaHQ9IjgwMCI+PHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsbD0iIzIyMiIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LWZhbWlseT0iYXJpYWwiIGZvbnQtc2l6ZT0iMjQiIGZpbGw9IiM2NjYiIGRvbWluYW50LWJhc2VsaW5lPSJtaWRkbGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPlBlcnNwZWN0aXZlIEZlZWQgT2ZmbGluZTwvdGV4dD48L3N2Zz4='" />
@@ -777,6 +778,12 @@
                     const pct = (data.lane_position * 100).toFixed(0);
                     const width = data.lane_width ? data.lane_width.toFixed(1) : '--';
                     lanePosEl.innerText = `Lane: ${pct}% (${width}m)`;
+                }
+
+                // Update Seg Classes
+                const segClassesEl = document.getElementById('segClassesDisplay');
+                if (segClassesEl && data.seg_classes) {
+                    segClassesEl.innerText = `Seg Classes: [${data.seg_classes.join(', ')}]`;
                 }
 
                 // Update Recording UI based on server state
