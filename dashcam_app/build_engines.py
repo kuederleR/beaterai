@@ -177,8 +177,13 @@ def build_fcn_engine():
 
 
 # ---------------------------------------------------------------------------
-# UFLD  (RESA)
+# UFLD v1 (Ultra-Fast-Lane-Detection)
 # ---------------------------------------------------------------------------
+
+UFLD_ONNX_URL = (
+    "https://s3.ap-northeast-2.wasabisys.com/pinto-model-zoo/"
+    "140_Ultra-Fast-Lane-Detection/resources_tusimple.tar.gz"
+)
 
 def build_ufld_engine():
     engine_path = "models/ufld.engine"
@@ -194,28 +199,30 @@ def build_ufld_engine():
         build_engine_from_onnx(onnx_path, engine_path)
         return
 
-    print("[build] Exporting UFLD (RESA) to ONNX ...", flush=True)
-    import torch
+    print("[build] Downloading pre-exported UFLD v1 ONNX (TuSimple) ...", flush=True)
+    import urllib.request
+    import tarfile
 
+    archive_path = "/tmp/ufld_resources.tar.gz"
     try:
-        model = torch.hub.load("ZJULearning/RESA", "RESA_Net", pretrained=True)
+        urllib.request.urlretrieve(UFLD_ONNX_URL, archive_path)
+        with tarfile.open(archive_path, "r:gz") as tar:
+            members = [m for m in tar.getmembers() if m.name.endswith(".onnx")]
+            if not members:
+                print("[build] No ONNX file found in archive", flush=True)
+                sys.exit(1)
+            onnx_member = members[0]
+            print(f"[build] Extracting {onnx_member.name} ...", flush=True)
+            tar.extract(onnx_member, path="models/")
+            extracted = os.path.join("models", onnx_member.name)
+            os.rename(extracted, onnx_path)
+        os.remove(archive_path)
+        print(f"[build] ONNX saved to {onnx_path}", flush=True)
     except Exception as e:
-        print(f"[build] torch.hub failed: {e}", flush=True)
+        print(f"[build] Download or extraction failed: {e}", flush=True)
         print("[build] Place a pre-exported ufld.onnx in models/ and re-run.", flush=True)
         sys.exit(1)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.eval().to(device)
-
-    dummy = torch.zeros(1, 3, 288, 800, device=device)
-    torch.onnx.export(
-        model, dummy, onnx_path,
-        input_names=["input"],
-        output_names=["output"],
-        opset_version=12,
-        do_constant_folding=True,
-    )
-    print(f"[build] ONNX saved to {onnx_path}", flush=True)
     build_engine_from_onnx(onnx_path, engine_path)
 
 
