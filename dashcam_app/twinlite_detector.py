@@ -83,9 +83,9 @@ class TwinLiteDetector:
 
         for row in range(h - 1, h // 3, -1):
             row_data = ll_mask[row, :]
-            if np.max(row_data) < 128:
+            if np.max(row_data) == 0:
                 continue
-            nonzero = np.where(row_data > 128)[0]
+            nonzero = np.where(row_data > 0)[0]
             if len(nonzero) == 0:
                 continue
             gaps = np.diff(nonzero) > 4

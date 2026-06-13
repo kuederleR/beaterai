@@ -1067,6 +1067,10 @@ def inference_loop():
                     da_overlay = np.zeros_like(im_debug)
                     da_overlay[da_mask > 0] = (40, 40, 40)
                     cv2.addWeighted(da_overlay, 0.4, im_debug, 0.6, 0, dst=im_debug)
+                if ll_mask is not None:
+                    ll_overlay = np.zeros_like(im_debug)
+                    ll_overlay[ll_mask > 0] = (0, 255, 255)
+                    cv2.addWeighted(ll_overlay, 0.3, im_debug, 0.7, 0, dst=im_debug)
                 if ufld_lanes:
                     for lane_pts in ufld_lanes:
                         pts_int = lane_pts.astype(np.int32)
