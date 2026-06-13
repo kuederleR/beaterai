@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y \
 ENV BUILD_INTERACTIVE=0
 RUN git clone --recursive https://github.com/dusty-nv/jetson-inference /opt/jetson-inference && \
     cd /opt/jetson-inference && \
+    sed -i 's/set(PYTHON_BINDING_VERSIONS.*/set(PYTHON_BINDING_VERSIONS 3.10)/g' python/CMakeLists.txt && \
     mkdir build && \
     cd build && \
     cmake ../ && \
