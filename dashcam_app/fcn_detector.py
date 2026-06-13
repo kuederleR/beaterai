@@ -30,6 +30,7 @@ class FCNResNetDetector:
             self._load_pytorch_fallback()
         else:
             print(f"[FCN] Engine file {engine_path} not found. Loading PyTorch fallback.", flush=True)
+            print(f"[FCN] Run python3 build_engines.py to build it, or place a pre-built engine.", flush=True)
             self._load_pytorch_fallback()
 
     def _load_pytorch_fallback(self):
@@ -37,12 +38,26 @@ class FCNResNetDetector:
             import torch
             import torchvision
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            try:
-                weights = torchvision.models.segmentation.FCN_ResNet18_Weights.CITYSCAPES_512x256
-            except AttributeError:
-                weights = "CITYSCAPES_512x256"
-            self.model = torchvision.models.segmentation.fcn_resnet18(weights=weights)
-            self.model.eval().to(self.device)
+
+            # Try multiple torchvision versions (weights API v2, v1, pretrained bool)
+            model = None
+            for attempt in range(3):
+                try:
+                    if attempt == 0:
+                        w = torchvision.models.segmentation.FCN_ResNet18_Weights.CITYSCAPES_512x256
+                        model = torchvision.models.segmentation.fcn_resnet18(weights=w)
+                    elif attempt == 1:
+                        model = torchvision.models.segmentation.fcn_resnet18(weights="CITYSCAPES_512x256")
+                    else:
+                        model = torchvision.models.segmentation.fcn_resnet18(pretrained=True)
+                    break
+                except (AttributeError, TypeError, ValueError):
+                    continue
+
+            if model is None:
+                raise ImportError("Could not load FCN-ResNet18 with any known weights API")
+
+            self.model = model.eval().to(self.device)
             print(f"[FCN] PyTorch fallback loaded (device={self.device})", flush=True)
         except Exception as e:
             print(f"[FCN] PyTorch fallback failed: {e}", flush=True)

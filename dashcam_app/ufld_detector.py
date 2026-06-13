@@ -36,7 +36,8 @@ class ULFDLaneDetector:
             self._load_pytorch_fallback()
 
     def _load_pytorch_fallback(self):
-        print("[UFLD] No TensorRT engine available. UFLD requires a pre-built TensorRT engine.", flush=True)
+        print("[UFLD] No TensorRT engine found in models/ufld.engine.", flush=True)
+        print("[UFLD] Run python3 build_engines.py to build it, or place a pre-built engine.", flush=True)
         self.model = None
 
     def _preprocess(self, img):
