@@ -1,5 +1,6 @@
 import sys
 import os
+import shutil
 import logging
 import time
 import threading
@@ -681,7 +682,7 @@ def inference_loop():
         model = YOLO("yolov8n-seg.pt")
         model.export(format="engine", device="0", half=True, workspace=2)
         if os.path.exists("yolov8n-seg.engine"):
-            os.rename("yolov8n-seg.engine", yolo_engine_path)
+            shutil.move("yolov8n-seg.engine", yolo_engine_path)
             
     det_net = YOLO(yolo_engine_path, task="segment")
     ufld_detector = ULFDLaneDetector()
