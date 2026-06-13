@@ -47,9 +47,23 @@ class TwinLiteDetector:
         h, w = img.shape[:2]
         inp = self._preprocess(img)
         outputs = self.trt_runner.infer(inp)
-        # outputs[0] = "da" logits, outputs[1] = "ll" logits
-        # Each shape: (1, 2, 360, 640) or (2, 360, 640)
-        da_raw, ll_raw = outputs[0], outputs[1]
+        # Outputs from TensorRT may not preserve ONNX output_names order.
+        # Auto-detect: lane lines are sparse (~1-5% of pixels), drivable area is dense.
+        # Compare sparsity to decide which is which.
+        def _sparsity(logits):
+            if logits.ndim == 4:
+                cls = np.argmax(logits, axis=1)[0]
+            elif logits.ndim == 3:
+                cls = np.argmax(logits, axis=0)
+            else:
+                return 0.5
+            return float(np.mean(cls > 0))
+
+        s0, s1 = _sparsity(outputs[0]), _sparsity(outputs[1])
+        if s0 < s1:
+            ll_raw, da_raw = outputs[0], outputs[1]
+        else:
+            da_raw, ll_raw = outputs[0], outputs[1]
 
         def _argmax_mask(logits):
             if logits.ndim == 4:
