@@ -680,7 +680,7 @@ def inference_loop():
     if not os.path.exists(yolo_engine_path):
         print("[INFO] YOLOv8-Seg engine not found. Exporting to TensorRT (this takes a few minutes)...", flush=True)
         model = YOLO("yolov8n-seg.pt")
-        model.export(format="engine", device="0", half=True, workspace=6)
+        model.export(format="engine", imgsz=(INFER_HEIGHT, INFER_WIDTH), device="0", half=True, workspace=6)
         if os.path.exists("yolov8n-seg.engine"):
             shutil.move("yolov8n-seg.engine", yolo_engine_path)
             
