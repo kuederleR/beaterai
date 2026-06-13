@@ -1,6 +1,6 @@
-# Use the community-maintained L4T PyTorch base image for JetPack 6.x
+# Use the unified NVIDIA NGC PyTorch iGPU Container
 # This image contains PyTorch and TensorRT, avoiding the bloat of jetson-inference.
-FROM dustynv/l4t-pytorch:r36.2.0
+FROM nvcr.io/nvidia/pytorch:24.03-py3-igpu
 
 ENV DEBIAN_FRONTEND=noninteractive
 
