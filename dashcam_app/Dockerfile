@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     curl \
     cmake \
+    libpython3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Build jetson-inference from source
@@ -26,7 +27,7 @@ RUN git clone --recursive https://github.com/dusty-nv/jetson-inference /opt/jets
     mkdir build && \
     cd build && \
     cmake ../ && \
-    make -j$(nproc) && \
+    make -j2 && \
     make install && \
     ldconfig
 
