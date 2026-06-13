@@ -33,6 +33,6 @@ services:
       - ./templates:/app/templates
     # WARNING: If your camera is physically UNPLUGGED, you MUST comment out the two lines below, 
     # otherwise Docker will crash trying to find /dev/video0.
-    devices:
-      - /dev/video0:/dev/video0
+    # devices:
+    #   - /dev/video0:/dev/video0
     restart: unless-stopped
