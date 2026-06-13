@@ -222,6 +222,5 @@ def build_ufld_engine():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    build_fcn_engine()
     build_ufld_engine()
     print("[build] Done. Engines are in models/", flush=True)
