@@ -28,13 +28,13 @@ RUN rm -rf /usr/lib/python3.10/dist-packages/cv2 \
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Attempt to install Jetson ONNXRuntime GPU. If it fails, fallback to CPU version.
-RUN pip3 install --no-cache-dir --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu122/ onnxruntime-gpu || pip3 install --no-cache-dir onnxruntime
-# Create weights and recordings directories
-RUN mkdir -p data/weights recordings
+# Create model weights and recordings directories
+RUN mkdir -p recordings models
 
 # Copy our custom dashcam application
-COPY yolop_detector.py .
+COPY trt_runner.py .
+COPY fcn_detector.py .
+COPY ufld_detector.py .
 COPY dashcam.py .
 COPY templates/ templates/
 COPY install_service.sh .

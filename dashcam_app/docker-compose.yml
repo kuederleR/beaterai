@@ -24,9 +24,11 @@ services:
       - PYTHONUNBUFFERED=1
     volumes:
       - ./recordings:/app/recordings
-      - ../weights:/app/data/weights
+      - ../weights:/app/weights
       - ./dashcam.py:/app/dashcam.py
-      - ./yolop_detector.py:/app/yolop_detector.py
+      - ./trt_runner.py:/app/trt_runner.py
+      - ./fcn_detector.py:/app/fcn_detector.py
+      - ./ufld_detector.py:/app/ufld_detector.py
       - ./models:/app/models
       - ./templates:/app/templates
     # WARNING: If your camera is physically UNPLUGGED, you MUST comment out the two lines below, 

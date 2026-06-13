@@ -24,8 +24,9 @@ if not hasattr(cv2, 'IMREAD_UNCHANGED'):
 from flask import Flask, Response, jsonify, request, render_template
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
-# Import YolopDetector for unified GPU inference
-from yolop_detector import YolopDetector
+# Import FCN-ResNet18 and UFLD detectors for scene parse + lane lines
+from fcn_detector import FCNResNetDetector
+from ufld_detector import ULFDLaneDetector
 
 os.environ['PYTHONUNBUFFERED'] = '1'
 
@@ -269,141 +270,85 @@ def road_to_image(pts_road):
     return img
 
 
-def estimate_lane_lines_in_image(ll_mask, car_center_x):
-    if ll_mask is None:
+def estimate_vp_from_ufld_lanes(lanes, img_w, img_h):
+    if not lanes or len(lanes) < 2:
         return None
-
-    row_step = 4
-    max_jump_px = 36.0
-    min_points = 8
-
-    def collect_side_points(direction):
-        points = []
-        prev_u = None
-
-        for v in range(INFER_HEIGHT - 1, max(120, int(INFER_HEIGHT * 0.35)), -row_step):
-            row = ll_mask[v]
-            cols = np.flatnonzero(row > 0)
-            if len(cols) == 0:
-                continue
-
-            if direction == "left":
-                cols = cols[cols < car_center_x]
-                if len(cols) == 0:
-                    continue
-                candidate = cols[-1]
-            else:
-                cols = cols[cols > car_center_x]
-                if len(cols) == 0:
-                    continue
-                candidate = cols[0]
-
-            seg_left = candidate
-            seg_right = candidate
-            while seg_left - 1 >= 0 and row[seg_left - 1] > 0:
-                seg_left -= 1
-            while seg_right + 1 < len(row) and row[seg_right + 1] > 0:
-                seg_right += 1
-
-            segment_center = 0.5 * (seg_left + seg_right)
-            if prev_u is not None and abs(segment_center - prev_u) > max_jump_px:
-                continue
-
-            points.append((float(segment_center), float(v)))
-            prev_u = segment_center
-
-        return np.array(points, dtype=np.float32) if len(points) >= min_points else None
-
-    def fit_side_line(points):
-        if points is None or len(points) < min_points:
-            return None
-        vs = points[:, 1]
-        us = points[:, 0]
+    lines = []
+    for pts in lanes:
+        if len(pts) < 4:
+            continue
+        vs = pts[:, 1]
+        us = pts[:, 0]
         try:
             line = np.polyfit(vs, us, 1)
-            fit_us = np.polyval(line, vs)
-            residuals = np.abs(us - fit_us)
-            inliers = residuals < 8.0
-            if np.sum(inliers) < min_points:
+            lines.append(line)
+        except Exception:
+            continue
+    if len(lines) < 2:
+        return None
+    vp_xs, vp_ys = [], []
+    for i in range(len(lines)):
+        for j in range(i + 1, len(lines)):
+            m1, c1 = lines[i]
+            m2, c2 = lines[j]
+            if abs(m1 - m2) < 0.01:
+                continue
+            v = (c2 - c1) / (m1 - m2)
+            u = m1 * v + c1
+            if 0 < u < img_w and 0 < v < img_h:
+                vp_xs.append(u)
+                vp_ys.append(v)
+    if len(vp_xs) < 2:
+        return None
+    return float(np.median(vp_xs)), float(np.median(vp_ys))
+
+
+def fit_lanes_from_ufld_points(lanes, car_center_x, img_w, img_h):
+    if not lanes:
+        return None, None
+    left_points = None
+    right_points = None
+    min_left_dist = float('inf')
+    min_right_dist = float('inf')
+    for lane_pts in lanes:
+        if len(lane_pts) < 4:
+            continue
+        bottom_idx = np.argmax(lane_pts[:, 1])
+        x_bottom = lane_pts[bottom_idx, 0]
+        if x_bottom < car_center_x:
+            dist = car_center_x - x_bottom
+            if dist < min_left_dist:
+                min_left_dist = dist
+                left_points = lane_pts
+        else:
+            dist = x_bottom - car_center_x
+            if dist < min_right_dist:
+                min_right_dist = dist
+                right_points = lane_pts
+
+    def project_and_fit(pts):
+        if pts is None or len(pts) < 4:
+            return None
+        pts_road = image_to_road(pts)
+        valid = ~np.isnan(pts_road[:, 0]) & ~np.isnan(pts_road[:, 1])
+        pts_road = pts_road[valid]
+        if len(pts_road) < 4:
+            return None
+        Y = pts_road[:, 1]
+        X = pts_road[:, 0]
+        try:
+            poly = np.polyfit(Y, X, 2)
+            residuals = np.abs(X - np.polyval(poly, Y))
+            inliers = residuals < 0.3
+            if np.sum(inliers) < 4:
                 return None
-            line = np.polyfit(vs[inliers], us[inliers], 1)
-            return (float(line[0]), float(line[1])), points[inliers]
+            return np.polyfit(Y[inliers], X[inliers], 2)
         except Exception:
             return None
 
-    left_points = collect_side_points("left")
-    right_points = collect_side_points("right")
-    left_fit = fit_side_line(left_points)
-    right_fit = fit_side_line(right_points)
-    if left_fit is None or right_fit is None:
-        return None
-
-    (m_left, c_left), left_points = left_fit
-    (m_right, c_right), right_points = right_fit
-
-    if abs(m_left - m_right) <= 0.05:
-        return None
-
-    v_intersect = (c_right - c_left) / (m_left - m_right)
-    u_intersect = m_left * v_intersect + c_left
-    if not (150 < u_intersect < 490 and 80 < v_intersect < 280):
-        return None
-
-    return {
-        "vp_x": float(u_intersect),
-        "vp_y": float(v_intersect),
-        "left_line": (float(m_left), float(c_left)),
-        "right_line": (float(m_right), float(c_right)),
-        "left_points": left_points,
-        "right_points": right_points,
-    }
-
-
-def estimate_vanishing_point_from_mask(ll_mask, car_center_x):
-    lane_lines = estimate_lane_lines_in_image(ll_mask, car_center_x)
-    if lane_lines is None:
-        return None
-    return float(lane_lines["vp_x"]), float(lane_lines["vp_y"])
-
-
-def build_lane_rectification_homography(lane_lines):
-    if lane_lines is None:
-        return None
-
-    m_left, c_left = lane_lines["left_line"]
-    m_right, c_right = lane_lines["right_line"]
-    vp_y = lane_lines["vp_y"]
-
-    bottom_v = float(INFER_HEIGHT - 1)
-    top_v = float(np.clip(vp_y + 24.0, 140.0, INFER_HEIGHT - 100.0))
-
-    left_bottom = m_left * bottom_v + c_left
-    right_bottom = m_right * bottom_v + c_right
-    left_top = m_left * top_v + c_left
-    right_top = m_right * top_v + c_right
-
-    bottom_width = right_bottom - left_bottom
-    top_width = right_top - left_top
-    if bottom_width < 80.0 or top_width < 20.0:
-        return None
-
-    src = np.array([
-        [left_bottom, bottom_v],
-        [right_bottom, bottom_v],
-        [right_top, top_v],
-        [left_top, top_v],
-    ], dtype=np.float32)
-
-    dst_left = BEV_WIDTH * 0.33
-    dst_right = BEV_WIDTH * 0.67
-    dst = np.array([
-        [dst_left, BEV_HEIGHT - 1],
-        [dst_right, BEV_HEIGHT - 1],
-        [dst_right, 0],
-        [dst_left, 0],
-    ], dtype=np.float32)
-
-    return cv2.getPerspectiveTransform(src, dst)
+    left_poly = project_and_fit(left_points)
+    right_poly = project_and_fit(right_points)
+    return left_poly, right_poly
 
 if os.path.exists('models/calibration.json'):
     try:
@@ -645,90 +590,7 @@ def finalize_ldw_right_calibration():
     save_calibration_state()
     print(f"[INFO] Calibrated right comfortable distance: {right_comfort_dist:.2f} m", flush=True)
 
-def find_lanes_sliding_window(ll_mask_undist, bev_display_h, car_center_x_meters):
-    if ll_mask_undist is None:
-        return None, None
 
-    ll_bev = cv2.warpPerspective(ll_mask_undist, bev_display_h, (BEV_WIDTH, BEV_HEIGHT), flags=cv2.INTER_NEAREST)
-
-    nonzero = ll_bev.nonzero()
-    if len(nonzero[0]) < 30:
-        return None, None
-
-    ys = nonzero[0].astype(np.float32)
-    xs = nonzero[1].astype(np.float32)
-
-    # Convert BEV pixel coordinates to road-plane meters
-    s_x = (BEV_WIDTH - 1) / (X_MAX - X_MIN)
-    s_y = (BEV_HEIGHT - 1) / (Y_MAX - Y_MIN)
-    road_X = xs / s_x + X_MIN
-    road_Y = Y_MAX - ys / s_y
-
-    # Separate into left/right by road X relative to car center.
-    # Constrain the search to a plausible lane-width corridor (0.5–3.5m away)
-    # to avoid latching onto distant road edges, barriers, or adjacent lane markings.
-    LANE_SEARCH_MIN = 0.5
-    LANE_SEARCH_MAX = 3.5
-    left_mask = (road_X < car_center_x_meters - LANE_SEARCH_MIN) & \
-                (road_X > car_center_x_meters - LANE_SEARCH_MAX)
-    right_mask = (road_X > car_center_x_meters + LANE_SEARCH_MIN) & \
-                 (road_X < car_center_x_meters + LANE_SEARCH_MAX)
-
-    def fit_robust_poly(road_Ys, road_Xs):
-        if len(road_Ys) < 15:
-            return None
-        road_Ys = road_Ys.astype(np.float64)
-        road_Xs = road_Xs.astype(np.float64)
-        for _ in range(3):
-            try:
-                poly = np.polyfit(road_Ys, road_Xs, 2)
-                residuals = np.abs(road_Xs - np.polyval(poly, road_Ys))
-                inliers = residuals < 0.3
-                if np.sum(inliers) < 12:
-                    return None
-                road_Ys = road_Ys[inliers]
-                road_Xs = road_Xs[inliers]
-            except Exception:
-                return None
-        try:
-            return np.polyfit(road_Ys, road_Xs, 2)
-        except Exception:
-            return None
-
-    left_poly = fit_robust_poly(road_Y[left_mask], road_X[left_mask])
-    right_poly = fit_robust_poly(road_Y[right_mask], road_X[right_mask])
-
-    # Divergence check: reject fits where lane width changes too fast
-    # at close range (stable) vs far range (should not fan out)
-    if left_poly is not None and right_poly is not None:
-        widths = []
-        for ey in [5.0, 15.0, 25.0]:
-            lx = np.polyval(left_poly, ey)
-            rx = np.polyval(right_poly, ey)
-            w = rx - lx
-            if 2.0 < w < 6.0:
-                widths.append(w)
-        if len(widths) < 2:
-            return None, None
-        # Reject if width changes by more than 1.5m between 5m and 25m
-        if len(widths) >= 2 and abs(widths[-1] - widths[0]) > 1.5:
-            return None, None
-        # Reject if either polynomial has excessive curvature
-        # (a[0] > 0.01 means >1m lateral shift over 10m)
-        for poly in (left_poly, right_poly):
-            if poly is not None and abs(poly[0]) > 0.01:
-                return None, None
-
-    # One-sided fallback: if only one side is valid, mirror the other side
-    # based on a plausible lane width (3.5m) to keep both lines visible
-    if left_poly is not None and right_poly is None:
-        right_poly = left_poly.copy()
-        right_poly[1] = left_poly[1] + 3.5  # shift right by lane width
-    elif right_poly is not None and left_poly is None:
-        left_poly = right_poly.copy()
-        left_poly[1] = right_poly[1] - 3.5
-
-    return left_poly, right_poly
 
 def build_lane_overlay_payload(left_poly, right_poly, left_severity=0.0, right_severity=0.0, fcw_warning=False, fcw_boxes=None, lane_position=None, lane_width=None):
     if left_poly is None and right_poly is None:
@@ -809,10 +671,11 @@ def inference_loop():
     state["cuda_available"] = torch.cuda.is_available()
     state["gpu_device_name"] = torch.cuda.get_device_name(0) if state["cuda_available"] else "None"
     
-    print("[INFO] Loading YOLOpv2 detector...", flush=True)
-    yolop_detector = YolopDetector()
-    state["yolop_device"] = str(yolop_detector.device)
-    print(f"\n{'='*50}\n[DEBUG - GPU CHECK]\nCUDA Available: {state['cuda_available']}\nGPU Name: {state['gpu_device_name']}\nYOLOpv2 Device Target: {yolop_detector.device}\n{'='*50}\n", flush=True)
+    print("[INFO] Loading FCN-ResNet18 and UFLD detectors...", flush=True)
+    fcn_detector = FCNResNetDetector()
+    ufld_detector = ULFDLaneDetector()
+    state["yolop_device"] = "Replaced by FCN-ResNet18 + UFLD"
+    print(f"\n{'='*50}\n[DEBUG - GPU CHECK]\nCUDA Available: {state['cuda_available']}\nGPU Name: {state['gpu_device_name']}\nModels: FCN-ResNet18 + UFLD\n{'='*50}\n", flush=True)
 
     timer = StepTimer()
 
@@ -859,33 +722,25 @@ def inference_loop():
 
             lane_perception_active = state["adas_enabled"] or state["calibration_frames_left"] > 0 or state.get("calibrate_requested", False)
 
+            car_center_x_compensated = 0.0
+
             if state["adas_enabled"] or lane_perception_active:
-                # Run YOLOpv2 inference
                 _t_inf = time.perf_counter()
-                det_boxes, da_mask, ll_mask = yolop_detector.detect(im_infer)
+                da_mask = fcn_detector.detect(im_infer)
+                ufld_lanes = ufld_detector.detect(im_infer)
+                det_boxes = []
                 timer.track("inference", time.perf_counter() - _t_inf)
-                
-                # Undistort binary masks via precomputed remap (no float conversion needed)
+
                 _t_remap = time.perf_counter()
                 da_mask_undist = cv2.remap(da_mask, UNDIST_MAP1, UNDIST_MAP2, cv2.INTER_NEAREST) if da_mask is not None else None
-                ll_mask_undist = cv2.remap(ll_mask, UNDIST_MAP1, UNDIST_MAP2, cv2.INTER_NEAREST) if ll_mask is not None else None
                 timer.track("remap", time.perf_counter() - _t_remap)
 
                 is_calibrated = state["calibration"] is not None and state["calibration_frames_left"] == 0
 
-                # Skip expensive image-space lane estimation when calibration is done
-                lane_lines_raw = None
                 detected_vp = None
-                lane_lines_undist = None
-                if not is_calibrated and ll_mask is not None:
-                    _t_est = time.perf_counter()
-                    lane_lines_raw = estimate_lane_lines_in_image(ll_mask, car_center_x)
-                    detected_vp = None if lane_lines_raw is None else (lane_lines_raw["vp_x"], lane_lines_raw["vp_y"])
-                    if ll_mask_undist is not None:
-                        lane_lines_undist = estimate_lane_lines_in_image(ll_mask_undist, car_center_x)
-                    timer.track("lane_est", time.perf_counter() - _t_est)
+                if not is_calibrated and ufld_lanes:
+                    detected_vp = estimate_vp_from_ufld_lanes(ufld_lanes, INFER_WIDTH, INFER_HEIGHT)
 
-                # Lens Calibration VP update
                 if state["calibration_frames_left"] > 0 and detected_vp is not None:
                     state["calib_vp_x_list"].append(detected_vp[0])
                     state["calib_vp_y_list"].append(detected_vp[1])
@@ -907,18 +762,12 @@ def inference_loop():
                 car_center_road = image_to_road(car_center_pts)[0]
                 car_center_x_meters = car_center_road[0] if not np.isnan(car_center_road[0]) else 0.0
 
-                # Use pre-calibrated homography when done; update from lane lines during calibration
                 bev_display_h = H_cam2bev
-                if not is_calibrated and lane_lines_undist is not None:
-                    h_rect = build_lane_rectification_homography(lane_lines_undist)
-                    if h_rect is not None:
-                        bev_display_h = h_rect
 
-                # Fit lane lines in road plane
                 left_poly, right_poly = None, None
-                if ll_mask_undist is not None:
+                if ufld_lanes:
                     _t_sw = time.perf_counter()
-                    left_poly, right_poly = find_lanes_sliding_window(ll_mask_undist, bev_display_h, car_center_x_meters)
+                    left_poly, right_poly = fit_lanes_from_ufld_points(ufld_lanes, car_center_x, INFER_WIDTH, INFER_HEIGHT)
                     timer.track("sliding_win", time.perf_counter() - _t_sw)
 
                 # Smooth polynomials using history
@@ -1171,17 +1020,10 @@ def inference_loop():
                     da_bool = da_mask.astype(bool, copy=False)
                     im_debug[da_bool] = (im_debug[da_bool].astype(np.float32) * 0.72 + np.array([0, 100, 0], dtype=np.float32) * 0.28).astype(np.uint8)
                 
-                if ll_mask is not None:
-                    im_debug[ll_mask > 0] = (0, 255, 255)
-
-                if state["calibration_frames_left"] > 0 and lane_lines_raw is not None:
-                    for line_key, color in (("left_line", (255, 0, 0)), ("right_line", (0, 0, 255))):
-                        m_line, c_line = lane_lines_raw[line_key]
-                        y0 = INFER_HEIGHT - 1
-                        y1 = max(0, int(lane_lines_raw["vp_y"] + 24.0))
-                        x0 = int(np.clip(m_line * y0 + c_line, 0, INFER_WIDTH - 1))
-                        x1 = int(np.clip(m_line * y1 + c_line, 0, INFER_WIDTH - 1))
-                        cv2.line(im_debug, (x0, y0), (x1, y1), color, 3)
+                if ufld_lanes:
+                    for lane_pts in ufld_lanes:
+                        pts_int = lane_pts.astype(np.int32)
+                        cv2.polylines(im_debug, [pts_int], False, (0, 255, 255), 2)
                     
                 if det_boxes is not None:
                     for box in det_boxes:
