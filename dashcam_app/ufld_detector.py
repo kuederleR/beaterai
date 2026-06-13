@@ -11,12 +11,12 @@ class ULFDLaneDetector:
         self.input_width = 800
         self.num_lanes = 4
         self.num_row = 56
-        self.num_col = 41
+        self.num_col = 100  # actual value inferred from output at runtime
         self.exist_threshold = 0.3
 
         row_anchor_frac = np.linspace(0.42, 1.0, self.num_row)
         self.row_anchor = (row_anchor_frac * self.input_height).astype(np.float32)
-        self.col_sample = np.linspace(0, self.input_width - 1, self.num_col).astype(np.float32)
+        # col_sample rebuilt dynamically in _decode_output based on actual num_col
 
         self.trt_runner = None
         self.model = None
@@ -56,12 +56,20 @@ class ULFDLaneDetector:
         return img_chw
 
     def _decode_output(self, output, img_width, img_height):
-        if output.ndim == 4 and output.shape[1] == self.num_lanes:
+        if output.ndim == 4 and output.shape[3] == self.num_lanes:
+            # PINTO model zoo format: (1, 101, 56, 4) = (batch, classes, rows, lanes)
+            out = output[0].transpose(2, 1, 0)  # (101, 56, 4) -> (4, 56, 101)
+            num_col_actual = out.shape[2] - 1
+        elif output.ndim == 4 and output.shape[1] == self.num_lanes:
+            # Standard format: (1, 4, 56, 42) = (batch, lanes, rows, classes)
             out = output[0]
+            num_col_actual = out.shape[2] - 1
         elif output.ndim == 2:
             out = output[0].reshape(self.num_lanes, self.num_row, self.num_col + 1)
+            num_col_actual = self.num_col
         elif output.ndim == 3:
             out = output
+            num_col_actual = out.shape[2] - 1
         else:
             print(f"[UFLD] Unexpected output shape: {output.shape}", flush=True)
             return []
@@ -69,18 +77,20 @@ class ULFDLaneDetector:
         scale_x = img_width / self.input_width
         scale_y = img_height / self.input_height
 
+        col_sample = np.linspace(0, self.input_width - 1, num_col_actual).astype(np.float32)
+
         lanes = []
         for lane_idx in range(self.num_lanes):
             pts = []
             for row_idx in range(self.num_row):
-                cls_logits = out[lane_idx, row_idx, :self.num_col]
-                exist_logit = out[lane_idx, row_idx, self.num_col]
+                cls_logits = out[lane_idx, row_idx, :num_col_actual]
+                exist_logit = out[lane_idx, row_idx, num_col_actual]
                 if exist_logit < self.exist_threshold:
                     continue
                 cls_prob = np.exp(cls_logits - np.max(cls_logits))
                 cls_prob = cls_prob / cls_prob.sum()
                 col_idx = np.argmax(cls_prob)
-                x_uf = self.col_sample[col_idx] * scale_x
+                x_uf = col_sample[col_idx] * scale_x
                 y_uf = self.row_anchor[row_idx] * scale_y
                 pts.append((float(x_uf), float(y_uf)))
             if len(pts) >= 4:
