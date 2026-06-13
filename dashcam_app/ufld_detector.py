@@ -61,7 +61,6 @@ class ULFDLaneDetector:
             out = output[0].transpose(2, 1, 0)  # (101, 56, 4) -> (4, 56, 101)
             num_col_actual = out.shape[2] - 1
         elif output.ndim == 4 and output.shape[1] == self.num_lanes:
-            # Standard format: (1, 4, 56, 42) = (batch, lanes, rows, classes)
             out = output[0]
             num_col_actual = out.shape[2] - 1
         elif output.ndim == 2:
@@ -79,13 +78,26 @@ class ULFDLaneDetector:
 
         col_sample = np.linspace(0, self.input_width - 1, num_col_actual).astype(np.float32)
 
+        # Debug: print one frame of stats
+        if not hasattr(self, "_debug_printed"):
+            self._debug_printed = True
+            print(f"[UFLD] Decode shape: {output.shape} -> out shape: {out.shape}, num_col={num_col_actual}", flush=True)
+            print(f"[UFLD] out range: [{out.min():.4f}, {out.max():.4f}], "
+                  f"exist range: [{out[..., num_col_actual].min():.4f}, {out[..., num_col_actual].max():.4f}]", flush=True)
+            print(f"[UFLD] Sample lane 0 row 0: cls[:5]={out[0,0,:5]}, exist={out[0,0,num_col_actual]:.4f}", flush=True)
+            print(f"[UFLD] Sample lane 1 row 0: cls[:5]={out[1,0,:5]}, exist={out[1,0,num_col_actual]:.4f}", flush=True)
+            print(f"[UFLD] Sample lane 2 row 0: cls[:5]={out[2,0,:5]}, exist={out[2,0,num_col_actual]:.4f}", flush=True)
+            print(f"[UFLD] Sample lane 3 row 0: cls[:5]={out[3,0,:5]}, exist={out[3,0,num_col_actual]:.4f}", flush=True)
+
         lanes = []
         for lane_idx in range(self.num_lanes):
             pts = []
             for row_idx in range(self.num_row):
                 cls_logits = out[lane_idx, row_idx, :num_col_actual]
                 exist_logit = out[lane_idx, row_idx, num_col_actual]
-                if exist_logit < self.exist_threshold:
+                # Apply sigmoid to existence logit for consistent threshold
+                exist_prob = 1.0 / (1.0 + np.exp(-exist_logit))
+                if exist_prob < 0.5:
                     continue
                 cls_prob = np.exp(cls_logits - np.max(cls_logits))
                 cls_prob = cls_prob / cls_prob.sum()
