@@ -35,6 +35,7 @@ RUN mkdir -p recordings models
 COPY trt_runner.py .
 COPY fcn_detector.py .
 COPY ufld_detector.py .
+COPY build_engines.py .
 COPY dashcam.py .
 COPY templates/ templates/
 COPY install_service.sh .
