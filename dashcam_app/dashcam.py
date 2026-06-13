@@ -737,7 +737,14 @@ def inference_loop():
                 # Extract road mask for BEV (Cityscapes road class is 1)
                 class_mask = jetson.utils.cudaAllocMapped(width=INFER_WIDTH, height=INFER_HEIGHT, format="gray8")
                 fcn_net.Mask(class_mask)
+                
+                # Overlay the full color segmentation onto the original camera frame
+                fcn_net.Overlay(cuda_img, filter_mode="linear")
                 jetson.utils.cudaDeviceSynchronize()
+                
+                # Retrieve the composited image for the web UI
+                overlay_np = jetson.utils.cudaToNumpy(cuda_img)
+                im_debug = cv2.cvtColor(overlay_np, cv2.COLOR_RGBA2BGR)
                 
                 class_mask_np = jetson.utils.cudaToNumpy(class_mask)
                 class_mask_sq = np.squeeze(class_mask_np)
@@ -1036,10 +1043,6 @@ def inference_loop():
                 else:
                     cv2.circle(im_debug, (int(K_INFER[0, 2]), 160), 5, (0, 0, 255), -1)
 
-                if da_mask is not None:
-                    da_bool = da_mask.astype(bool, copy=False)
-                    im_debug[da_bool] = (im_debug[da_bool].astype(np.float32) * 0.6 + np.array([0, 255, 0], dtype=np.float32) * 0.4).astype(np.uint8)
-                
                 if ufld_lanes:
                     for lane_pts in ufld_lanes:
                         pts_int = lane_pts.astype(np.int32)
