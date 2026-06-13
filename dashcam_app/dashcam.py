@@ -26,9 +26,7 @@ if not hasattr(cv2, 'IMREAD_UNCHANGED'):
 from flask import Flask, Response, jsonify, request, render_template
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
-# Import FCN-ResNet18 and UFLD detectors for scene parse + lane lines
-import jetson.inference
-import jetson.utils
+# Import UFLD detector for lane lines
 from ufld_detector import ULFDLaneDetector
 
 os.environ['PYTHONUNBUFFERED'] = '1'

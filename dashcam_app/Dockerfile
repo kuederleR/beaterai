@@ -1,15 +1,21 @@
-# Use the official jetson-inference base image for JetPack 6.x
-# This image already contains PyTorch, OpenCV, GStreamer, and a fully compiled jetson-inference
-FROM dustynv/jetson-inference:r36.2.0
+# Use the official NVIDIA L4T PyTorch base image for JetPack 6.x
+# This image contains PyTorch and TensorRT, avoiding the bloat of jetson-inference.
+FROM nvcr.io/nvidia/l4t-pytorch:r36.2.0-pth2.2-py3
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /app
 
-# Install requirements
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install python requirements
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
-RUN pip3 install --no-cache-dir ultralytics --extra-index-url https://pypi.org/simple
+RUN pip3 install --no-cache-dir ultralytics
 
 # Create model weights and recordings directories
 RUN mkdir -p recordings models
