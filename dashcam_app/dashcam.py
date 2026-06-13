@@ -734,7 +734,7 @@ def inference_loop():
                 cuda_img = jetson.utils.cudaFromNumpy(cv2.cvtColor(im_infer, cv2.COLOR_BGR2RGBA))
                 fcn_net.Process(cuda_img)
                 
-                # Extract road mask for BEV (Cityscapes road class is 0)
+                # Extract road mask for BEV (Cityscapes road class is 1)
                 grid_w, grid_h = fcn_net.GetGridSize()
                 class_mask = jetson.utils.cudaAllocMapped(width=grid_w, height=grid_h, format="gray8")
                 fcn_net.Mask(class_mask, grid_w, grid_h)
@@ -742,14 +742,7 @@ def inference_loop():
                 
                 class_mask_np = jetson.utils.cudaToNumpy(class_mask)
                 class_mask_np = cv2.resize(class_mask_np, (INFER_WIDTH, INFER_HEIGHT), interpolation=cv2.INTER_NEAREST)
-                da_mask = (class_mask_np == 0).astype(np.uint8)
-                
-                # Overlay segmentation on debug frame
-                overlay_img = jetson.utils.cudaAllocMapped(width=INFER_WIDTH, height=INFER_HEIGHT, format="rgba8")
-                fcn_net.Overlay(overlay_img, filter_mode="linear")
-                jetson.utils.cudaDeviceSynchronize()
-                overlay_np = jetson.utils.cudaToNumpy(overlay_img)
-                im_debug = cv2.cvtColor(overlay_np, cv2.COLOR_RGBA2BGR)
+                da_mask = (class_mask_np == 1).astype(np.uint8)
                 
                 ufld_lanes = ufld_detector.detect(im_infer)
                 det_boxes = []
@@ -1032,8 +1025,7 @@ def inference_loop():
                     lane_width=lane_width,
                 )
                 
-                # Draw debug overlays on im_debug (reuse im_infer, no copy needed)
-                im_debug = im_infer
+                # Draw debug overlays on im_debug
                 vp = state.get("calibration")
                 if vp is not None:
                     cv2.circle(im_debug, (int(vp["vp_x"]), int(vp["vp_y"])), 5, (0, 0, 255), -1)
