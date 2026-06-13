@@ -17,6 +17,10 @@ COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 RUN pip3 install --no-cache-dir ultralytics --extra-index-url https://pypi.org/simple
 
+# Ultralytics pulls in opencv-python via pip, which breaks the highly-optimized 
+# native OpenCV built into the NGC container. We must uninstall the pip version.
+RUN pip3 uninstall -y opencv-python opencv-python-headless opencv-contrib-python
+
 # Create model weights and recordings directories
 RUN mkdir -p recordings models
 
