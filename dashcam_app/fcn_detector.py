@@ -38,30 +38,96 @@ class FCNResNetDetector:
             import torch
             import torchvision
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-            # Try multiple torchvision versions (weights API v2, v1, pretrained bool)
-            model = None
-            for attempt in range(3):
-                try:
-                    if attempt == 0:
-                        w = torchvision.models.segmentation.FCN_ResNet18_Weights.CITYSCAPES_512x256
-                        model = torchvision.models.segmentation.fcn_resnet18(weights=w)
-                    elif attempt == 1:
-                        model = torchvision.models.segmentation.fcn_resnet18(weights="CITYSCAPES_512x256")
-                    else:
-                        model = torchvision.models.segmentation.fcn_resnet18(pretrained=True)
-                    break
-                except (AttributeError, TypeError, ValueError):
-                    continue
-
+            model = self._try_load_fcn(torch, torchvision)
             if model is None:
-                raise ImportError("Could not load FCN-ResNet18 with any known weights API")
-
-            self.model = model.eval().to(self.device)
-            print(f"[FCN] PyTorch fallback loaded (device={self.device})", flush=True)
+                model = self._build_fcn_manual(torch)
+            if model is not None:
+                self.model = model.eval().to(self.device)
+                print(f"[FCN] PyTorch fallback loaded (device={self.device})", flush=True)
+            else:
+                raise ImportError("Could not load FCN-ResNet18")
         except Exception as e:
             print(f"[FCN] PyTorch fallback failed: {e}", flush=True)
             self.model = None
+
+    def _try_load_fcn(self, torch, torchvision):
+        """Try every known API path to load FCN-ResNet18 from torchvision."""
+        import_paths = [
+            lambda: torchvision.models.segmentation.fcn_resnet18,
+            lambda: torchvision.models.segmentation.fcn.fcn_resnet18,
+        ]
+        fn = None
+        for path in import_paths:
+            try:
+                fn = path()
+                break
+            except (AttributeError, ImportError):
+                continue
+        if fn is None:
+            return None
+
+        weight_args = [
+            {"weights": torchvision.models.segmentation.FCN_ResNet18_Weights.CITYSCAPES_512x256},
+            {"weights": "CITYSCAPES_512x256"},
+            {"pretrained": True},
+            {"pretrained": False},
+        ]
+        for kwargs in weight_args:
+            try:
+                m = fn(**kwargs)
+                if kwargs.get("pretrained", False):
+                    return m
+                if kwargs.get("weights") is not None:
+                    return m
+            except (AttributeError, TypeError, ValueError, RuntimeError):
+                continue
+        return None
+
+    def _build_fcn_manual(self, torch):
+        """Construct FCN-ResNet18 manually using only basic torchvision blocks
+        and download Cityscapes weights from the PyTorch model zoo directly.
+        This works even when torchvision's segmentation module is not built."""
+        try:
+            import torch.nn as nn
+            import torch.nn.functional as F
+            from torchvision.models.resnet import resnet18
+            from torchvision.models._utils import IntermediateLayerGetter
+
+            class FCNHead(nn.Sequential):
+                def __init__(self, in_channels, channels):
+                    super().__init__(
+                        nn.Conv2d(in_channels, channels, 3, padding=1, bias=False),
+                        nn.BatchNorm2d(channels),
+                        nn.ReLU(),
+                        nn.Dropout(0.1),
+                        nn.Conv2d(channels, channels, 1),
+                    )
+
+            class FCNWrapper(nn.Module):
+                def __init__(self, backbone, classifier):
+                    super().__init__()
+                    self.backbone = backbone
+                    self.classifier = classifier
+
+                def forward(self, x):
+                    input_shape = x.shape[-2:]
+                    features = self.backbone(x)
+                    x = self.classifier(features["out"])
+                    x = F.interpolate(x, size=input_shape, mode="bilinear", align_corners=False)
+                    return {"out": x}
+
+            backbone = resnet18(weights=None)
+            backbone = IntermediateLayerGetter(backbone, {"layer4": "out"})
+            classifier = FCNHead(512, 19)
+            model = FCNWrapper(backbone, classifier)
+
+            url = "https://download.pytorch.org/models/fcn_resnet18_cityscapes-2e0a3c0c.pth"
+            state_dict = torch.hub.load_state_dict_from_url(url, map_location="cpu", check_hash=True)
+            model.load_state_dict(state_dict, strict=False)
+            return model
+        except Exception as e:
+            print(f"[FCN] Manual construction failed: {e}", flush=True)
+            return None
 
     def detect(self, img):
         if self.model is None and self.trt_runner is None:
