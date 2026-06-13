@@ -25,7 +25,6 @@ services:
     volumes:
       - ./recordings:/app/recordings
       - ../weights:/app/weights
-      - ./jetson_models:/opt/jetson-inference/data/networks
       - ./dashcam.py:/app/dashcam.py
       - ./trt_runner.py:/app/trt_runner.py
       - ./fcn_detector.py:/app/fcn_detector.py

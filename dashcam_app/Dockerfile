@@ -1,41 +1,8 @@
-# Use an NVIDIA PyTorch base image compatible with Jetson Orin Nano on JetPack 6.x
-FROM nvcr.io/nvidia/pytorch:24.05-py3-igpu
+# Use the official jetson-inference base image for JetPack 6.x
+# This image already contains PyTorch, OpenCV, GStreamer, and a fully compiled jetson-inference
+FROM dustynv/jetson-inference:r36.2.0
 
 ENV DEBIAN_FRONTEND=noninteractive
-
-# Install system dependencies: OpenCV support, ffmpeg, GStreamer plugins
-RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    ffmpeg \
-    gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good \
-    gstreamer1.0-plugins-bad \
-    gstreamer1.0-plugins-ugly \
-    gstreamer1.0-libav \
-    git \
-    wget \
-    curl \
-    cmake \
-    libpython3-dev \
-    libgstreamer1.0-dev \
-    libgstreamer-plugins-base1.0-dev \
-    libgstreamer-plugins-bad1.0-dev \
-    libsoup2.4-dev \
-    libjson-glib-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Build jetson-inference from source
-ENV BUILD_INTERACTIVE=0
-RUN git clone --recursive https://github.com/dusty-nv/jetson-inference /opt/jetson-inference && \
-    cd /opt/jetson-inference && \
-    sed -i 's/set(PYTHON_BINDING_VERSIONS.*/set(PYTHON_BINDING_VERSIONS 3.10)/g' python/CMakeLists.txt utils/python/CMakeLists.txt && \
-    mkdir build && \
-    cd build && \
-    cmake ../ && \
-    make -j2 && \
-    make install && \
-    ldconfig
 
 WORKDIR /app
 
