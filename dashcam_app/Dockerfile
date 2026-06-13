@@ -1,6 +1,6 @@
-# Use the official NVIDIA L4T PyTorch base image for JetPack 6.x
+# Use the community-maintained L4T PyTorch base image for JetPack 6.x
 # This image contains PyTorch and TensorRT, avoiding the bloat of jetson-inference.
-FROM nvcr.io/nvidia/l4t-pytorch:r36.2.0-pth2.2-py3
+FROM dustynv/l4t-pytorch:r36.2.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y \
 # Install python requirements
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
-RUN pip3 install --no-cache-dir ultralytics
+RUN pip3 install --no-cache-dir ultralytics --extra-index-url https://pypi.org/simple
 
 # Create model weights and recordings directories
 RUN mkdir -p recordings models
