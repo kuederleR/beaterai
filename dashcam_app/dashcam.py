@@ -674,11 +674,21 @@ def inference_loop():
     state["cuda_available"] = torch.cuda.is_available()
     state["gpu_device_name"] = torch.cuda.get_device_name(0) if state["cuda_available"] else "None"
     
-    print("[INFO] Loading jetson-inference SSD-MobileNet-v2 and UFLD...", flush=True)
-    det_net = jetson.inference.detectNet("ssd-mobilenet-v2", threshold=0.5)
+    print("[INFO] Loading Ultralytics YOLOv8-Seg and UFLD...", flush=True)
+    from ultralytics import YOLO
+    
+    yolo_engine_path = "models/yolov8n-seg.engine"
+    if not os.path.exists(yolo_engine_path):
+        print("[INFO] YOLOv8-Seg engine not found. Exporting to TensorRT (this takes a few minutes)...", flush=True)
+        model = YOLO("yolov8n-seg.pt")
+        model.export(format="engine", device="0", half=True, workspace=2)
+        if os.path.exists("yolov8n-seg.engine"):
+            os.rename("yolov8n-seg.engine", yolo_engine_path)
+            
+    det_net = YOLO(yolo_engine_path, task="segment")
     ufld_detector = ULFDLaneDetector()
-    state["yolop_device"] = "SSD-MobileNet-v2 + UFLD"
-    print(f"\n{'='*50}\n[DEBUG - GPU CHECK]\nCUDA Available: {state['cuda_available']}\nGPU Name: {state['gpu_device_name']}\nModels: SSD-MobileNet-v2 + UFLD\n{'='*50}\n", flush=True)
+    state["yolop_device"] = "YOLOv8-Seg + UFLD"
+    print(f"\n{'='*50}\n[DEBUG - GPU CHECK]\nCUDA Available: {state['cuda_available']}\nGPU Name: {state['gpu_device_name']}\nModels: YOLOv8-Seg + UFLD\n{'='*50}\n", flush=True)
 
     timer = StepTimer()
 
@@ -730,23 +740,34 @@ def inference_loop():
             if state["adas_enabled"] or lane_perception_active:
                 _t_inf = time.perf_counter()
                 
-                # jetson-inference Object Detection
-                cuda_img = jetson.utils.cudaFromNumpy(cv2.cvtColor(im_infer, cv2.COLOR_BGR2RGBA))
-                detections = det_net.Detect(cuda_img, overlay="none")
-                jetson.utils.cudaDeviceSynchronize()
+                # Ultralytics YOLOv8 Instance Segmentation
+                results = det_net.predict(im_infer, imgsz=(INFER_HEIGHT, INFER_WIDTH), conf=0.4, verbose=False)
                 
                 det_boxes = []
-                for det in detections:
-                    # SSD-Mobilenet-v2 COCO vehicle classes: 3 (car), 4 (motorcycle), 6 (bus), 8 (truck)
-                    if det.ClassID in [3, 4, 6, 8]:
-                        det_boxes.append({
-                            "x1": det.Left,
-                            "y1": det.Top,
-                            "x2": det.Right,
-                            "y2": det.Bottom,
-                            "class": det.ClassID,
-                            "conf": det.Confidence
-                        })
+                if len(results) > 0:
+                    res = results[0]
+                    if res.boxes is not None:
+                        for i in range(len(res.boxes)):
+                            box = res.boxes[i]
+                            cls_id = int(box.cls[0].item())
+                            # COCO classes: 2=car, 3=motorcycle, 5=bus, 7=truck
+                            if cls_id in [2, 3, 5, 7]:
+                                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                                det_boxes.append({
+                                    "x1": x1,
+                                    "y1": y1,
+                                    "x2": x2,
+                                    "y2": y2,
+                                    "class": cls_id,
+                                    "conf": box.conf[0].item()
+                                })
+                                
+                                # Draw tight contours
+                                if res.masks is not None and res.masks.xy is not None and len(res.masks.xy) > i:
+                                    mask_data = res.masks.xy[i]
+                                    if len(mask_data) > 0:
+                                        pts = mask_data.astype(np.int32)
+                                        cv2.drawContours(im_debug, [pts], -1, (0, 255, 0), 2)
                 
                 # We no longer generate a segmentation mask
                 da_mask = None
@@ -1044,10 +1065,7 @@ def inference_loop():
                         pts_int = lane_pts.astype(np.int32)
                         cv2.polylines(im_debug, [pts_int], False, (0, 255, 255), 2)
                     
-                if det_boxes is not None:
-                    for box in det_boxes:
-                        bx1, by1, bx2, by2 = int(box["x1"]), int(box["y1"]), int(box["x2"]), int(box["y2"])
-                        cv2.rectangle(im_debug, (bx1, by1), (bx2, by2), (0, 255, 0), 2)
+                # Bounding boxes are no longer drawn as rectangles, we use tight contours from YOLOv8 above
                 timer.track("bev_render", time.perf_counter() - _t_render)
             else:
                 # ADAS disabled fallback: just show blank BEV frame and ego-car

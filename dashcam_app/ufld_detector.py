@@ -32,9 +32,14 @@ class ULFDLaneDetector:
             print(f"[UFLD] TensorRT not available. Loading PyTorch fallback.", flush=True)
             self._load_pytorch_fallback()
         else:
-            print(f"[UFLD] Engine file {engine_path} not found. Loading PyTorch fallback.", flush=True)
-            self._load_pytorch_fallback()
-
+            print(f"[UFLD] Engine file {engine_path} not found. Auto-building engine...", flush=True)
+            import subprocess
+            subprocess.run(["python3", "build_engines.py"])
+            if os.path.exists(engine_path):
+                self.trt_runner = TrtRunner(engine_path)
+                print(f"[UFLD] TensorRT engine built and ready.", flush=True)
+            else:
+                self._load_pytorch_fallback()
     def _load_pytorch_fallback(self):
         print("[UFLD] No TensorRT engine found in models/ufld.engine.", flush=True)
         print("[UFLD] Run python3 build_engines.py to build it, or place a pre-built engine.", flush=True)
