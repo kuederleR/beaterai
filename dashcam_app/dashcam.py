@@ -7,6 +7,8 @@ import datetime
 import cv2
 import numpy as np
 import torch
+# Initialize CUDA early to prevent conflicts with jetson.inference C++ CUDA context
+_ = torch.cuda.is_available()
 import json
 
 # --- Fix for NVIDIA container headless OpenCV ---
