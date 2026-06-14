@@ -644,14 +644,15 @@ def inference_loop():
                     car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
                     draw_scale = np.array([im_debug.shape[1] / ll_mask.shape[1],
                                            im_debug.shape[0] / ll_mask.shape[0]], dtype=np.float32)
-                    drivable_poly = _compute_drivable_polygon(ll_mask, car_center_x, TRACE_START_Y)
+                    tr_start = int(ll_mask.shape[0] * TRACE_START_Y / 480)
+                    drivable_poly = _compute_drivable_polygon(ll_mask, car_center_x, tr_start)
                     if drivable_poly is not None:
                         poly_scaled = (drivable_poly * draw_scale).astype(np.int32)
                         cv2.fillPoly(im_debug, [poly_scaled], (0, 180, 0))
                     ll_overlay = np.zeros_like(im_debug)
                     ll_overlay[ll_mask_big > 0] = (0, 255, 255)
                     cv2.addWeighted(ll_overlay, 0.3, im_debug, 0.7, 0, dst=im_debug)
-                    left_edge, right_edge = _fallback_detect_lanes(ll_mask, car_center_x, TRACE_START_Y)
+                    left_edge, right_edge = _fallback_detect_lanes(ll_mask, car_center_x, tr_start)
                     if left_edge is not None:
                         pts_int = (left_edge * draw_scale).astype(np.int32)
                         cv2.polylines(im_debug, [pts_int], False, (255, 0, 255), 3)
