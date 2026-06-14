@@ -341,7 +341,7 @@ def make_error_frame(message):
     img = np.zeros((480, 800, 3), dtype=np.uint8)
     cv2.putText(img, message, (20, 240),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-    _, buf = cv2.imencode('.bmp', img)
+    _, buf = cv2.imencode('.jpg', img)
     return buf.tobytes()
 
 
@@ -747,9 +747,9 @@ def inference_loop():
             state["ldw_warning"] = ldw_triggered
 
             _t_enc = time.perf_counter()
-            _, buf = cv2.imencode('.bmp', im_bev)
+            _, buf = cv2.imencode('.jpg', im_bev)
             if state["debug_feed_active"]:
-                _, buf_debug = cv2.imencode('.bmp', im_debug)
+                _, buf_debug = cv2.imencode('.jpg', im_debug)
             timer.track("encode", time.perf_counter() - _t_enc)
 
             with frame_lock:
@@ -781,10 +781,10 @@ def generate_mjpeg():
             cv2.putText(wait_img, "Initializing...",
                         (40, 240), cv2.FONT_HERSHEY_SIMPLEX, 1,
                         (255, 255, 255), 2)
-            _, buf = cv2.imencode('.bmp', wait_img)
+            _, buf = cv2.imencode('.jpg', wait_img)
             frame = buf.tobytes()
         yield (b'--frame\r\n'
-               b'Content-Type: image/bmp\r\n\r\n' + frame + b'\r\n')
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
         time.sleep(0.033)
 
 
@@ -811,7 +811,7 @@ def generate_debug_mjpeg():
                 cv2.putText(img, "Perspective feed disabled",
                             (40, 200), cv2.FONT_HERSHEY_SIMPLEX, 1,
                             (100, 100, 100), 2)
-                _, buf = cv2.imencode('.bmp', img)
+                _, buf = cv2.imencode('.jpg', img)
                 no_feed_frame = buf.tobytes()
             frame = no_feed_frame
         elif frame is None:
@@ -819,10 +819,10 @@ def generate_debug_mjpeg():
             cv2.putText(wait_img, "Initializing Debug Feed...",
                         (40, 200), cv2.FONT_HERSHEY_SIMPLEX, 1,
                         (255, 255, 255), 2)
-            _, buf = cv2.imencode('.bmp', wait_img)
+            _, buf = cv2.imencode('.jpg', wait_img)
             frame = buf.tobytes()
         yield (b'--frame\r\n'
-               b'Content-Type: image/bmp\r\n\r\n' + frame + b'\r\n')
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
         time.sleep(0.04)
 
 
