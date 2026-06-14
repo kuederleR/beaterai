@@ -127,12 +127,9 @@ class TwinLiteDetector:
                 right_candidates.append(pts)
 
         lanes = []
-        for candidates, side in [(left_candidates, 'left'), (right_candidates, 'right')]:
+        for candidates in (left_candidates, right_candidates):
             if not candidates:
                 continue
-            if len(candidates) == 1:
-                lanes.append(candidates[0])
-            else:
-                best = min(candidates, key=lambda p: abs(float(np.mean(p[:, 0])) - car_center_x))
-                lanes.append(best)
+            merged = np.vstack(candidates)
+            lanes.append(merged)
         return lanes
