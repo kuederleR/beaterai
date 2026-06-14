@@ -1,2 +1,14 @@
 Flask==3.0.3
 Werkzeug==3.0.3
+numpy
+opencv-python-headless
+torch
+# CuPy for GPU post-processing (install cupy-cuda11x on Jetson, cupy-cuda12x on desktop)
+# Replaced by platform-specific install in Dockerfile:
+# cupy-cuda11x
+# MMDetection3D stack for BEVFormer model zoo and conversion
+# Installed via pip in Dockerfile:
+# mmcv>=2.0.0
+# mmdet>=3.0.0
+# mmdet3d>=1.4.0
+# mmdeploy>=1.3.0

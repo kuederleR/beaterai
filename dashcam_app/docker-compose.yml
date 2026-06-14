@@ -17,24 +17,23 @@ services:
       - "5001:5001"
     environment:
       - VIDEO_SOURCE=/dev/video0
-      #  dashcam_20260521_103322.avi
-      # dashcam_20260521_105410.avi
-      - DEV_VIDEO_PATH=/app/recordings/dashcam_20260521_103322.avi # Uncomment to test with a looping recorded video
+      - DEV_VIDEO_PATH=
       - DEVICE=0
       - PYTHONUNBUFFERED=1
+      # DeepStream config
+      - DISPLAY=:0
+      - GST_DEBUG=0
     volumes:
       - ./recordings:/app/recordings
       - ../weights:/app/weights
       - ./dashcam.py:/app/dashcam.py
       - ./trt_runner.py:/app/trt_runner.py
-      - ./fcn_detector.py:/app/fcn_detector.py
-      - ./twinlite_detector.py:/app/twinlite_detector.py
-      - ./build_engines.py:/app/build_engines.py
+      - ./bevformer_detector.py:/app/bevformer_detector.py
+      - ./deepstream_pipeline.py:/app/deepstream_pipeline.py
+      - ./adas_postprocessor.py:/app/adas_postprocessor.py
       - ./models:/app/models
       - ./templates:/app/templates
       - jetson-networks:/usr/local/bin/networks
-    # WARNING: If your camera is physically UNPLUGGED, you MUST comment out the two lines below, 
-    # otherwise Docker will crash trying to find /dev/video0.
     # devices:
     #   - /dev/video0:/dev/video0
     restart: unless-stopped
