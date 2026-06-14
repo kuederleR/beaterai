@@ -90,46 +90,72 @@ class TwinLiteDetector:
         return ll_full, da_full
 
     @staticmethod
-    def lanes_from_mask(ll_mask, car_center_x, min_points=4):
+    def lanes_from_mask(ll_mask, car_center_x, min_points=4, max_gap=10):
         h, w = ll_mask.shape[:2]
-        binary = (ll_mask > 0).astype(np.uint8)
-        num_labels, labels = cv2.connectedComponents(binary, connectivity=8)
 
-        def _centerline(mask_comp):
-            ys, xs = np.where(mask_comp)
-            row_map = {}
-            for x, y in zip(xs, ys):
-                row_map.setdefault(y, []).append(x)
-            pts = []
-            for y in sorted(row_map.keys(), reverse=True):
-                pts.append([float(np.mean(row_map[y])), float(y)])
-            return np.array(pts, dtype=np.float32) if len(pts) >= min_points else None
+        class _Track:
+            def __init__(self, x, y):
+                self.pts = [(x, y)]
+                self.last_row = y
+                self.gap = 0
+            def add(self, x, y):
+                self.pts.append((x, y))
+                self.last_row = y
+                self.gap = 0
+            def result(self):
+                return np.array(self.pts, dtype=np.float32) if len(self.pts) >= min_points else None
 
-        left_candidates = []
-        right_candidates = []
+        tracks = []
 
-        for i in range(1, num_labels):
-            comp = (labels == i)
-            ys, xs = np.where(comp)
-            if len(ys) < min_points:
+        for row in range(h - 1, h // 3, -1):
+            row_data = ll_mask[row, :].astype(np.float32)
+            if np.max(row_data) == 0:
                 continue
-            cw = int(xs.max()) - int(xs.min())
-            ch = int(ys.max()) - int(ys.min())
-            if cw > 25 or ch < 10:
-                continue
-            pts = _centerline(comp)
-            if pts is None:
-                continue
-            side = 'left' if pts[-1, 0] < car_center_x else 'right'
-            if side == 'left':
-                left_candidates.append(pts)
-            else:
-                right_candidates.append(pts)
 
-        lanes = []
-        for candidates in (left_candidates, right_candidates):
-            if not candidates:
+            nonzero = np.where(row_data > 0)[0]
+            gaps = np.diff(nonzero) > 3
+            segments = np.split(nonzero, np.where(gaps)[0] + 1)
+            centroids = [float(np.mean(seg)) for seg in segments if len(seg) >= 2]
+            if not centroids:
                 continue
-            merged = np.vstack(candidates)
-            lanes.append(merged)
-        return lanes
+
+            matched = [False] * len(centroids)
+            remaining = []
+            finished = []
+
+            for t in tracks:
+                best_idx = -1
+                best_d = float('inf')
+                for ci, cx in enumerate(centroids):
+                    if matched[ci]:
+                        continue
+                    d = abs(cx - t.pts[-1][0])
+                    if d < 40 and d < best_d:
+                        best_d = d
+                        best_idx = ci
+
+                if best_idx >= 0:
+                    matched[best_idx] = True
+                    t.add(centroids[best_idx], row)
+                    remaining.append(t)
+                else:
+                    t.gap += 1
+                    if t.gap > max_gap:
+                        r = t.result()
+                        if r is not None:
+                            finished.append(r)
+                    else:
+                        remaining.append(t)
+
+            for ci, cx in enumerate(centroids):
+                if not matched[ci]:
+                    tracks.append(_Track(cx, row))
+
+            tracks = remaining
+
+        for t in tracks:
+            r = t.result()
+            if r is not None:
+                finished.append(r)
+
+        return finished
