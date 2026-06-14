@@ -148,6 +148,7 @@ class YolopDetector:
         if trt_engine_path and os.path.exists(trt_engine_path):
             try:
                 self.trt_runner = TrtRunner(trt_engine_path)
+                self._anchor_grid = None
                 print(f"[INFO] Loaded TensorRT engine from {trt_engine_path}", flush=True)
                 return
             except Exception as e:
