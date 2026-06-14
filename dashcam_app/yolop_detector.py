@@ -118,9 +118,9 @@ class TrtRunner:
 
 # YOLOPv2 anchors (YOLOv5-style, 3 scales × 3 anchors × 2 dims)
 YOLOP_ANCHOR_GRID = (
-    np.array([[[[[10, 13], [16, 30], [33, 23]]]]], dtype=np.float32),   # P3/8
-    np.array([[[[[30, 61], [62, 45], [59, 119]]]]], dtype=np.float32),  # P4/16
-    np.array([[[[[116, 90], [156, 198], [373, 326]]]]], dtype=np.float32),  # P5/32
+    np.array([[[10, 13], [16, 30], [33, 23]]], dtype=np.float32).reshape(1, 3, 1, 1, 2),   # P3/8
+    np.array([[[30, 61], [62, 45], [59, 119]]], dtype=np.float32).reshape(1, 3, 1, 1, 2),  # P4/16
+    np.array([[[116, 90], [156, 198], [373, 326]]], dtype=np.float32).reshape(1, 3, 1, 1, 2),  # P5/32
 )
 
 # --- YolopDetector wrapper class ---
