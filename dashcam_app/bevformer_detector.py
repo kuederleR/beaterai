@@ -1,5 +1,7 @@
 import os
 import json
+import threading
+import subprocess
 import cv2
 import numpy as np
 
@@ -82,8 +84,58 @@ class BEVFormerDetector:
                 print(f"[BEVFormer] Failed to load TRT engine: {e}", flush=True)
                 self.trt_runner = None
         else:
-            print(f"[BEVFormer] Engine {engine_path} not found. "
-                  "Run build_engines.py to compile BEVFormer-Tiny from MMDetection3D.", flush=True)
+            print(f"[BEVFormer] Engine {engine_path} not found. Starting auto-build...", flush=True)
+            self._auto_build(engine_path)
+
+    def _auto_build(self, engine_path):
+        def _build():
+            onnx_path = engine_path.replace('.engine', '.onnx')
+            try:
+                import mmdet3d
+                mmdet3d_dir = os.path.dirname(mmdet3d.__file__)
+                config_path = os.path.join(
+                    mmdet3d_dir, "configs", "bevformer", "bevformer_tiny.py"
+                )
+                if not os.path.exists(config_path):
+                    print(f"[BEVFormer] Config not found at {config_path}. Searching...", flush=True)
+                    import glob
+                    matches = glob.glob(
+                        os.path.join(mmdet3d_dir, "**", "bevformer*tiny*.py"), recursive=True
+                    ) + glob.glob(
+                        os.path.join(mmdet3d_dir, "..", "**", "bevformer*tiny*.py"), recursive=True
+                    )
+                    if matches:
+                        config_path = matches[0]
+                    else:
+                        raise FileNotFoundError("BEVFormer config not found in mmdet3d installation")
+
+                print(f"[BEVFormer] Exporting to ONNX via MMDeploy (config: {config_path})...", flush=True)
+                subprocess.run([
+                    "python3", "-m", "mmdeploy.tools.export",
+                    "tensorrt",
+                    config_path,
+                    "https://download.openmmlab.com/mmdetection3d/v1.1.0/models/bevformer/"
+                    "bevformer_tiny_epoch_24.pth",
+                    onnx_path,
+                    "--work-dir", "models/bevformer_build",
+                ], check=True, timeout=600)
+                print("[BEVFormer] Building TensorRT engine...", flush=True)
+                subprocess.run([
+                    "trtexec",
+                    f"--onnx={onnx_path}",
+                    f"--saveEngine={engine_path}",
+                    "--fp16",
+                    "--memPoolSize=workspace:2048",
+                ], check=True, timeout=900)
+                print(f"[BEVFormer] Engine saved to {engine_path}. Reloading...", flush=True)
+                self.trt_runner = TrtRunner(engine_path)
+            except Exception as e:
+                print(f"[BEVFormer] Auto-build failed: {e}", flush=True)
+                print("[BEVFormer] See build_engines.py or run manually: "
+                      "cd /app && python3 -c \"from bevformer_detector import BEVFormerDetector; "
+                      "BEVFormerDetector()._auto_build('models/bevformer_tiny.engine')\"", flush=True)
+        t = threading.Thread(target=_build, daemon=True)
+        t.start()
 
     @staticmethod
     def _nuscenes_default_extrinsics():

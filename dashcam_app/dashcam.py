@@ -76,9 +76,18 @@ if os.path.exists(yaml_path):
 
 K_INFER = None
 if CAMERA_MATRIX is not None:
+    try:
+        K_INFER = np.array([
+            [CAMERA_MATRIX[0, 0] * 0.5, 0.0, CAMERA_MATRIX[0, 2] * 0.5],
+            [0.0, CAMERA_MATRIX[1, 1] * 0.5, CAMERA_MATRIX[1, 2] * 0.5],
+            [0.0, 0.0, 1.0]
+        ], dtype=np.float32)
+    except Exception:
+        pass
+if K_INFER is None:
     K_INFER = np.array([
-        [CAMERA_MATRIX[0, 0] * 0.5, 0.0, CAMERA_MATRIX[0, 2] * 0.5],
-        [0.0, CAMERA_MATRIX[1, 1] * 0.5, CAMERA_MATRIX[1, 2] * 0.5],
+        [898.6913680933326 * 0.5, 0.0, 673.4475138526925 * 0.5],
+        [0.0, 898.7300068900809 * 0.5, 349.2407561225512 * 0.5],
         [0.0, 0.0, 1.0]
     ], dtype=np.float32)
 
@@ -91,8 +100,9 @@ def _fallback_compute_homography(vp_x=None, vp_y=None):
     global H_inv, _road_to_bev_M, _fallback_vp
     if vp_x is None and _fallback_vp is not None:
         vp_x, vp_y = _fallback_vp
-    if vp_x is None or K_INFER is None:
-        vp_x, vp_y = K_INFER[0, 2] if K_INFER is not None else 320, 160.0
+    if vp_x is None:
+        vp_x = K_INFER[0, 2]
+        vp_y = 160.0
 
     K_inv = np.linalg.inv(K_INFER)
     u_y = K_inv @ np.array([vp_x, vp_y, 1.0], dtype=np.float32)
