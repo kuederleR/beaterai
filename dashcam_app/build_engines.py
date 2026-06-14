@@ -1,9 +1,10 @@
 """
 Build TensorRT INT8 engine for YOLOPv2.
 
-Two stages:
+Three stages:
   1. export ONNX from PyTorch JIT model
-  2. build INT8 engine with trtexec
+  2. build INT8 calibration cache from dev video frames
+  3. build INT8 engine with trtexec using the calibration cache
 
 All stages are idempotent — skip if output already exists.
 """
@@ -17,6 +18,7 @@ import cv2
 
 MODEL_URL = "https://github.com/CAIC-AD/YOLOPv2/releases/download/V0.0.1/yolopv2.pt"
 IMG_SIZE = 480
+MAX_CALIB_FRAMES = 100
 
 
 # ---------------------------------------------------------------------------
@@ -93,16 +95,137 @@ def export_yolop_onnx(model_path="data/weights/yolopv2.pt",
     print("[build] ONNX export done.", flush=True)
 
 
+# ---------------------------------------------------------------------------
+# Stage 2 — extract calibration frames & build calibration cache
+# ---------------------------------------------------------------------------
+
+def _extract_calibration_frames(video_path, output_path="data/weights/yolopv2_calib.npy"):
+    if os.path.exists(output_path):
+        print(f"[build] Calibration frames exist at {output_path}, skipping", flush=True)
+        return output_path
+
+    if not video_path or not os.path.exists(video_path):
+        return None
+
+    print(f"[build] Extracting up to {MAX_CALIB_FRAMES} calibration frames from "
+          f"{video_path} ...", flush=True)
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"[build] WARNING: Cannot open video {video_path}", flush=True)
+        return None
+
+    frames = []
+    for i in range(MAX_CALIB_FRAMES):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        resized = cv2.resize(frame, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_LINEAR)
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        normed = rgb.astype(np.float32) / 255.0
+        chw = np.transpose(normed, (2, 0, 1))
+        frames.append(chw)
+        if (i + 1) % 25 == 0:
+            print(f"[build]   frame {i+1}/{MAX_CALIB_FRAMES}", flush=True)
+
+    cap.release()
+    if not frames:
+        print("[build] WARNING: No frames extracted from video", flush=True)
+        return None
+
+    arr = np.stack(frames, axis=0).astype(np.float32)
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+    np.save(output_path, arr)
+    print(f"[build] Saved {len(frames)} frames to {output_path}", flush=True)
+    return output_path
+
+
+def _build_calibration_cache(onnx_path, calib_npy_path,
+                             cache_path="data/weights/yolopv2_int8.cache"):
+    """Parse ONNX, run INT8 calibration with real frames, save cache."""
+
+    import tensorrt as trt
+    import torch
+
+    class _FrameCalibrator(trt.IInt8EntropyCalibrator2):
+        def __init__(self, npy_path, batch_size=1, cache_path=None):
+            super().__init__()
+            self._batch_size = batch_size
+            self._cache_path = cache_path
+            self._idx = 0
+
+            data = np.load(npy_path)
+            self._total = len(data)
+            n, c, h, w = data.shape
+            self._gpu_buf = torch.empty(n, c, h, w, dtype=torch.float32, device='cuda')
+            self._gpu_buf.copy_(torch.from_numpy(data).cuda())
+
+        def get_batch_size(self):
+            return self._batch_size
+
+        def get_batch(self, names):
+            if self._idx >= self._total:
+                return None
+            batch_end = min(self._idx + self._batch_size, self._total)
+            elements_per_sample = int(np.prod(self._gpu_buf.shape[1:]))
+            offset_bytes = self._idx * elements_per_sample * 4
+            ptr = int(self._gpu_buf.data_ptr()) + offset_bytes
+            self._idx = batch_end
+            print(f"[calib] batch {self._idx}/{self._total}", flush=True)
+            return [ptr]
+
+        def read_calibration_cache(self):
+            if self._cache_path and os.path.exists(self._cache_path):
+                with open(self._cache_path, 'rb') as f:
+                    return f.read()
+            return None
+
+        def write_calibration_cache(self, cache):
+            if self._cache_path:
+                os.makedirs(os.path.dirname(self._cache_path) or '.', exist_ok=True)
+                with open(self._cache_path, 'wb') as f:
+                    f.write(cache)
+                print(f"[build] Calibration cache saved to {self._cache_path}", flush=True)
+
+    print(f"[build] Building calibration cache from {calib_npy_path} ...", flush=True)
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network_flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    network = builder.create_network(network_flags)
+    parser = trt.OnnxParser(network, logger)
+
+    with open(onnx_path, 'rb') as f:
+        if not parser.parse(f.read()):
+            for err in range(parser.num_errors):
+                print(f"[build] ONNX parse error: {parser.get_error(err)}", flush=True)
+            raise RuntimeError("ONNX parse failed")
+
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+    config.set_flag(trt.BuilderFlag.INT8)
+
+    calibrator = _FrameCalibrator(calib_npy_path, batch_size=1, cache_path=cache_path)
+    config.int8_calibrator = calibrator
+
+    print("[build] Running calibration (collecting activation statistics) ...",
+          flush=True)
+    t0 = time.time()
+    builder.build_serialized_network(network, config)
+    elapsed = time.time() - t0
+    print(f"[build] Calibration phase done in {elapsed:.0f}s.", flush=True)
+
+    if os.path.exists(cache_path):
+        print(f"[build] Calibration cache ready at {cache_path}", flush=True)
+        return cache_path
+    raise RuntimeError("Calibration cache was not written")
+
 
 # ---------------------------------------------------------------------------
 # Stage 3 — INT8 engine with trtexec
 # ---------------------------------------------------------------------------
 
-def build_yolop_int8_engine(onnx_path="data/weights/yolopv2.onnx",
-                            cache_path="data/weights/yolopv2_int8.cache",
-                            engine_path="data/weights/yolopv2_int8.engine"):
+def _build_engine_with_trtexec(onnx_path, cache_path,
+                               engine_path="data/weights/yolopv2_int8.engine"):
     if os.path.exists(engine_path):
-        print(f"[build] INT8 engine exists at {engine_path}, skipping", flush=True)
         return
 
     for needed in (onnx_path,):
@@ -119,8 +242,7 @@ def build_yolop_int8_engine(onnx_path="data/weights/yolopv2.onnx",
         cmd.append(f"--calib={cache_path}")
         print(f"[build] Using calibration cache: {cache_path}", flush=True)
     else:
-        print("[build] No calibration cache — trtexec will use random calibration",
-              flush=True)
+        print("[build] No calibration cache — random calibration", flush=True)
 
     print(f"[build] Building INT8 engine via trtexec ...", flush=True)
     print(f"[build] Command: {' '.join(cmd)}", flush=True)
@@ -142,24 +264,43 @@ def build_yolop_int8_engine(onnx_path="data/weights/yolopv2.onnx",
 def ensure_yolop_int8_engine(model_path="data/weights/yolopv2.pt",
                              onnx_path="data/weights/yolopv2.onnx",
                              cache_path="data/weights/yolopv2_int8.cache",
-                             engine_path="data/weights/yolopv2_int8.engine"):
+                             engine_path="data/weights/yolopv2_int8.engine",
+                             calib_video_path=None):
     if os.path.exists(engine_path):
         print(f"[build] INT8 engine ready at {engine_path}", flush=True)
         return engine_path
 
     print("=" * 60, flush=True)
     print("[build] YOLOPv2 INT8 engine not found — building now.", flush=True)
-    print("[build] This may take 5–15 minutes on Jetson Orin Nano.", flush=True)
+    print("[build] Stages:", flush=True)
+    print("[build]   1. ONNX export     (~1 min)", flush=True)
+    print("[build]   2. Calibration      (~2 min) — 100 frames from video", flush=True)
+    print("[build]   3. trtexec build  (~5-15 min) — shows progress", flush=True)
     print("=" * 60, flush=True)
 
     t0 = time.time()
+
+    # Stage 1
     export_yolop_onnx(model_path, onnx_path)
 
-    build_yolop_int8_engine(onnx_path, cache_path if os.path.exists(cache_path) else None, engine_path)
+    # Stage 2 — extract frames & build calibration cache
+    calib_npy = _extract_calibration_frames(calib_video_path)
+    if calib_npy and not os.path.exists(cache_path):
+        try:
+            _build_calibration_cache(onnx_path, calib_npy, cache_path)
+        except Exception as e:
+            print(f"[build] Calibration cache build failed: {e}", flush=True)
+            print("[build] Will proceed with random calibration", flush=True)
+    else:
+        print("[build] Skipping calibration cache build", flush=True)
+
+    # Stage 3
+    _build_engine_with_trtexec(onnx_path, cache_path if os.path.exists(cache_path) else None, engine_path)
+
     elapsed = time.time() - t0
     print(f"[build] INT8 engine build complete in {elapsed:.0f}s.", flush=True)
     return engine_path
 
 
 if __name__ == "__main__":
-    ensure_yolop_int8_engine()
+    ensure_yolop_int8_engine(calib_video_path=os.environ.get("DEV_VIDEO_PATH"))
