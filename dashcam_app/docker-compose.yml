@@ -21,8 +21,8 @@ services:
       - DEVICE=0
       - PYTHONUNBUFFERED=1
     volumes:
+      - ./data/weights:/app/data/weights
       - ./recordings:/app/recordings
-      - ../weights:/app/weights
       - ./dashcam.py:/app/dashcam.py
       - ./trt_runner.py:/app/trt_runner.py
       - ./build_engines.py:/app/build_engines.py
