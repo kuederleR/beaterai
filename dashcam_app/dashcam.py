@@ -210,6 +210,36 @@ def _trace_lane_edges(ll_mask, car_center_x, start_y, max_gap=30):
     return _to_array(left_pts), _to_array(right_pts)
 
 
+def _compute_drivable_polygon(ll_mask, car_center_x, start_y):
+    h, w = ll_mask.shape[:2]
+    start_y = int(np.clip(start_y, 10, h - 1))
+    end_row = h // 3
+
+    rows = []
+    left_xs = []
+    right_xs = []
+
+    for row in range(start_y, end_row - 1, -1):
+        nz = np.flatnonzero(ll_mask[row, :])
+        if len(nz) == 0:
+            continue
+        left_nz = nz[nz < car_center_x]
+        right_nz = nz[nz > car_center_x]
+        if len(left_nz) > 0 and len(right_nz) > 0:
+            rows.append(row)
+            left_xs.append(left_nz[-1])
+            right_xs.append(right_nz[0])
+
+    if len(rows) < 2:
+        return None
+
+    row_arr = np.array(rows, dtype=np.float32)
+    left_edge = np.column_stack([np.array(left_xs, dtype=np.float32), row_arr])
+    right_edge = np.column_stack([np.array(right_xs, dtype=np.float32), row_arr])
+
+    return np.vstack([left_edge, right_edge[::-1]])
+
+
 def _fallback_detect_lanes(ll_mask, car_center_x, trace_start_y):
     return _trace_lane_edges(ll_mask, car_center_x, trace_start_y)
 
@@ -611,13 +641,17 @@ def inference_loop():
                     da_overlay = np.zeros_like(im_debug)
                     da_overlay[da_mask_big > 0] = (40, 40, 40)
                     cv2.addWeighted(da_overlay, 0.4, im_debug, 0.6, 0, dst=im_debug)
+                    car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
+                    draw_scale = np.array([im_debug.shape[1] / ll_mask.shape[1],
+                                           im_debug.shape[0] / ll_mask.shape[0]], dtype=np.float32)
+                    drivable_poly = _compute_drivable_polygon(ll_mask, car_center_x, TRACE_START_Y)
+                    if drivable_poly is not None:
+                        poly_scaled = (drivable_poly * draw_scale).astype(np.int32)
+                        cv2.fillPoly(im_debug, [poly_scaled], (0, 180, 0))
                     ll_overlay = np.zeros_like(im_debug)
                     ll_overlay[ll_mask_big > 0] = (0, 255, 255)
                     cv2.addWeighted(ll_overlay, 0.3, im_debug, 0.7, 0, dst=im_debug)
-                    car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
                     left_edge, right_edge = _fallback_detect_lanes(ll_mask, car_center_x, TRACE_START_Y)
-                    draw_scale = np.array([im_debug.shape[1] / ll_mask.shape[1],
-                                           im_debug.shape[0] / ll_mask.shape[0]], dtype=np.float32)
                     if left_edge is not None:
                         pts_int = (left_edge * draw_scale).astype(np.int32)
                         cv2.polylines(im_debug, [pts_int], False, (255, 0, 255), 3)
