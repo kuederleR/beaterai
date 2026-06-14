@@ -130,31 +130,54 @@ class TwinLiteDetector:
 
             max_dist = 15 + 25 * (row - top_row) / max(bot_row - top_row, 1)
 
-            unmatched = set(range(len(centroids)))
+            track_list = [(i, t) for i, t in enumerate(tracks)]
+            track_list = [(i, t) for i, t in track_list if t.predict_x(row) is not None]
+            track_list.sort(key=lambda x: x[1].predict_x(row))
+            centroids_sorted = sorted(enumerate(centroids), key=lambda x: x[1])
 
-            for t in tracks:
-                if not unmatched:
-                    t.gap += 1
-                    continue
-                pred = t.predict_x(row)
-                if pred is None:
-                    t.gap += 1
-                    continue
-                best_idx = -1
-                best_d = float('inf')
-                for ci in unmatched:
-                    d = abs(centroids[ci] - pred)
-                    if d < max_dist and d < best_d:
-                        best_d = d
-                        best_idx = ci
-                if best_idx >= 0:
-                    unmatched.discard(best_idx)
-                    t.add(centroids[best_idx], row)
-                else:
+            matched_tracks = set()
+            matched_centroids = set()
+
+            if track_list and centroids_sorted:
+                n, m = len(track_list), len(centroids_sorted)
+                cost = np.full((n, m), np.inf)
+                for ti in range(n):
+                    pred = track_list[ti][1].predict_x(row)
+                    for ci in range(m):
+                        d = abs(centroids_sorted[ci][1] - pred)
+                        if d < max_dist:
+                            cost[ti, ci] = d - max_dist
+
+                dp = np.full((n + 1, m + 1), np.inf)
+                dp[0, :] = 0
+                dp[:, 0] = 0
+                for ti in range(1, n + 1):
+                    for ci in range(1, m + 1):
+                        dp[ti, ci] = min(dp[ti - 1, ci], dp[ti, ci - 1])
+                        if cost[ti - 1, ci - 1] < np.inf:
+                            dp[ti, ci] = min(dp[ti, ci], dp[ti - 1, ci - 1] + cost[ti - 1, ci - 1])
+
+                ti, ci = n, m
+                while ti > 0 and ci > 0:
+                    if abs(dp[ti, ci] - dp[ti - 1, ci]) < 1e-9:
+                        ti -= 1
+                    elif abs(dp[ti, ci] - dp[ti, ci - 1]) < 1e-9:
+                        ci -= 1
+                    else:
+                        ti -= 1
+                        ci -= 1
+                        if cost[ti, ci] < np.inf:
+                            matched_tracks.add(track_list[ti][0])
+                            matched_centroids.add(centroids_sorted[ci][0])
+                            track_list[ti][1].add(centroids_sorted[ci][1], row)
+
+            for i, t in enumerate(tracks):
+                if i not in matched_tracks:
                     t.gap += 1
 
-            for ci in unmatched:
-                tracks.append(_Track(centroids[ci], row))
+            for i, cx in enumerate(centroids):
+                if i not in matched_centroids:
+                    tracks.append(_Track(cx, row))
 
             dead = [t for t in tracks if t.gap > max_gap]
             for t in dead:
