@@ -92,29 +92,43 @@ class TwinLiteDetector:
     @staticmethod
     def lanes_from_mask(ll_mask, car_center_x, min_points=4, max_gap=15):
         h, w = ll_mask.shape[:2]
+        bot_row = h - 1
+        top_row = h // 3
 
         class _Track:
             def __init__(self, x, y):
-                self.pts = [(x, y)]
+                self.pts = [(float(x), float(y))]
                 self.gap = 0
+                self._vx = 0.0
             def add(self, x, y):
-                self.pts.append((x, y))
+                prev = self.pts[-1]
+                dy = prev[1] - y
+                if dy > 0:
+                    self._vx = 0.3 * self._vx + 0.7 * (x - prev[0]) / dy
+                self.pts.append((float(x), float(y)))
                 self.gap = 0
+            def predict_x(self, row):
+                if not self.pts:
+                    return None
+                dy = self.pts[-1][1] - row
+                return self.pts[-1][0] + self._vx * dy
             def result(self):
                 return np.array(self.pts, dtype=np.float32) if len(self.pts) >= min_points else None
 
         tracks = []
         finished = []
 
-        for row in range(h - 1, h // 3, -1):
+        for row in range(bot_row, top_row, -1):
             row_data = ll_mask[row, :].astype(np.float32)
 
             nonzero = np.where(row_data > 0)[0]
             centroids = []
             if len(nonzero) > 0:
-                gaps = np.diff(nonzero) > 3
-                segments = np.split(nonzero, np.where(gaps)[0] + 1)
+                seg_gaps = np.diff(nonzero) > 3
+                segments = np.split(nonzero, np.where(seg_gaps)[0] + 1)
                 centroids = [float(np.mean(seg)) for seg in segments if len(seg) >= 1]
+
+            max_dist = 15 + 25 * (row - top_row) / max(bot_row - top_row, 1)
 
             unmatched = set(range(len(centroids)))
 
@@ -122,11 +136,15 @@ class TwinLiteDetector:
                 if not unmatched:
                     t.gap += 1
                     continue
+                pred = t.predict_x(row)
+                if pred is None:
+                    t.gap += 1
+                    continue
                 best_idx = -1
                 best_d = float('inf')
                 for ci in unmatched:
-                    d = abs(centroids[ci] - t.pts[-1][0])
-                    if d < 40 and d < best_d:
+                    d = abs(centroids[ci] - pred)
+                    if d < max_dist and d < best_d:
                         best_d = d
                         best_idx = ci
                 if best_idx >= 0:
