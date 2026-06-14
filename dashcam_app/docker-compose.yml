@@ -28,9 +28,12 @@ services:
       - ../weights:/app/weights
       - ./dashcam.py:/app/dashcam.py
       - ./trt_runner.py:/app/trt_runner.py
+      - ./twinlite_detector.py:/app/twinlite_detector.py
+      - ./fcn_detector.py:/app/fcn_detector.py
       - ./bevformer_detector.py:/app/bevformer_detector.py
       - ./deepstream_pipeline.py:/app/deepstream_pipeline.py
       - ./adas_postprocessor.py:/app/adas_postprocessor.py
+      - ./build_engines.py:/app/build_engines.py
       - ./models:/app/models
       - ./templates:/app/templates
       - jetson-networks:/usr/local/bin/networks

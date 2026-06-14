@@ -66,9 +66,12 @@ RUN mkdir -p recordings models
 
 # Copy application files
 COPY trt_runner.py .
+COPY twinlite_detector.py .
+COPY fcn_detector.py .
 COPY bevformer_detector.py .
 COPY deepstream_pipeline.py .
 COPY adas_postprocessor.py .
+COPY build_engines.py .
 COPY dashcam.py .
 COPY templates/ templates/
 COPY install_service.sh .
