@@ -1,6 +1,6 @@
 Flask==3.0.3
 Werkzeug==3.0.3
-numpy
+numpy<2
 opencv-python-headless
 torch
 # CuPy for GPU post-processing (install cupy-cuda11x on Jetson, cupy-cuda12x on desktop)
