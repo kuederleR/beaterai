@@ -131,6 +131,8 @@ class _VideoCalibrator:
 
         batch = []
         for _ in range(self.batch_size):
+            if self._idx >= self._total:
+                break
             ret, frame = self._cap.read()
             if not ret:
                 break
