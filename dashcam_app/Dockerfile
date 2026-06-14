@@ -37,15 +37,26 @@ RUN pip3 install --no-cache-dir \
     mmdet==3.3.0 \
     mmdet3d==1.4.0
 
-# Install MMDeploy (model conversion: PyTorch → ONNX → TensorRT)
-RUN pip3 install --no-cache-dir \
-    mmdeploy==1.3.1 \
-    mmdeploy-runtime-gpu==1.3.1
+# Install MMDeploy for model conversion (PyTorch → ONNX → TensorRT).
+# Build-time only; runtime uses the pre-compiled .engine file.
+# For Deformable Attention TensorRT plugins, compile from:
+# https://github.com/DerryHub/BEVFormer_tensorrt
+RUN pip3 install --no-cache-dir mmdeploy==0.2.0
 
-# Install CuPy from source for Jetson aarch64 (no pre-built wheel)
-RUN pip3 install --no-cache-dir \
-    cupy==12.3.0 \
-    --no-build-isolation
+# Install MMDeploy TensorRT runtime if available on this platform.
+# If unavailable, custom BEVFormer DeformableAttn plugins must be compiled manually
+# from https://github.com/DerryHub/BEVFormer_tensorrt
+RUN pip3 install --no-cache-dir mmdeploy-runtime-gpu \
+    -f https://download.openmmlab.com/mmdeploy/jetson/index.html \
+    2>/dev/null; true
+
+# Install CuPy - optional GPU-accelerated post-processing.
+# Pre-built wheels available for x86_64 (cupy-cuda11x, cupy-cuda12x).
+# On Jetson aarch64, no pre-built wheel exists; building from source takes ~30min:
+#   pip3 install cupy --no-build-isolation
+# The ADAS postprocessor falls back to NumPy automatically if CuPy is unavailable.
+RUN pip3 install --no-cache-dir cupy-cuda11x 2>/dev/null \
+    || echo "[INFO] CuPy not installed; ADAS postprocessor will use NumPy fallback"
 
 # Uninstall any pip opencv packages that conflict with Jetson native opencv
 RUN pip3 uninstall -y opencv-python opencv-python-headless opencv-contrib-python 2>/dev/null || true
