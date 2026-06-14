@@ -91,23 +91,15 @@ class BEVFormerDetector:
         def _build():
             onnx_path = engine_path.replace('.engine', '.onnx')
             try:
-                import mmdet3d
-                mmdet3d_dir = os.path.dirname(mmdet3d.__file__)
-                config_path = os.path.join(
-                    mmdet3d_dir, "configs", "bevformer", "bevformer_tiny.py"
-                )
-                if not os.path.exists(config_path):
-                    print(f"[BEVFormer] Config not found at {config_path}. Searching...", flush=True)
-                    import glob
-                    matches = glob.glob(
-                        os.path.join(mmdet3d_dir, "**", "bevformer*tiny*.py"), recursive=True
-                    ) + glob.glob(
-                        os.path.join(mmdet3d_dir, "..", "**", "bevformer*tiny*.py"), recursive=True
-                    )
-                    if matches:
-                        config_path = matches[0]
-                    else:
-                        raise FileNotFoundError("BEVFormer config not found in mmdet3d installation")
+                config_path = self._resolve_bevformer_config()
+                if config_path is None:
+                    import urllib.request
+                    os.makedirs("models/bevformer_build", exist_ok=True)
+                    config_path = "models/bevformer_build/bevformer_tiny.py"
+                    url = ("https://raw.githubusercontent.com/open-mmlab/mmdetection3d/"
+                           "main/configs/bevformer/bevformer_tiny.py")
+                    print(f"[BEVFormer] Downloading config from {url}...", flush=True)
+                    urllib.request.urlretrieve(url, config_path)
 
                 print(f"[BEVFormer] Exporting to ONNX via MMDeploy (config: {config_path})...", flush=True)
                 subprocess.run([
@@ -136,6 +128,29 @@ class BEVFormerDetector:
                       "BEVFormerDetector()._auto_build('models/bevformer_tiny.engine')\"", flush=True)
         t = threading.Thread(target=_build, daemon=True)
         t.start()
+
+    @staticmethod
+    def _resolve_bevformer_config():
+        candidates = []
+        try:
+            import mmdet3d
+            mmdet3d_dir = os.path.dirname(mmdet3d.__file__)
+            candidates.append(os.path.join(mmdet3d_dir, "configs", "bevformer", "bevformer_tiny.py"))
+            candidates.append(os.path.join(mmdet3d_dir, "..", "configs", "bevformer", "bevformer_tiny.py"))
+            import glob
+            candidates.extend(glob.glob(
+                os.path.join(mmdet3d_dir, "**", "bevformer_tiny.py"), recursive=True
+            ))
+        except ImportError:
+            pass
+        candidates.extend([
+            "configs/bevformer/bevformer_tiny.py",
+            "models/bevformer_build/bevformer_tiny.py",
+        ])
+        for p in candidates:
+            if os.path.exists(p):
+                return os.path.abspath(p)
+        return None
 
     @staticmethod
     def _nuscenes_default_extrinsics():
