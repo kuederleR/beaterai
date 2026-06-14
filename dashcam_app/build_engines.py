@@ -139,88 +139,41 @@ def _extract_calibration_frames(video_path, output_path="data/weights/yolopv2_ca
     return output_path
 
 
+CALIB_WORKER_SCRIPT = os.path.join(os.path.dirname(__file__), "_calib_worker.py")
+
+
 def _build_calibration_cache(onnx_path, calib_npy_path,
                              cache_path="data/weights/yolopv2_int8.cache"):
-    """Parse ONNX, run INT8 calibration with real frames, save cache."""
+    """Parse ONNX, run INT8 calibration with real frames, save cache.
 
-    import tensorrt as trt
-    import torch
-
-    class _FrameCalibrator(trt.IInt8EntropyCalibrator2):
-        def __init__(self, npy_path, batch_size=1, cache_path=None):
-            super().__init__()
-            self._batch_size = batch_size
-            self._cache_path = cache_path
-            self._idx = 0
-
-            data = np.load(npy_path)
-            self._total = len(data)
-            n, c, h, w = data.shape
-            self._gpu_buf = torch.empty(n, c, h, w, dtype=torch.float32, device='cuda')
-            self._gpu_buf.copy_(torch.from_numpy(data).cuda())
-
-        def get_batch_size(self):
-            return self._batch_size
-
-        def get_batch(self, names):
-            if self._idx >= self._total:
-                return None
-            batch_end = min(self._idx + self._batch_size, self._total)
-            elements_per_sample = int(np.prod(self._gpu_buf.shape[1:]))
-            offset_bytes = self._idx * elements_per_sample * 4
-            ptr = int(self._gpu_buf.data_ptr()) + offset_bytes
-            self._idx = batch_end
-            print(f"[calib] batch {self._idx}/{self._total}", flush=True)
-            return [ptr]
-
-        def read_calibration_cache(self):
-            if self._cache_path and os.path.exists(self._cache_path):
-                with open(self._cache_path, 'rb') as f:
-                    return f.read()
-            return None
-
-        def write_calibration_cache(self, cache):
-            if self._cache_path:
-                os.makedirs(os.path.dirname(self._cache_path) or '.', exist_ok=True)
-                with open(self._cache_path, 'wb') as f:
-                    f.write(cache)
-                print(f"[build] Calibration cache saved to {self._cache_path}", flush=True)
-            raise StopIteration  # abort engine build, cache is all we need
-
+    Runs the TensorRT engine build in a subprocess and kills it as soon as
+    the calibration cache file appears, avoiding the ~30 min optimization pass.
+    """
     print(f"[build] Building calibration cache from {calib_npy_path} ...", flush=True)
-    logger = trt.Logger(trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network_flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    network = builder.create_network(network_flags)
-    parser = trt.OnnxParser(network, logger)
 
-    with open(onnx_path, 'rb') as f:
-        if not parser.parse(f.read()):
-            for err in range(parser.num_errors):
-                print(f"[build] ONNX parse error: {parser.get_error(err)}", flush=True)
-            raise RuntimeError("ONNX parse failed")
+    worker_args = [sys.executable, CALIB_WORKER_SCRIPT,
+                   onnx_path, calib_npy_path, cache_path]
+    proc = subprocess.Popen(worker_args, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
 
-    config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-    config.set_flag(trt.BuilderFlag.INT8)
-
-    calibrator = _FrameCalibrator(calib_npy_path, batch_size=1, cache_path=cache_path)
-    config.int8_calibrator = calibrator
-
-    print("[build] Running calibration (collecting activation statistics) ...",
-          flush=True)
     t0 = time.time()
-    try:
-        builder.build_serialized_network(network, config)
-    except StopIteration:
-        pass  # raised by calibrator after cache is saved — expected
-    elapsed = time.time() - t0
-    print(f"[build] Calibration phase done in {elapsed:.0f}s.", flush=True)
+    for line in proc.stdout:
+        print(line.rstrip(), flush=True)
+        # Kill child as soon as the cache is written
+        if "Calibration cache saved" in line and os.path.exists(cache_path):
+            print("[build] Cache saved — terminating calibration process ...",
+                  flush=True)
+            proc.terminate()
+            break
 
-    if os.path.exists(cache_path):
-        print(f"[build] Calibration cache ready at {cache_path}", flush=True)
-        return cache_path
-    raise RuntimeError("Calibration cache was not written")
+    proc.wait(timeout=30)
+    elapsed = time.time() - t0
+
+    if not os.path.exists(cache_path):
+        raise RuntimeError("Calibration cache was not written")
+
+    print(f"[build] Calibration cache ready ({elapsed:.0f}s)", flush=True)
+    return cache_path
 
 
 # ---------------------------------------------------------------------------
