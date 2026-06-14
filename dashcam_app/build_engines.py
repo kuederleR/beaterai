@@ -139,6 +139,7 @@ def build_int8_calibration_cache(onnx_path="data/weights/yolopv2.onnx",
             return self.batch_size
 
         def get_batch(self, names):
+            import torch
             if self._idx >= self._total:
                 return None
             batch = []
@@ -159,7 +160,6 @@ def build_int8_calibration_cache(onnx_path="data/weights/yolopv2.onnx",
                 return None
             arr = np.stack(batch, axis=0).astype(np.float32)
             if self._device_input is None or self._device_input.shape != arr.shape:
-                import torch
                 self._device_input = torch.empty(arr.shape, dtype=torch.float32,
                                                   device='cuda')
             self._device_input.copy_(torch.from_numpy(arr).cuda())
