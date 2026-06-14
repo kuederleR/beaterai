@@ -185,6 +185,7 @@ def _build_calibration_cache(onnx_path, calib_npy_path,
                 with open(self._cache_path, 'wb') as f:
                     f.write(cache)
                 print(f"[build] Calibration cache saved to {self._cache_path}", flush=True)
+            raise StopIteration  # abort engine build, cache is all we need
 
     print(f"[build] Building calibration cache from {calib_npy_path} ...", flush=True)
     logger = trt.Logger(trt.Logger.WARNING)
@@ -209,7 +210,10 @@ def _build_calibration_cache(onnx_path, calib_npy_path,
     print("[build] Running calibration (collecting activation statistics) ...",
           flush=True)
     t0 = time.time()
-    builder.build_serialized_network(network, config)
+    try:
+        builder.build_serialized_network(network, config)
+    except StopIteration:
+        pass  # raised by calibrator after cache is saved — expected
     elapsed = time.time() - t0
     print(f"[build] Calibration phase done in {elapsed:.0f}s.", flush=True)
 
