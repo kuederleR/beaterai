@@ -77,9 +77,8 @@ def export_yolop_onnx(model_path="data/weights/yolopv2.pt",
     print(f"[build] Loading model on {device} ...", flush=True)
     model = torch.jit.load(model_path, map_location=device)
     model.eval()
-    if device.type == 'cuda':
-        model = model.half()
-    dtype = next(model.parameters()).dtype
+    model = model.float()
+    dtype = torch.float32
 
     dummy = torch.zeros(1, 3, IMG_SIZE, IMG_SIZE, dtype=dtype, device=device)
     print(f"[build] Exporting ONNX to {onnx_path} ...", flush=True)
