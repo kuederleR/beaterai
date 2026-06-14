@@ -983,7 +983,6 @@ if __name__ == '__main__':
         onnx_path="data/weights/yolopv2.onnx",
         cache_path="data/weights/yolopv2_int8.cache",
         engine_path="data/weights/yolopv2_int8.engine",
-        calib_video_path=DEV_VIDEO_PATH,
     )
     os.environ["YOLOP_TRT_ENGINE"] = int8_engine
     print(f"[INFO] INT8 engine path: {int8_engine}", flush=True)

@@ -1,10 +1,9 @@
 """
-Build TensorRT engines for YOLOPv2 (FP16 / INT8).
+Build TensorRT INT8 engine for YOLOPv2.
 
-Three stages:
+Two stages:
   1. export ONNX from PyTorch JIT model
-  2. build INT8 calibration cache from a video
-  3. build engine with trtexec (FP16 or INT8)
+  2. build INT8 engine with trtexec
 
 All stages are idempotent — skip if output already exists.
 """
@@ -15,8 +14,6 @@ import time
 import subprocess
 import numpy as np
 import cv2
-
-
 
 MODEL_URL = "https://github.com/CAIC-AD/YOLOPv2/releases/download/V0.0.1/yolopv2.pt"
 IMG_SIZE = 480
@@ -96,114 +93,6 @@ def export_yolop_onnx(model_path="data/weights/yolopv2.pt",
     print("[build] ONNX export done.", flush=True)
 
 
-# ---------------------------------------------------------------------------
-# Stage 2 — INT8 calibration cache
-# ---------------------------------------------------------------------------
-
-def build_int8_calibration_cache(onnx_path="data/weights/yolopv2.onnx",
-                                 video_path=None,
-                                 cache_path="data/weights/yolopv2_int8.cache",
-                                 max_calib_frames=200):
-    if os.path.exists(cache_path):
-        print(f"[build] Calibration cache exists at {cache_path}, skipping", flush=True)
-        return
-
-    if not video_path or not os.path.exists(video_path):
-        print("[build] No calibration video available, building INT8 engine without cache",
-              flush=True)
-        return
-
-    import tensorrt as trt
-
-    class _VideoCalibrator(trt.IInt8EntropyCalibrator2):
-        def __init__(self, video_path, batch_size=1, img_size=480, cache_path=None):
-            super().__init__()
-            self.batch_size = batch_size
-            self.img_size = img_size
-            self.cache_path = cache_path
-            self._cap = cv2.VideoCapture(video_path)
-            if not self._cap.isOpened():
-                raise RuntimeError(f"Cannot open video: {video_path}")
-            try:
-                self._total = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            except Exception:
-                self._total = 500
-            self._idx = 0
-            self._device_input = None
-
-        def __del__(self):
-            if hasattr(self, '_cap') and self._cap is not None:
-                self._cap.release()
-
-        def get_batch_size(self):
-            return self.batch_size
-
-        def get_batch(self, names):
-            import torch
-            if self._idx >= self._total:
-                return None
-            batch = []
-            for _ in range(self.batch_size):
-                if self._idx >= self._total:
-                    break
-                ret, frame = self._cap.read()
-                if not ret:
-                    break
-                resized = cv2.resize(frame, (self.img_size, self.img_size),
-                                     interpolation=cv2.INTER_LINEAR)
-                rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-                normed = rgb.astype(np.float32) / 255.0
-                chw = np.transpose(normed, (2, 0, 1))
-                batch.append(chw)
-                self._idx += 1
-            if not batch:
-                return None
-            arr = np.stack(batch, axis=0).astype(np.float32)
-            if self._device_input is None or self._device_input.shape != arr.shape:
-                self._device_input = torch.empty(arr.shape, dtype=torch.float32,
-                                                  device='cuda')
-            self._device_input.copy_(torch.from_numpy(arr).cuda())
-            return [int(self._device_input.data_ptr())]
-
-        def read_calibration_cache(self):
-            if self.cache_path and os.path.exists(self.cache_path):
-                with open(self.cache_path, 'rb') as f:
-                    return f.read()
-            return None
-
-        def write_calibration_cache(self, cache):
-            if self.cache_path:
-                os.makedirs(os.path.dirname(self.cache_path) or '.', exist_ok=True)
-                with open(self.cache_path, 'wb') as f:
-                    f.write(cache)
-                print(f"[build] Calibration cache saved to {self.cache_path}", flush=True)
-
-    logger = trt.Logger(trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network_flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    network = builder.create_network(network_flags)
-    parser = trt.OnnxParser(network, logger)
-
-    print(f"[build] Parsing {onnx_path} for calibration ...", flush=True)
-    with open(onnx_path, 'rb') as f:
-        if not parser.parse(f.read()):
-            for err in range(parser.num_errors):
-                print(f"[build] ONNX parse error: {parser.get_error(err)}", flush=True)
-            raise RuntimeError("ONNX parse failed")
-
-    config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-    config.set_flag(trt.BuilderFlag.INT8)
-
-    calibrator = _VideoCalibrator(video_path, batch_size=1, img_size=IMG_SIZE,
-                                  cache_path=cache_path)
-    config.int8_calibrator = calibrator
-
-    print(f"[build] Building calibration engine (up to {max_calib_frames} frames) ...",
-          flush=True)
-    builder.build_serialized_network(network, config)
-    print("[build] Calibration done.", flush=True)
-
 
 # ---------------------------------------------------------------------------
 # Stage 3 — INT8 engine with trtexec
@@ -253,8 +142,7 @@ def build_yolop_int8_engine(onnx_path="data/weights/yolopv2.onnx",
 def ensure_yolop_int8_engine(model_path="data/weights/yolopv2.pt",
                              onnx_path="data/weights/yolopv2.onnx",
                              cache_path="data/weights/yolopv2_int8.cache",
-                             engine_path="data/weights/yolopv2_int8.engine",
-                             calib_video_path=None):
+                             engine_path="data/weights/yolopv2_int8.engine"):
     if os.path.exists(engine_path):
         print(f"[build] INT8 engine ready at {engine_path}", flush=True)
         return engine_path
@@ -267,17 +155,11 @@ def ensure_yolop_int8_engine(model_path="data/weights/yolopv2.pt",
     t0 = time.time()
     export_yolop_onnx(model_path, onnx_path)
 
-    if not os.path.exists(cache_path):
-        try:
-            build_int8_calibration_cache(onnx_path, calib_video_path, cache_path)
-        except Exception as e:
-            print(f"[build] Calibration skipped: {e}", flush=True)
-
-    build_yolop_int8_engine(onnx_path, cache_path, engine_path)
+    build_yolop_int8_engine(onnx_path, cache_path if os.path.exists(cache_path) else None, engine_path)
     elapsed = time.time() - t0
     print(f"[build] INT8 engine build complete in {elapsed:.0f}s.", flush=True)
     return engine_path
 
 
 if __name__ == "__main__":
-    ensure_yolop_int8_engine(calib_video_path=os.environ.get("DEV_VIDEO_PATH"))
+    ensure_yolop_int8_engine()
