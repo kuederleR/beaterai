@@ -41,4 +41,4 @@ class TrtRunner:
         t = torch.from_numpy(np.ascontiguousarray(input_np))
         self.d_input.copy_(t)
         self.context.execute_v2(self.bindings)
-        return [o.cpu().numpy() for o in self.d_outputs]
+        return self.d_outputs

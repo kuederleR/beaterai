@@ -24,6 +24,7 @@ services:
       - ./data/weights:/app/data/weights
       - ./recordings:/app/recordings
       - ./dashcam.py:/app/dashcam.py
+      - ./yolop_detector.py:/app/yolop_detector.py
       - ./trt_runner.py:/app/trt_runner.py
       - ./build_engines.py:/app/build_engines.py
       - ./models:/app/models

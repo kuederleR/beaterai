@@ -347,16 +347,16 @@ class YolopDetector:
                 out = trt.infer(img_chw)
                 trt_ms = (time.perf_counter() - t_trt) * 1000
                 t0 = time.perf_counter()
-                pred = [torch.from_numpy(out[i]).to(self.device) for i in range(3)]
-                # Find seg and ll by shape (TRT may reorder bindings)
-                seg = ll = None
+                # out are CUDA tensors — no GPU→CPU→GPU round-trips
+                pred = out[:3]
                 H = self.img_size
+                seg = ll = None
                 for arr in out:
                     s = arr.shape
                     if len(s) == 4 and s[1] == 2 and s[2] == H and s[3] == H:
-                        seg = torch.from_numpy(arr).to(self.device)
+                        seg = arr
                     elif len(s) == 4 and s[1] == 1 and s[2] == H and s[3] == H:
-                        ll = torch.from_numpy(arr).to(self.device)
+                        ll = arr
                 if seg is None or ll is None:
                     raise RuntimeError(f"Could not locate seg/ll in {len(out)} TRT outputs: "
                                        f"{[o.shape for o in out]}")
@@ -368,7 +368,6 @@ class YolopDetector:
                 print(f"[TRT] {len(out)} outputs, seg={seg.shape} ll={ll.shape} "
                       f"ll_range=[{ll.min().item():.4f}, {ll.max().item():.4f}] "
                       f"ll_nan={ll_nan}", flush=True)
-                # Use cached anchor_grid (TRT may fold out these constants)
                 if self._anchor_grid is not None:
                     anchor_grid = [ag.to(self.device) for ag in self._anchor_grid]
                 else:
