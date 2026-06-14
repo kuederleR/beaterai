@@ -194,35 +194,65 @@ class TwinLiteDetector:
         return finished
 
     @staticmethod
-    def trace_lane_edges(ll_mask, car_center_x, start_y, max_gap=15):
+    def trace_lane_edges(ll_mask, car_center_x, start_y, max_gap=30):
         h, w = ll_mask.shape[:2]
-        start_y = int(np.clip(start_y, 0, h - 1))
-        row_data = ll_mask[start_y, :].astype(np.float32)
-        nonzero = np.where(row_data > 0)[0]
-        if len(nonzero) == 0:
+        start_y = int(np.clip(start_y, 10, h - 1))
+
+        def _find_start(sy, predicate):
+            for dy in range(h):
+                for s in (-1, 1):
+                    r = sy + s * dy
+                    if r < h // 3 or r >= h:
+                        continue
+                    rd = ll_mask[r, :].astype(np.float32)
+                    if np.max(rd) == 0:
+                        continue
+                    nz = np.where(rd > 0)[0]
+                    gaps = np.diff(nz) > 3
+                    segs = np.split(nz, np.where(gaps)[0] + 1)
+                    for seg in segs:
+                        if predicate(int(seg[0]), int(seg[-1])):
+                            return r, int(seg[-1] if seg[-1] < car_center_x else seg[0])
             return None, None
 
-        seg_gaps = np.diff(nonzero) > 3
-        segments = np.split(nonzero, np.where(seg_gaps)[0] + 1)
+        left_row, left_x = _find_start(
+            start_y, lambda sl, sr: sr < car_center_x)
+        if left_row is not None:
+            start_y = left_row
 
-        left_start = None
-        right_start = None
-        for seg in segments:
-            sl, sr = int(seg[0]), int(seg[-1])
-            if sr < car_center_x:
-                left_start = sr
-            elif sl > car_center_x and right_start is None:
-                right_start = sl
+        right_row, right_x = _find_start(
+            start_y if left_row is None else left_row,
+            lambda sl, sr: sl > car_center_x)
+        if right_row is not None:
+            start_y = max(start_y, right_row)
 
-        def _trace(x_start, side):
-            if x_start is None:
+        if left_row is None and right_row is None:
+            return None, None
+
+        def _find_edge_at_row(row, cx, want_left):
+            rd = ll_mask[row, :].astype(np.float32)
+            nz = np.where(rd > 0)[0]
+            if len(nz) == 0:
                 return None
-            pts = [(float(x_start), float(start_y))]
-            last_x = x_start
+            gaps = np.diff(nz) > 3
+            segs = np.split(nz, np.where(gaps)[0] + 1)
+            for s in segs:
+                sl, sr = int(s[0]), int(s[-1])
+                if want_left and sr < cx:
+                    return sr
+                if not want_left and sl > cx:
+                    return sl
+            return None
+
+        def _trace_side(sx, sy, side):
+            if sx is None or sy is None:
+                return None
+            pts = [(float(sx), float(sy))]
+            last_x = sx
             gc = 0
-            for row in range(start_y - 1, h // 3, -1):
-                row_data = ll_mask[row, :].astype(np.float32)
-                if np.max(row_data) == 0:
+            for row in range(sy - 1, h // 3, -1):
+                rd = ll_mask[row, :].astype(np.float32)
+                if np.max(rd) == 0:
                     gc += 1
                     if gc > max_gap:
                         break
@@ -231,7 +261,7 @@ class TwinLiteDetector:
                 wr = int(max_dist)
                 x0 = max(0, int(last_x) - wr)
                 x1 = min(w, int(last_x) + wr)
-                win = row_data[x0:x1]
+                win = rd[x0:x1]
                 nz = np.where(win > 0)[0]
                 if len(nz) == 0:
                     gc += 1
@@ -244,4 +274,5 @@ class TwinLiteDetector:
                 gc = 0
             return np.array(pts, dtype=np.float32) if len(pts) >= 4 else None
 
-        return _trace(left_start, 'right'), _trace(right_start, 'left')
+        return (_trace_side(left_x, left_row, 'right'),
+                _trace_side(right_x, right_row, 'left'))
