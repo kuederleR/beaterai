@@ -376,14 +376,14 @@ class YolopDetector:
                 t1 = time.perf_counter()
                 print(f"[TIMING] TRT infer={trt_ms:.1f}ms post={((t1 - t0) * 1000):.1f}ms", flush=True)
             except Exception as e:
-                print(f"[WARN] TRT inference failed, falling back to PyTorch: {e}", flush=True)
-                # Delete bad engine so next restart rebuilds without FP16
-                engine_path = self.model_path.replace('.pt', '.trt')
-                if os.path.exists(engine_path):
-                    os.remove(engine_path)
-                    print("[INFO] Deleted bad TRT engine, will rebuild on next startup.", flush=True)
-                self.trt_runner = None
-                trt = None
+                import traceback
+                traceback.print_exc()
+                if self.model is not None:
+                    print(f"[WARN] TRT inference failed, falling back to PyTorch: {e}", flush=True)
+                    self.trt_runner = None
+                    trt = None
+                else:
+                    raise RuntimeError(f"TRT inference failed and no PyTorch fallback available: {e}") from e
 
         if trt is None:
             # --- PyTorch path ---
