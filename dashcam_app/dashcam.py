@@ -350,7 +350,9 @@ def fit_lanes_from_ufld_points(lanes, car_center_x, img_w, img_h):
         if poly is not None:
             a = poly[0]  # curvature coefficient
             if abs(a) < 0.001:
-                poly, _ = ransac_polyfit(Y[inlier_mask], X[inlier_mask] if np.any(inlier_mask) else X, degree=1)
+                p, _ = ransac_polyfit(Y[inlier_mask], X[inlier_mask] if np.any(inlier_mask) else X, degree=1)
+                if p is not None:
+                    poly = np.array([0.0, p[0], p[1]])  # pad degree-1 to degree-2
         return poly
 
     left_pts = None
