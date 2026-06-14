@@ -45,6 +45,7 @@ LDW_MIN_CALIBRATION_SAMPLES = 30
 from yolop_detector import YolopDetector
 
 INFER_WIDTH = 640
+DEBUG_SCALE = 0.5  # 1280×800 → 640×400 for overlay/encode
 INFER_HEIGHT = 416
 TRACE_START_Y = 370
 
@@ -564,6 +565,11 @@ def inference_loop():
                 im0 = cv2.cvtColor(im0, cv2.COLOR_BGRA2BGR)
                 im_debug = im0.copy()
 
+            if DEBUG_SCALE != 1.0:
+                new_w = int(im_debug.shape[1] * DEBUG_SCALE)
+                new_h = int(im_debug.shape[0] * DEBUG_SCALE)
+                im_debug = cv2.resize(im_debug, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
             lane_mask = None
             detections = []
             left_coeffs = None
@@ -610,14 +616,16 @@ def inference_loop():
                     cv2.addWeighted(ll_overlay, 0.3, im_debug, 0.7, 0, dst=im_debug)
                     car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
                     left_edge, right_edge = _fallback_detect_lanes(ll_mask, car_center_x, TRACE_START_Y)
+                    draw_scale = np.array([im_debug.shape[1] / ll_mask.shape[1],
+                                           im_debug.shape[0] / ll_mask.shape[0]], dtype=np.float32)
                     if left_edge is not None:
-                        pts_int = left_edge.astype(np.int32)
+                        pts_int = (left_edge * draw_scale).astype(np.int32)
                         cv2.polylines(im_debug, [pts_int], False, (255, 0, 255), 3)
                         left_lane_pts = left_edge
                     else:
                         left_lane_pts = None
                     if right_edge is not None:
-                        pts_int = right_edge.astype(np.int32)
+                        pts_int = (right_edge * draw_scale).astype(np.int32)
                         cv2.polylines(im_debug, [pts_int], False, (0, 255, 0), 3)
                         right_lane_pts = right_edge
                     else:
@@ -712,9 +720,9 @@ def inference_loop():
             state["ldw_warning"] = ldw_triggered
 
             _t_enc = time.perf_counter()
-            _, buf = cv2.imencode('.jpg', im_bev)
+            _, buf = cv2.imencode('.jpg', im_bev, [cv2.IMWRITE_JPEG_QUALITY, 85])
             if state["debug_feed_active"]:
-                _, buf_debug = cv2.imencode('.jpg', im_debug)
+                _, buf_debug = cv2.imencode('.jpg', im_debug, [cv2.IMWRITE_JPEG_QUALITY, 85])
             timer.track("encode", time.perf_counter() - _t_enc)
 
             with frame_lock:
