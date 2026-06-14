@@ -1,9 +1,9 @@
 """
-Build TensorRT INT8 engine for YOLOPv2.
+Build TensorRT engines for YOLOPv2.
 
 Two stages:
   1. export ONNX from PyTorch JIT model
-  2. build INT8 engine with trtexec (random calibration)
+  2. build engine with trtexec (FP16 or INT8)
 
 All stages are idempotent — skip if output already exists.
 """
@@ -92,25 +92,37 @@ def export_yolop_onnx(model_path="data/weights/yolopv2.pt",
 
 
 # ---------------------------------------------------------------------------
-# Stage 2 — INT8 engine with trtexec
+# Stage 2 — TensorRT engine with trtexec
 # ---------------------------------------------------------------------------
 
-def build_yolop_int8_engine(onnx_path="data/weights/yolopv2.onnx",
-                            engine_path="data/weights/yolopv2_int8.engine"):
+TRT_PRECISION_FLAGS = {
+    "fp16": "--fp16",
+    "int8": "--int8",
+}
+
+
+def build_yolop_trt_engine(onnx_path="data/weights/yolopv2.onnx",
+                           engine_path="data/weights/yolopv2_fp16.engine",
+                           precision="fp16"):
     if os.path.exists(engine_path):
-        print(f"[build] INT8 engine exists at {engine_path}, skipping", flush=True)
+        print(f"[build] {precision.upper()} engine exists at {engine_path}, skipping",
+              flush=True)
         return
 
     if not os.path.exists(onnx_path):
         raise RuntimeError(f"ONNX not found: {onnx_path}")
 
+    precision_flag = TRT_PRECISION_FLAGS.get(precision)
+    if precision_flag is None:
+        raise ValueError(f"Unsupported precision: {precision!r}")
+
     cmd = ["trtexec",
            f"--onnx={onnx_path}",
            f"--saveEngine={engine_path}",
-           "--int8",
+           precision_flag,
            "--memPoolSize=workspace:2048"]
 
-    print(f"[build] Building INT8 engine via trtexec ...", flush=True)
+    print(f"[build] Building {precision.upper()} engine via trtexec ...", flush=True)
     print(f"[build] Command: {' '.join(cmd)}", flush=True)
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -120,32 +132,38 @@ def build_yolop_int8_engine(onnx_path="data/weights/yolopv2.onnx",
     proc.wait(timeout=900)
     if proc.returncode != 0:
         raise RuntimeError(f"trtexec failed with code {proc.returncode}")
-    print(f"[build] INT8 engine saved to {engine_path}", flush=True)
+    print(f"[build] {precision.upper()} engine saved to {engine_path}", flush=True)
 
 
 # ---------------------------------------------------------------------------
 # Convenience
 # ---------------------------------------------------------------------------
 
-def ensure_yolop_int8_engine(model_path="data/weights/yolopv2.pt",
-                             onnx_path="data/weights/yolopv2.onnx",
-                             engine_path="data/weights/yolopv2_int8.engine"):
+def ensure_yolop_trt_engine(model_path="data/weights/yolopv2.pt",
+                            onnx_path="data/weights/yolopv2.onnx",
+                            engine_path="data/weights/yolopv2_fp16.engine",
+                            precision="fp16"):
     if os.path.exists(engine_path):
-        print(f"[build] INT8 engine ready at {engine_path}", flush=True)
+        print(f"[build] {precision.upper()} engine ready at {engine_path}", flush=True)
         return engine_path
 
     print("=" * 60, flush=True)
-    print("[build] YOLOPv2 INT8 engine not found — building now.", flush=True)
-    print("[build] This may take 5–15 minutes on Jetson Orin Nano.", flush=True)
+    print(f"[build] YOLOPv2 {precision.upper()} engine not found — building now.",
+          flush=True)
+    print(f"[build] This may take 2–3 minutes on Jetson Orin Nano.", flush=True)
     print("=" * 60, flush=True)
 
     t0 = time.time()
     export_yolop_onnx(model_path, onnx_path)
-    build_yolop_int8_engine(onnx_path, engine_path)
+    build_yolop_trt_engine(onnx_path, engine_path, precision)
     elapsed = time.time() - t0
-    print(f"[build] INT8 engine build complete in {elapsed:.0f}s.", flush=True)
+    print(f"[build] {precision.upper()} engine build complete in {elapsed:.0f}s.",
+          flush=True)
     return engine_path
 
 
 if __name__ == "__main__":
-    ensure_yolop_int8_engine()
+    import os
+    precision = os.environ.get("TRT_PRECISION", "fp16")
+    engine_path = f"data/weights/yolopv2_{precision}.engine"
+    ensure_yolop_trt_engine(engine_path=engine_path, precision=precision)

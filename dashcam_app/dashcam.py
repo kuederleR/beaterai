@@ -976,15 +976,18 @@ if __name__ == '__main__':
     print("Edge ADAS — YOLOPv2 + homography lane projection", flush=True)
     print("=" * 60, flush=True)
 
-    # Build INT8 engine before starting anything else
+    # Build TensorRT engine before starting anything else
+    TRT_PRECISION = os.environ.get("TRT_PRECISION", "fp16")
+    TRT_ENGINE_PATH = f"data/weights/yolopv2_{TRT_PRECISION}.engine"
     import build_engines
-    int8_engine = build_engines.ensure_yolop_int8_engine(
+    trt_engine = build_engines.ensure_yolop_trt_engine(
         model_path="data/weights/yolopv2.pt",
         onnx_path="data/weights/yolopv2.onnx",
-        engine_path="data/weights/yolopv2_int8.engine",
+        engine_path=TRT_ENGINE_PATH,
+        precision=TRT_PRECISION,
     )
-    os.environ["YOLOP_TRT_ENGINE"] = int8_engine
-    print(f"[INFO] INT8 engine path: {int8_engine}", flush=True)
+    os.environ["YOLOP_TRT_ENGINE"] = trt_engine
+    print(f"[INFO] TensorRT engine path: {trt_engine}", flush=True)
 
     print("Starting Capture thread...", flush=True)
     t_capture = threading.Thread(target=capture_loop, daemon=True)
