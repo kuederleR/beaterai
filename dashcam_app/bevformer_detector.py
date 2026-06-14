@@ -89,68 +89,37 @@ class BEVFormerDetector:
 
     def _auto_build(self, engine_path):
         def _build():
-            onnx_path = engine_path.replace('.engine', '.onnx')
+            build_dir = "models/bevformer_build"
+            os.makedirs(build_dir, exist_ok=True)
+            onnx_path = os.path.join(build_dir, "bevformer_tiny_fixed.onnx")
             try:
-                config_path = self._resolve_bevformer_config()
-                if config_path is None:
+                if not os.path.exists(onnx_path):
+                    print("[BEVFormer] Downloading pre-exported ONNX from HuggingFace...", flush=True)
                     import urllib.request
-                    os.makedirs("models/bevformer_build", exist_ok=True)
-                    config_path = "models/bevformer_build/bevformer_tiny.py"
-                    url = ("https://raw.githubusercontent.com/open-mmlab/mmdetection3d/"
-                           "main/configs/bevformer/bevformer_tiny.py")
-                    print(f"[BEVFormer] Downloading config from {url}...", flush=True)
-                    urllib.request.urlretrieve(url, config_path)
+                    url = ("https://huggingface.co/AXERA-TECH/bevformer/resolve/main/"
+                           "bevformer_tiny_fixed.onnx")
+                    urllib.request.urlretrieve(url, onnx_path)
 
-                print(f"[BEVFormer] Exporting to ONNX via MMDeploy (config: {config_path})...", flush=True)
-                subprocess.run([
-                    "python3", "-m", "mmdeploy.tools.export",
-                    "tensorrt",
-                    config_path,
-                    "https://download.openmmlab.com/mmdetection3d/v1.1.0/models/bevformer/"
-                    "bevformer_tiny_epoch_24.pth",
-                    onnx_path,
-                    "--work-dir", "models/bevformer_build",
-                ], check=True, timeout=600)
-                print("[BEVFormer] Building TensorRT engine...", flush=True)
+                print("[BEVFormer] Building TensorRT engine (FP16)...", flush=True)
                 subprocess.run([
                     "trtexec",
                     f"--onnx={onnx_path}",
                     f"--saveEngine={engine_path}",
                     "--fp16",
                     "--memPoolSize=workspace:2048",
+                    "--inputIChannels=3",
+                    "--inputHW=900,1600",
                 ], check=True, timeout=900)
                 print(f"[BEVFormer] Engine saved to {engine_path}. Reloading...", flush=True)
                 self.trt_runner = TrtRunner(engine_path)
             except Exception as e:
                 print(f"[BEVFormer] Auto-build failed: {e}", flush=True)
-                print("[BEVFormer] See build_engines.py or run manually: "
-                      "cd /app && python3 -c \"from bevformer_detector import BEVFormerDetector; "
-                      "BEVFormerDetector()._auto_build('models/bevformer_tiny.engine')\"", flush=True)
+                print("[BEVFormer] Build manually: download ONNX from "
+                      "https://huggingface.co/AXERA-TECH/bevformer/blob/main/bevformer_tiny_fixed.onnx"
+                      ", then run: trtexec --onnx=bevformer_tiny_fixed.onnx "
+                      "--saveEngine=models/bevformer_tiny.engine --fp16", flush=True)
         t = threading.Thread(target=_build, daemon=True)
         t.start()
-
-    @staticmethod
-    def _resolve_bevformer_config():
-        candidates = []
-        try:
-            import mmdet3d
-            mmdet3d_dir = os.path.dirname(mmdet3d.__file__)
-            candidates.append(os.path.join(mmdet3d_dir, "configs", "bevformer", "bevformer_tiny.py"))
-            candidates.append(os.path.join(mmdet3d_dir, "..", "configs", "bevformer", "bevformer_tiny.py"))
-            import glob
-            candidates.extend(glob.glob(
-                os.path.join(mmdet3d_dir, "**", "bevformer_tiny.py"), recursive=True
-            ))
-        except ImportError:
-            pass
-        candidates.extend([
-            "configs/bevformer/bevformer_tiny.py",
-            "models/bevformer_build/bevformer_tiny.py",
-        ])
-        for p in candidates:
-            if os.path.exists(p):
-                return os.path.abspath(p)
-        return None
 
     @staticmethod
     def _nuscenes_default_extrinsics():
