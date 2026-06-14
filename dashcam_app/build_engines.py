@@ -16,6 +16,8 @@ import subprocess
 import numpy as np
 import cv2
 
+
+
 MODEL_URL = "https://github.com/CAIC-AD/YOLOPv2/releases/download/V0.0.1/yolopv2.pt"
 IMG_SIZE = 480
 
@@ -98,76 +100,6 @@ def export_yolop_onnx(model_path="data/weights/yolopv2.pt",
 # Stage 2 — INT8 calibration cache
 # ---------------------------------------------------------------------------
 
-class _VideoCalibrator:
-    def __init__(self, video_path, batch_size=1, img_size=480, cache_path=None):
-        import tensorrt as trt
-        self._trt = trt
-        self.batch_size = batch_size
-        self.img_size = img_size
-        self.cache_path = cache_path
-
-        self._cap = cv2.VideoCapture(video_path)
-        if not self._cap.isOpened():
-            raise RuntimeError(f"Cannot open video: {video_path}")
-        try:
-            self._total = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        except Exception:
-            self._total = 500
-        self._idx = 0
-
-        self._device_input = None
-
-    def __del__(self):
-        if hasattr(self, '_cap') and self._cap is not None:
-            self._cap.release()
-
-    def get_batch_size(self):
-        return self.batch_size
-
-    def get_batch(self, names):
-        if self._idx >= self._total:
-            return None
-
-        batch = []
-        for _ in range(self.batch_size):
-            if self._idx >= self._total:
-                break
-            ret, frame = self._cap.read()
-            if not ret:
-                break
-            resized = cv2.resize(frame, (self.img_size, self.img_size),
-                                 interpolation=cv2.INTER_LINEAR)
-            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-            normed = rgb.astype(np.float32) / 255.0
-            chw = np.transpose(normed, (2, 0, 1))
-            batch.append(chw)
-            self._idx += 1
-
-        if not batch:
-            return None
-
-        arr = np.stack(batch, axis=0).astype(np.float32)
-        if self._device_input is None or self._device_input.shape != arr.shape:
-            import torch
-            self._device_input = torch.empty(arr.shape, dtype=torch.float32,
-                                              device='cuda')
-        self._device_input.copy_(torch.from_numpy(arr).cuda())
-        return [int(self._device_input.data_ptr())]
-
-    def read_calibration_cache(self):
-        if self.cache_path and os.path.exists(self.cache_path):
-            with open(self.cache_path, 'rb') as f:
-                return f.read()
-        return None
-
-    def write_calibration_cache(self, cache):
-        if self.cache_path:
-            os.makedirs(os.path.dirname(self.cache_path) or '.', exist_ok=True)
-            with open(self.cache_path, 'wb') as f:
-                f.write(cache)
-            print(f"[build] Calibration cache saved to {self.cache_path}", flush=True)
-
-
 def build_int8_calibration_cache(onnx_path="data/weights/yolopv2.onnx",
                                  video_path=None,
                                  cache_path="data/weights/yolopv2_int8.cache",
@@ -182,6 +114,70 @@ def build_int8_calibration_cache(onnx_path="data/weights/yolopv2.onnx",
         return
 
     import tensorrt as trt
+
+    class _VideoCalibrator(trt.IInt8EntropyCalibrator2):
+        def __init__(self, video_path, batch_size=1, img_size=480, cache_path=None):
+            super().__init__()
+            self.batch_size = batch_size
+            self.img_size = img_size
+            self.cache_path = cache_path
+            self._cap = cv2.VideoCapture(video_path)
+            if not self._cap.isOpened():
+                raise RuntimeError(f"Cannot open video: {video_path}")
+            try:
+                self._total = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            except Exception:
+                self._total = 500
+            self._idx = 0
+            self._device_input = None
+
+        def __del__(self):
+            if hasattr(self, '_cap') and self._cap is not None:
+                self._cap.release()
+
+        def get_batch_size(self):
+            return self.batch_size
+
+        def get_batch(self, names):
+            if self._idx >= self._total:
+                return None
+            batch = []
+            for _ in range(self.batch_size):
+                if self._idx >= self._total:
+                    break
+                ret, frame = self._cap.read()
+                if not ret:
+                    break
+                resized = cv2.resize(frame, (self.img_size, self.img_size),
+                                     interpolation=cv2.INTER_LINEAR)
+                rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+                normed = rgb.astype(np.float32) / 255.0
+                chw = np.transpose(normed, (2, 0, 1))
+                batch.append(chw)
+                self._idx += 1
+            if not batch:
+                return None
+            arr = np.stack(batch, axis=0).astype(np.float32)
+            if self._device_input is None or self._device_input.shape != arr.shape:
+                import torch
+                self._device_input = torch.empty(arr.shape, dtype=torch.float32,
+                                                  device='cuda')
+            self._device_input.copy_(torch.from_numpy(arr).cuda())
+            return [int(self._device_input.data_ptr())]
+
+        def read_calibration_cache(self):
+            if self.cache_path and os.path.exists(self.cache_path):
+                with open(self.cache_path, 'rb') as f:
+                    return f.read()
+            return None
+
+        def write_calibration_cache(self, cache):
+            if self.cache_path:
+                os.makedirs(os.path.dirname(self.cache_path) or '.', exist_ok=True)
+                with open(self.cache_path, 'wb') as f:
+                    f.write(cache)
+                print(f"[build] Calibration cache saved to {self.cache_path}", flush=True)
+
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network_flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
