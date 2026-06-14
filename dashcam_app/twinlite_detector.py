@@ -90,7 +90,7 @@ class TwinLiteDetector:
         return ll_full, da_full
 
     @staticmethod
-    def lanes_from_mask(ll_mask, car_center_x, min_points=4):
+    def lanes_from_mask(ll_mask, car_center_x, min_points=4, max_line_width=12):
         h, w = ll_mask.shape[:2]
         left_points = []
         right_points = []
@@ -106,6 +106,9 @@ class TwinLiteDetector:
             segments = np.split(nonzero, np.where(gaps)[0] + 1)
             for seg in segments:
                 if len(seg) < 2:
+                    continue
+                seg_width = seg[-1] - seg[0]
+                if seg_width > max_line_width:
                     continue
                 x = float(np.mean(seg))
                 y = float(row)
