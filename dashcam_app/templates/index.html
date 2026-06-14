@@ -543,6 +543,17 @@
                 Height of the crop window sent to TwinLiteNet. Taller = more context but more sky/hood.
             </div>
         </div>
+
+        <div class="control-card slider-card">
+            <div class="slider-header">
+                <span class="toggle-label">Trace Start Y</span>
+                <span class="slider-value" id="traceYValue">370 px</span>
+            </div>
+            <input type="range" id="traceYSlider" class="range-input" min="20" max="415" value="370" oninput="previewTraceY(this.value)" onchange="updateTraceY(this.value)">
+            <div style="font-size: 12px; color: var(--text-secondary); text-align: center;">
+                Row where lane-edge tracing begins. Higher = closer to car (more stable).
+            </div>
+        </div>
     </div>
 
     <script>
@@ -755,6 +766,21 @@
             document.getElementById('cropHValue').innerText = `${value} px`;
         }
 
+        function previewTraceY(value) {
+            document.getElementById('traceYValue').innerText = `${value} px`;
+        }
+        let traceYUpdateTimeout = null;
+        function updateTraceY(value) {
+            if (traceYUpdateTimeout) clearTimeout(traceYUpdateTimeout);
+            traceYUpdateTimeout = setTimeout(async () => {
+                await fetch('/api/set_trace_start', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ trace_start_y: parseInt(value) })
+                });
+            }, 100);
+        }
+
         let cropUpdateTimeout = null;
         function updateCrop(cropY, cropH) {
             if (cropUpdateTimeout) clearTimeout(cropUpdateTimeout);
@@ -834,6 +860,10 @@
                 if (data.twinlite_crop_h !== undefined) {
                     document.getElementById('cropHSlider').value = data.twinlite_crop_h;
                     document.getElementById('cropHValue').innerText = `${data.twinlite_crop_h} px`;
+                }
+                if (data.trace_start_y !== undefined) {
+                    document.getElementById('traceYSlider').value = data.trace_start_y;
+                    document.getElementById('traceYValue').innerText = `${data.trace_start_y} px`;
                 }
 
                 // Update Seg Classes

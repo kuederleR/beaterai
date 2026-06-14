@@ -192,3 +192,56 @@ class TwinLiteDetector:
                 finished.append(r)
 
         return finished
+
+    @staticmethod
+    def trace_lane_edges(ll_mask, car_center_x, start_y, max_gap=15):
+        h, w = ll_mask.shape[:2]
+        start_y = int(np.clip(start_y, 0, h - 1))
+        row_data = ll_mask[start_y, :].astype(np.float32)
+        nonzero = np.where(row_data > 0)[0]
+        if len(nonzero) == 0:
+            return None, None
+
+        seg_gaps = np.diff(nonzero) > 3
+        segments = np.split(nonzero, np.where(seg_gaps)[0] + 1)
+
+        left_start = None
+        right_start = None
+        for seg in segments:
+            sl, sr = int(seg[0]), int(seg[-1])
+            if sr < car_center_x:
+                left_start = sr
+            elif sl > car_center_x and right_start is None:
+                right_start = sl
+
+        def _trace(x_start, side):
+            if x_start is None:
+                return None
+            pts = [(float(x_start), float(start_y))]
+            last_x = x_start
+            gc = 0
+            for row in range(start_y - 1, h // 3, -1):
+                row_data = ll_mask[row, :].astype(np.float32)
+                if np.max(row_data) == 0:
+                    gc += 1
+                    if gc > max_gap:
+                        break
+                    continue
+                max_dist = 15 + 25 * (row - h // 3) / max(h - 1 - h // 3, 1)
+                wr = int(max_dist)
+                x0 = max(0, int(last_x) - wr)
+                x1 = min(w, int(last_x) + wr)
+                win = row_data[x0:x1]
+                nz = np.where(win > 0)[0]
+                if len(nz) == 0:
+                    gc += 1
+                    if gc > max_gap:
+                        break
+                    continue
+                ex = x0 + (nz[-1] if side == 'right' else nz[0])
+                pts.append((float(ex), float(row)))
+                last_x = ex
+                gc = 0
+            return np.array(pts, dtype=np.float32) if len(pts) >= 4 else None
+
+        return _trace(left_start, 'right'), _trace(right_start, 'left')

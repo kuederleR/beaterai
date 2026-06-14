@@ -45,6 +45,7 @@ INFER_WIDTH = 640
 INFER_HEIGHT = 416  # multiple of 32 (model stride) — avoids padding warnings
 TWINLITE_CROP_Y = 28
 TWINLITE_CROP_H = 360
+TRACE_START_Y = 370
 
 # FCW Settings
 FCW_WARNING_WIDTH = 200  # If a car's bounding box is wider than this in pixels, it's very close
@@ -178,6 +179,7 @@ state = {
     "debug_feed_active": True,
     "twinlite_crop_y": TWINLITE_CROP_Y,
     "twinlite_crop_h": TWINLITE_CROP_H,
+    "trace_start_y": TRACE_START_Y,
 }
 
 def update_homography(vp_override=None):
@@ -800,9 +802,17 @@ def inference_loop():
                 ll_mask, da_mask = twinlite.detect(im_infer)
                 state["seg_classes"] = []
                 
-                ufld_lanes = TwinLiteDetector.lanes_from_mask(ll_mask, car_center_x) if ll_mask is not None else []
-                if ufld_lanes is not None and len(ufld_lanes) > 0:
-                    print(f"[TRACKS] {len(ufld_lanes)} lanes, sizes: {[len(p) for p in ufld_lanes]}", flush=True)
+                trace_start_y = state.get("trace_start_y", TRACE_START_Y)
+                left_edge, right_edge = TwinLiteDetector.trace_lane_edges(ll_mask, car_center_x, trace_start_y) if ll_mask is not None else (None, None)
+                ufld_lanes = []
+                if left_edge is not None:
+                    ufld_lanes.append(left_edge)
+                    print(f"[TRACE] left: {len(left_edge)} pts, x={left_edge[-1,0]:.0f}-{left_edge[0,0]:.0f}", flush=True)
+                if right_edge is not None:
+                    ufld_lanes.append(right_edge)
+                    print(f"[TRACE] right: {len(right_edge)} pts, x={right_edge[-1,0]:.0f}-{right_edge[0,0]:.0f}", flush=True)
+                if not ufld_lanes:
+                    print("[TRACE] no lanes found", flush=True)
                 timer.track("inference", time.perf_counter() - _t_inf)
 
                 _t_remap = time.perf_counter()
@@ -1298,6 +1308,7 @@ def status():
         "seg_classes": state.get("seg_classes", []),
         "twinlite_crop_y": state.get("twinlite_crop_y", TWINLITE_CROP_Y),
         "twinlite_crop_h": state.get("twinlite_crop_h", TWINLITE_CROP_H),
+        "trace_start_y": state.get("trace_start_y", TRACE_START_Y),
     })
 @app.route('/api/toggle_recording', methods=['POST'])
 def toggle_recording():
@@ -1359,6 +1370,14 @@ def api_set_center_x():
     state["car_center_x"] = int(np.clip(int(center_x), 0, INFER_WIDTH - 1))
     save_calibration_state()
     return jsonify({"success": True, "car_center_x": state["car_center_x"]})
+
+@app.route('/api/set_trace_start', methods=['POST'])
+def api_set_trace_start():
+    global state
+    data = request.json or {}
+    val = data.get('trace_start_y', state.get("trace_start_y", TRACE_START_Y))
+    state["trace_start_y"] = int(np.clip(int(val), 20, INFER_HEIGHT - 1))
+    return jsonify({"success": True, "trace_start_y": state["trace_start_y"]})
 
 @app.route('/api/set_crop', methods=['POST'])
 def api_set_crop():
