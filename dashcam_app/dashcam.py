@@ -160,12 +160,17 @@ def capture_loop():
     fps_counter = 0
     fps_start = time.time()
 
+    is_dev_video = bool(DEV_VIDEO_PATH and os.path.exists(DEV_VIDEO_PATH))
+
     while True:
         try:
             ret, frame = cap.read()
             if not ret:
                 time.sleep(0.01)
                 continue
+
+            if is_dev_video:
+                time.sleep(1.0 / TARGET_FPS)
 
             with frame_lock:
                 raw_frame_buffer = frame.copy()

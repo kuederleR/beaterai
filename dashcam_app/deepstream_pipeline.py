@@ -158,6 +158,9 @@ class OpenCVCapture:
 
 def create_pipeline(video_source="/dev/video0", width=1280, height=720,
                     fps=30, dev_video_path=None):
+    if dev_video_path and os.path.exists(dev_video_path):
+        print(f"[Pipeline] Dev video path set, using OpenCV fallback for {dev_video_path}", flush=True)
+        return OpenCVCapture(video_source, width, height, fps, dev_video_path)
     if DEEPSREAM_AVAILABLE:
         pipe = DeepStreamPipeline(video_source, width, height, fps)
         if pipe.start():
