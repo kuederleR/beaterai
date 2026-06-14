@@ -308,28 +308,33 @@ def estimate_vp_from_ufld_lanes(lanes, img_w, img_h):
     return float(np.median(vp_xs)), float(np.median(vp_ys))
 
 
+def ransac_polyfit(Y, X, degree=2, n_iter=200, threshold=0.2, min_inliers=6):
+    n = degree + 1
+    if len(Y) < n:
+        return None, np.zeros(len(Y), dtype=bool)
+    best_ninliers = 0
+    best_mask = np.zeros(len(Y), dtype=bool)
+    rng = np.random.RandomState(0)
+    for _ in range(n_iter):
+        idx = rng.choice(len(Y), n, replace=False)
+        try:
+            p = np.polyfit(Y[idx], X[idx], degree)
+        except np.linalg.LinAlgError:
+            continue
+        residuals = np.abs(X - np.polyval(p, Y))
+        mask = residuals < threshold
+        ninliers = np.sum(mask)
+        if ninliers > best_ninliers:
+            best_ninliers = ninliers
+            best_mask = mask
+    if best_ninliers < min_inliers:
+        return None, best_mask
+    return np.polyfit(Y[best_mask], X[best_mask], degree), best_mask
+
+
 def fit_lanes_from_ufld_points(lanes, car_center_x, img_w, img_h):
     if not lanes:
         return None, None
-    left_points = None
-    right_points = None
-    min_left_dist = float('inf')
-    min_right_dist = float('inf')
-    for lane_pts in lanes:
-        if len(lane_pts) < 4:
-            continue
-        bottom_idx = np.argmax(lane_pts[:, 1])
-        x_bottom = lane_pts[bottom_idx, 0]
-        if x_bottom < car_center_x:
-            dist = car_center_x - x_bottom
-            if dist < min_left_dist:
-                min_left_dist = dist
-                left_points = lane_pts
-        else:
-            dist = x_bottom - car_center_x
-            if dist < min_right_dist:
-                min_right_dist = dist
-                right_points = lane_pts
 
     def project_and_fit(pts):
         if pts is None or len(pts) < 4:
@@ -341,18 +346,35 @@ def fit_lanes_from_ufld_points(lanes, car_center_x, img_w, img_h):
             return None
         Y = pts_road[:, 1]
         X = pts_road[:, 0]
-        try:
-            poly = np.polyfit(Y, X, 2)
-            residuals = np.abs(X - np.polyval(poly, Y))
-            inliers = residuals < 0.3
-            if np.sum(inliers) < 4:
-                return None
-            return np.polyfit(Y[inliers], X[inliers], 2)
-        except Exception:
-            return None
+        poly, inlier_mask = ransac_polyfit(Y, X, degree=2)
+        if poly is not None:
+            a = poly[0]  # curvature coefficient
+            if abs(a) < 0.001:
+                poly, _ = ransac_polyfit(Y[inlier_mask], X[inlier_mask] if np.any(inlier_mask) else X, degree=1)
+        return poly
 
-    left_poly = project_and_fit(left_points)
-    right_poly = project_and_fit(right_points)
+    left_pts = None
+    right_pts = None
+    min_left_dist = float('inf')
+    min_right_dist = float('inf')
+    for lane_pts in lanes:
+        if len(lane_pts) < 4:
+            continue
+        bottom_idx = np.argmax(lane_pts[:, 1])
+        x_bottom = lane_pts[bottom_idx, 0]
+        if x_bottom < car_center_x:
+            dist = car_center_x - x_bottom
+            if dist < min_left_dist:
+                min_left_dist = dist
+                left_pts = lane_pts
+        else:
+            dist = x_bottom - car_center_x
+            if dist < min_right_dist:
+                min_right_dist = dist
+                right_pts = lane_pts
+
+    left_poly = project_and_fit(left_pts)
+    right_poly = project_and_fit(right_pts)
     return left_poly, right_poly
 
 if os.path.exists('models/calibration.json'):
