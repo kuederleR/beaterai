@@ -90,35 +90,49 @@ class TwinLiteDetector:
         return ll_full, da_full
 
     @staticmethod
-    def lanes_from_mask(ll_mask, car_center_x, min_points=4, max_line_width=12):
+    def lanes_from_mask(ll_mask, car_center_x, min_points=4):
         h, w = ll_mask.shape[:2]
-        left_points = []
-        right_points = []
+        binary = (ll_mask > 0).astype(np.uint8)
+        num_labels, labels = cv2.connectedComponents(binary, connectivity=8)
 
-        for row in range(h - 1, h // 3, -1):
-            row_data = ll_mask[row, :]
-            if np.max(row_data) == 0:
+        def _centerline(mask_comp):
+            ys, xs = np.where(mask_comp)
+            row_map = {}
+            for x, y in zip(xs, ys):
+                row_map.setdefault(y, []).append(x)
+            pts = []
+            for y in sorted(row_map.keys(), reverse=True):
+                pts.append([float(np.mean(row_map[y])), float(y)])
+            return np.array(pts, dtype=np.float32) if len(pts) >= min_points else None
+
+        left_candidates = []
+        right_candidates = []
+
+        for i in range(1, num_labels):
+            comp = (labels == i)
+            ys, xs = np.where(comp)
+            if len(ys) < min_points:
                 continue
-            nonzero = np.where(row_data > 0)[0]
-            if len(nonzero) == 0:
+            cw = int(xs.max()) - int(xs.min())
+            ch = int(ys.max()) - int(ys.min())
+            if cw > 25 or ch < 10:
                 continue
-            gaps = np.diff(nonzero) > 4
-            segments = np.split(nonzero, np.where(gaps)[0] + 1)
-            for seg in segments:
-                if len(seg) < 2:
-                    continue
-                seg_width = seg[-1] - seg[0]
-                if seg_width > max_line_width:
-                    continue
-                x = float(np.mean(seg))
-                y = float(row)
-                if x < car_center_x:
-                    left_points.append([x, y])
-                else:
-                    right_points.append([x, y])
+            pts = _centerline(comp)
+            if pts is None:
+                continue
+            side = 'left' if pts[-1, 0] < car_center_x else 'right'
+            if side == 'left':
+                left_candidates.append(pts)
+            else:
+                right_candidates.append(pts)
 
         lanes = []
-        for pts in (left_points, right_points):
-            if len(pts) >= min_points:
-                lanes.append(np.array(pts, dtype=np.float32))
+        for candidates, side in [(left_candidates, 'left'), (right_candidates, 'right')]:
+            if not candidates:
+                continue
+            if len(candidates) == 1:
+                lanes.append(candidates[0])
+            else:
+                best = min(candidates, key=lambda p: abs(float(np.mean(p[:, 0])) - car_center_x))
+                lanes.append(best)
         return lanes
