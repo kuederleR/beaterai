@@ -46,6 +46,18 @@ from deepstream_pipeline import create_pipeline
 from bevformer_detector import BEVFormerDetector, BEV_GRID_SIZE, BEV_X_RANGE, BEV_Y_RANGE
 from adas_postprocessor import ADASPostprocessor, compute_severity
 
+INFER_WIDTH = 640
+INFER_HEIGHT = 416
+TWINLITE_CROP_Y = 28
+TWINLITE_CROP_H = 360
+TRACE_START_Y = 370
+
+BEV_WIDTH = 240
+BEV_HEIGHT = 1001
+CAMERA_HEIGHT = 1.2192
+X_MIN, X_MAX = -6.0, 6.0
+Y_MIN, Y_MAX = 1.0, 51.0
+
 CAMERA_MATRIX = None
 DIST_COEFF = None
 
@@ -61,6 +73,104 @@ if os.path.exists(yaml_path):
             fs.release()
     except Exception:
         pass
+
+K_INFER = None
+if CAMERA_MATRIX is not None:
+    K_INFER = np.array([
+        [CAMERA_MATRIX[0, 0] * 0.5, 0.0, CAMERA_MATRIX[0, 2] * 0.5],
+        [0.0, CAMERA_MATRIX[1, 1] * 0.5, CAMERA_MATRIX[1, 2] * 0.5],
+        [0.0, 0.0, 1.0]
+    ], dtype=np.float32)
+
+# ── Fallback geometry (used when BEVFormer engine is absent) ──────────────
+H_inv = None
+_road_to_bev_M = None
+_fallback_vp = None
+
+def _fallback_compute_homography(vp_x=None, vp_y=None):
+    global H_inv, _road_to_bev_M, _fallback_vp
+    if vp_x is None and _fallback_vp is not None:
+        vp_x, vp_y = _fallback_vp
+    if vp_x is None or K_INFER is None:
+        vp_x, vp_y = K_INFER[0, 2] if K_INFER is not None else 320, 160.0
+
+    K_inv = np.linalg.inv(K_INFER)
+    u_y = K_inv @ np.array([vp_x, vp_y, 1.0], dtype=np.float32)
+    u_y = u_y / np.linalg.norm(u_y)
+    u_x = np.array([u_y[2], 0.0, -u_y[0]], dtype=np.float32)
+    u_x = u_x / np.linalg.norm(u_x)
+    u_z = np.cross(u_x, u_y)
+    if u_z[1] > 0:
+        u_z = -u_z
+    M = np.stack([u_x, u_y, -CAMERA_HEIGHT * u_z], axis=1)
+    H = K_INFER @ M
+    H_inv = np.linalg.inv(H)
+    s_x = (BEV_WIDTH - 1) / (X_MAX - X_MIN)
+    t_x = -X_MIN * s_x
+    s_y = (BEV_HEIGHT - 1) / (Y_MAX - Y_MIN)
+    t_y = Y_MAX * s_y
+    M_road2bev = np.array([
+        [s_x, 0.0, t_x],
+        [0.0, -s_y, t_y],
+        [0.0, 0.0, 1.0]
+    ], dtype=np.float32)
+    _road_to_bev_M = M_road2bev @ H_inv
+
+def _fallback_image_to_road(pts):
+    if len(pts) == 0 or H_inv is None:
+        return np.zeros((0, 2), dtype=np.float32)
+    pts_h = np.hstack([pts, np.ones((len(pts), 1), dtype=np.float32)])
+    road_h = (H_inv @ pts_h.T).T
+    valid = road_h[:, 2] > 1e-5
+    road = np.zeros((len(pts), 2), dtype=np.float32)
+    road[valid, 0] = road_h[valid, 0] / road_h[valid, 2]
+    road[valid, 1] = road_h[valid, 1] / road_h[valid, 2]
+    road[~valid] = np.nan
+    return road
+
+def _fallback_road_to_bev_display(pts_road, disp_w, disp_h, disp_max_y=30.0):
+    if _road_to_bev_M is None:
+        return np.zeros((0, 2), dtype=np.float32)
+    pts_h = np.hstack([pts_road, np.ones((len(pts_road), 1), dtype=np.float32)])
+    bev = (_road_to_bev_M @ pts_h.T).T
+    valid = bev[:, 2] > 1e-5
+    out = np.zeros((len(pts_road), 2), dtype=np.float32)
+    u = bev[valid, 0] / bev[valid, 2]
+    v = bev[valid, 1] / bev[valid, 2]
+    s_x = disp_w / BEV_WIDTH
+    s_y = disp_h / (BEV_HEIGHT * (disp_max_y / Y_MAX))
+    out[valid, 0] = u * s_x
+    out[valid, 1] = (v - (BEV_HEIGHT - disp_h)) * s_y if v.ndim == 0 else (v - (BEV_HEIGHT - disp_h))
+    return out
+
+def _fallback_detect_lanes(ll_mask, car_center_x, trace_start_y):
+    from twinlite_detector import TwinLiteDetector
+    left_edge, right_edge = TwinLiteDetector.trace_lane_edges(
+        ll_mask, car_center_x, trace_start_y
+    )
+    return left_edge, right_edge
+
+def _fallback_fit_lanes(left_edge, right_edge, car_center_x):
+    if K_INFER is None:
+        return None, None
+    def _do_fit(pts):
+        if pts is None or len(pts) < 4:
+            return None
+        road = _fallback_image_to_road(pts)
+        valid = ~np.isnan(road[:, 0]) & ~np.isnan(road[:, 1])
+        road = road[valid]
+        if len(road) < 4:
+            return None
+        Y, X = road[:, 1], road[:, 0]
+        try:
+            poly = np.polyfit(Y, X, 2)
+            return poly
+        except np.linalg.LinAlgError:
+            return None
+
+    left = _do_fit(left_edge)
+    right = _do_fit(right_edge)
+    return left, right
 
 
 
@@ -357,8 +467,20 @@ def inference_loop():
         dist_coeff=DIST_COEFF,
     )
     postprocessor = ADASPostprocessor()
+    use_bevformer = detector.trt_runner is not None
 
-    print("[INFO] BEVFormer-Tiny + CuPy ADAS pipeline ready", flush=True)
+    fallback_twinlite = None
+    if not use_bevformer:
+        print("[INFO] BEVFormer engine not found; loading TwinLiteNet fallback...", flush=True)
+        from twinlite_detector import TwinLiteDetector
+        fallback_twinlite = TwinLiteDetector(
+            engine_path="models/twinlite.engine",
+            crop_y=TWINLITE_CROP_Y,
+            crop_h=TWINLITE_CROP_H,
+        )
+        _fallback_compute_homography()
+
+    print(f"[INFO] ADAS pipeline ready (mode: {'BEVFormer-Tiny' if use_bevformer else 'TwinLiteNet fallback'})", flush=True)
     timer = StepTimer()
 
     fps_counter = 0
@@ -402,15 +524,68 @@ def inference_loop():
 
             if state["adas_enabled"]:
                 _t_inf = time.perf_counter()
-                lane_mask, detections = detector.infer(im0)
-                if detections is None:
+
+                if use_bevformer:
+                    lane_mask, detections = detector.infer(im0)
+                    if detections is None:
+                        detections = []
+                    left_lane_pts, right_lane_pts = detector.extract_lane_boundaries(lane_mask)
+                elif fallback_twinlite is not None:
+                    im_infer = cv2.resize(im0, (INFER_WIDTH, INFER_HEIGHT), interpolation=cv2.INTER_LINEAR)
+                    ll_mask, da_mask = fallback_twinlite.detect(im_infer)
+                    if ll_mask is not None:
+                        da_overlay = np.zeros_like(im_debug)
+                        da_overlay[da_mask > 0] = (40, 40, 40)
+                        cv2.addWeighted(da_overlay, 0.4, im_debug, 0.6, 0, dst=im_debug)
+                        ll_overlay = np.zeros_like(im_debug)
+                        ll_overlay[ll_mask > 0] = (0, 255, 255)
+                        cv2.addWeighted(ll_overlay, 0.3, im_debug, 0.7, 0, dst=im_debug)
+                    car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
+                    left_edge, right_edge = _fallback_detect_lanes(ll_mask, car_center_x, TRACE_START_Y)
+                    if left_edge is not None:
+                        pts_int = left_edge.astype(np.int32)
+                        cv2.polylines(im_debug, [pts_int], False, (255, 0, 255), 3)
+                        left_lane_pts = left_edge
+                    else:
+                        left_lane_pts = None
+                    if right_edge is not None:
+                        pts_int = right_edge.astype(np.int32)
+                        cv2.polylines(im_debug, [pts_int], False, (0, 255, 0), 3)
+                        right_lane_pts = right_edge
+                    else:
+                        right_lane_pts = None
                     detections = []
+                else:
+                    left_lane_pts = right_lane_pts = None
+                    detections = []
+
                 timer.track("inference", time.perf_counter() - _t_inf)
 
                 _t_lane = time.perf_counter()
-                left_lane_pts, right_lane_pts = detector.extract_lane_boundaries(lane_mask)
-
-                result = postprocessor.process_lanes(left_lane_pts, right_lane_pts, car_x_meters=0.0)
+                if use_bevformer and left_lane_pts is not None:
+                    result = postprocessor.process_lanes(left_lane_pts, right_lane_pts, car_x_meters=0.0)
+                elif not use_bevformer:
+                    car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
+                    left_coeffs, right_coeffs = _fallback_fit_lanes(left_lane_pts, right_lane_pts, car_center_x)
+                    if left_coeffs is not None and right_coeffs is not None:
+                        y_eval = 5.0
+                        lx = np.polyval(left_coeffs, y_eval)
+                        rx = np.polyval(right_coeffs, y_eval)
+                        lw = rx - lx
+                        if lw > 0.5:
+                            lane_width = lw
+                            lane_position = float(np.clip((0.0 - lx) / lw, 0.0, 1.0))
+                    result = {
+                        "left_coeffs": left_coeffs, "right_coeffs": right_coeffs,
+                        "lane_position": lane_position, "lane_width": lane_width,
+                        "compensated_x": 0.0, "ego_center": None, "heading_error": 0.0,
+                    }
+                else:
+                    result = {
+                        "left_coeffs": None, "right_coeffs": None,
+                        "lane_position": 0.5, "lane_width": 0.0,
+                        "compensated_x": 0.0, "ego_center": None, "heading_error": 0.0,
+                    }
                 left_coeffs = result["left_coeffs"]
                 right_coeffs = result["right_coeffs"]
                 lane_position = result["lane_position"]
