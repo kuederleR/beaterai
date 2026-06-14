@@ -403,6 +403,8 @@ def inference_loop():
             if state["adas_enabled"]:
                 _t_inf = time.perf_counter()
                 lane_mask, detections = detector.infer(im0)
+                if detections is None:
+                    detections = []
                 timer.track("inference", time.perf_counter() - _t_inf)
 
                 _t_lane = time.perf_counter()
