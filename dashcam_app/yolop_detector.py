@@ -343,7 +343,9 @@ class YolopDetector:
         if trt is not None:
             # --- TensorRT path ---
             try:
+                t_trt = time.perf_counter()
                 out = trt.infer(img_chw)
+                trt_ms = (time.perf_counter() - t_trt) * 1000
                 t0 = time.perf_counter()
                 pred = [torch.from_numpy(out[i]).to(self.device) for i in range(3)]
                 # Find seg and ll by shape (TRT may reorder bindings)
@@ -373,7 +375,7 @@ class YolopDetector:
                     anchor_grid = [torch.from_numpy(ag).to(self.device) for ag in YOLOP_ANCHOR_GRID]
                 pred = split_for_trace_model(pred, anchor_grid)
                 t1 = time.perf_counter()
-                print(f"[TIMING] TRT path: {((t1 - t0) * 1000):.1f}ms", flush=True)
+                print(f"[TIMING] TRT infer={trt_ms:.1f}ms post={((t1 - t0) * 1000):.1f}ms", flush=True)
             except Exception as e:
                 print(f"[WARN] TRT inference failed, falling back to PyTorch: {e}", flush=True)
                 # Delete bad engine so next restart rebuilds without FP16

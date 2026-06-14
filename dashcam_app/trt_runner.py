@@ -38,6 +38,7 @@ class TrtRunner:
             self.d_input = torch.empty(self.input_shape, dtype=torch.float32, device='cuda')
             self.d_outputs = [torch.empty(s, dtype=torch.float32, device='cuda') for s in self.output_shapes]
             self.bindings = [self.d_input.data_ptr()] + [o.data_ptr() for o in self.d_outputs]
-        self.d_input.copy_(torch.from_numpy(np.ascontiguousarray(input_np)).cuda())
+        t = torch.from_numpy(np.ascontiguousarray(input_np))
+        self.d_input.copy_(t)
         self.context.execute_v2(self.bindings)
         return [o.cpu().numpy() for o in self.d_outputs]
