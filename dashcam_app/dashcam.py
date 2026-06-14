@@ -544,11 +544,15 @@ def inference_loop():
                     im_infer = cv2.resize(im0, (INFER_WIDTH, INFER_HEIGHT), interpolation=cv2.INTER_LINEAR)
                     ll_mask, da_mask = fallback_twinlite.detect(im_infer)
                     if ll_mask is not None:
+                        da_mask_big = cv2.resize(da_mask, (im_debug.shape[1], im_debug.shape[0]),
+                                                 interpolation=cv2.INTER_NEAREST)
+                        ll_mask_big = cv2.resize(ll_mask, (im_debug.shape[1], im_debug.shape[0]),
+                                                 interpolation=cv2.INTER_NEAREST)
                         da_overlay = np.zeros_like(im_debug)
-                        da_overlay[da_mask > 0] = (40, 40, 40)
+                        da_overlay[da_mask_big > 0] = (40, 40, 40)
                         cv2.addWeighted(da_overlay, 0.4, im_debug, 0.6, 0, dst=im_debug)
                         ll_overlay = np.zeros_like(im_debug)
-                        ll_overlay[ll_mask > 0] = (0, 255, 255)
+                        ll_overlay[ll_mask_big > 0] = (0, 255, 255)
                         cv2.addWeighted(ll_overlay, 0.3, im_debug, 0.7, 0, dst=im_debug)
                     car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
                     left_edge, right_edge = _fallback_detect_lanes(ll_mask, car_center_x, TRACE_START_Y)
