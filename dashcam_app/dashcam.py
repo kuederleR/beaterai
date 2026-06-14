@@ -163,85 +163,50 @@ def _fallback_road_to_bev_display(pts_road, disp_w, disp_h, disp_max_y=30.0):
 def _trace_lane_edges(ll_mask, car_center_x, start_y, max_gap=30):
     h, w = ll_mask.shape[:2]
     start_y = int(np.clip(start_y, 10, h - 1))
+    end_row = h // 3
 
-    def _find_start(sy, predicate):
-        for dy in range(h):
-            for s in (-1, 1):
-                r = sy + s * dy
-                if r < h // 3 or r >= h:
-                    continue
-                rd = ll_mask[r, :].astype(np.float32)
-                if np.max(rd) == 0:
-                    continue
-                nz = np.where(rd > 0)[0]
-                gaps = np.diff(nz) > 3
-                segs = np.split(nz, np.where(gaps)[0] + 1)
-                for seg in segs:
-                    if predicate(int(seg[0]), int(seg[-1])):
-                        return r, int(seg[-1] if seg[-1] < car_center_x else seg[0])
-        return None, None
+    # Scan rows from bottom up, collecting left/right edge pixels
+    left_pts = []
+    right_pts = []
+    last_left_x = None
+    last_right_x = None
+    left_gap = 0
+    right_gap = 0
 
-    left_row, left_x = _find_start(
-        start_y, lambda sl, sr: sr < car_center_x)
-    if left_row is not None:
-        start_y = left_row
+    for row in range(start_y, end_row - 1, -1):
+        rd = ll_mask[row, :]
+        nz = np.flatnonzero(rd)
 
-    right_row, right_x = _find_start(
-        start_y if left_row is None else left_row,
-        lambda sl, sr: sl > car_center_x)
-    if right_row is not None:
-        start_y = max(start_y, right_row)
-
-    if left_row is None and right_row is None:
-        return None, None
-
-    def _find_edge_at_row(row, cx, want_left):
-        rd = ll_mask[row, :].astype(np.float32)
-        nz = np.where(rd > 0)[0]
         if len(nz) == 0:
-            return None
-        gaps = np.diff(nz) > 3
-        segs = np.split(nz, np.where(gaps)[0] + 1)
-        for s in segs:
-            sl, sr = int(s[0]), int(s[-1])
-            if want_left and sr < cx:
-                return sr
-            if not want_left and sl > cx:
-                return sl
-        return None
+            left_gap += 1
+            right_gap += 1
+            if left_gap > max_gap:
+                left_pts.clear()
+                last_left_x = None
+            if right_gap > max_gap:
+                right_pts.clear()
+                last_right_x = None
+            continue
 
-    def _trace_side(sx, sy, side):
-        if sx is None or sy is None:
-            return None
-        pts = [(float(sx), float(sy))]
-        last_x = sx
-        gc = 0
-        for row in range(sy - 1, h // 3, -1):
-            rd = ll_mask[row, :].astype(np.float32)
-            if np.max(rd) == 0:
-                gc += 1
-                if gc > max_gap:
-                    break
-                continue
-            max_dist = 15 + 25 * (row - h // 3) / max(h - 1 - h // 3, 1)
-            wr = int(max_dist)
-            x0 = max(0, int(last_x) - wr)
-            x1 = min(w, int(last_x) + wr)
-            win = rd[x0:x1]
-            nz = np.where(win > 0)[0]
-            if len(nz) == 0:
-                gc += 1
-                if gc > max_gap:
-                    break
-                continue
-            ex = x0 + (nz[-1] if side == 'right' else nz[0])
-            pts.append((float(ex), float(row)))
-            last_x = ex
-            gc = 0
+        # Left edge: rightmost pixel left of center
+        left_nz = nz[nz < car_center_x]
+        if len(left_nz) > 0:
+            left_gap = 0
+            ex = int(left_nz[-1])
+            left_pts.append((float(ex), float(row)))
+            last_left_x = ex
+        # Right edge: leftmost pixel right of center
+        right_nz = nz[nz > car_center_x]
+        if len(right_nz) > 0:
+            right_gap = 0
+            ex = int(right_nz[0])
+            right_pts.append((float(ex), float(row)))
+            last_right_x = ex
+
+    def _to_array(pts):
         return np.array(pts, dtype=np.float32) if len(pts) >= 4 else None
 
-    return (_trace_side(left_x, left_row, 'right'),
-            _trace_side(right_x, right_row, 'left'))
+    return _to_array(left_pts), _to_array(right_pts)
 
 
 def _fallback_detect_lanes(ll_mask, car_center_x, trace_start_y):
