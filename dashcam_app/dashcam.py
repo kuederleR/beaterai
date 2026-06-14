@@ -210,34 +210,71 @@ def _trace_lane_edges(ll_mask, car_center_x, start_y, max_gap=30):
     return _to_array(left_pts), _to_array(right_pts)
 
 
-def _compute_drivable_polygon(ll_mask, car_center_x, start_y):
-    h, w = ll_mask.shape[:2]
+_lane_smooth_left = {}
+_lane_smooth_right = {}
+LANE_SMOOTH_ALPHA = 0.3
+
+def _compute_lane_boundaries(da_mask, ll_mask, car_center_x, start_y):
+    h, w = da_mask.shape[:2]
     start_y = int(np.clip(start_y, 10, h - 1))
     end_row = h // 3
 
-    rows = []
     left_xs = []
     right_xs = []
+    rows = []
 
     for row in range(start_y, end_row - 1, -1):
-        nz = np.flatnonzero(ll_mask[row, :])
-        if len(nz) == 0:
+        da_row = da_mask[row, :]
+        ll_row = ll_mask[row, :]
+
+        da_nz = np.flatnonzero(da_row)
+        if len(da_nz) < 2:
             continue
-        left_nz = nz[nz < car_center_x]
-        right_nz = nz[nz > car_center_x]
-        if len(left_nz) > 0 and len(right_nz) > 0:
+        da_left = da_nz[0]
+        da_right = da_nz[-1]
+
+        ll_nz = np.flatnonzero(ll_row)
+
+        left_x = da_left
+        if len(ll_nz) > 0:
+            cand = ll_nz[(ll_nz < car_center_x) & (ll_nz >= da_left)]
+            if len(cand) > 0:
+                left_x = cand[-1]
+
+        right_x = da_right
+        if len(ll_nz) > 0:
+            cand = ll_nz[(ll_nz > car_center_x) & (ll_nz <= da_right)]
+            if len(cand) > 0:
+                right_x = cand[0]
+
+        if left_x < right_x:
             rows.append(row)
-            left_xs.append(left_nz[-1])
-            right_xs.append(right_nz[0])
+            left_xs.append(left_x)
+            right_xs.append(right_x)
 
     if len(rows) < 2:
-        return None
+        return None, None
+
+    alpha = LANE_SMOOTH_ALPHA
+    smooth_l = []
+    smooth_r = []
+    for i, row in enumerate(rows):
+        raw_l = float(left_xs[i])
+        raw_r = float(right_xs[i])
+        prev_l = _lane_smooth_left.get(row, raw_l)
+        prev_r = _lane_smooth_right.get(row, raw_r)
+        sm_l = alpha * raw_l + (1 - alpha) * prev_l
+        sm_r = alpha * raw_r + (1 - alpha) * prev_r
+        _lane_smooth_left[row] = sm_l
+        _lane_smooth_right[row] = sm_r
+        smooth_l.append(sm_l)
+        smooth_r.append(sm_r)
 
     row_arr = np.array(rows, dtype=np.float32)
-    left_edge = np.column_stack([np.array(left_xs, dtype=np.float32), row_arr])
-    right_edge = np.column_stack([np.array(right_xs, dtype=np.float32), row_arr])
+    left_edge = np.column_stack([np.array(smooth_l, dtype=np.float32), row_arr])
+    right_edge = np.column_stack([np.array(smooth_r, dtype=np.float32), row_arr])
 
-    return np.vstack([left_edge, right_edge[::-1]])
+    return left_edge, right_edge
 
 
 def _fallback_detect_lanes(ll_mask, car_center_x, trace_start_y):
@@ -645,14 +682,14 @@ def inference_loop():
                     draw_scale = np.array([im_debug.shape[1] / ll_mask.shape[1],
                                            im_debug.shape[0] / ll_mask.shape[0]], dtype=np.float32)
                     tr_start = int(ll_mask.shape[0] * TRACE_START_Y / 480)
-                    drivable_poly = _compute_drivable_polygon(ll_mask, car_center_x, tr_start)
-                    if drivable_poly is not None:
-                        poly_scaled = (drivable_poly * draw_scale).astype(np.int32)
+                    left_edge, right_edge = _compute_lane_boundaries(da_mask, ll_mask, car_center_x, tr_start)
+                    if left_edge is not None and right_edge is not None:
+                        poly = np.vstack([left_edge, right_edge[::-1]])
+                        poly_scaled = (poly * draw_scale).astype(np.int32)
                         cv2.fillPoly(im_debug, [poly_scaled], (0, 180, 0))
                     ll_overlay = np.zeros_like(im_debug)
                     ll_overlay[ll_mask_big > 0] = (0, 255, 255)
                     cv2.addWeighted(ll_overlay, 0.3, im_debug, 0.7, 0, dst=im_debug)
-                    left_edge, right_edge = _fallback_detect_lanes(ll_mask, car_center_x, tr_start)
                     if left_edge is not None:
                         pts_int = (left_edge * draw_scale).astype(np.int32)
                         cv2.polylines(im_debug, [pts_int], False, (255, 0, 255), 3)
