@@ -566,7 +566,9 @@ def inference_loop():
     global latest_web_frame, latest_debug_frame, raw_frame_buffer
 
     print("[INFO] Loading YOLOPv2 model...", flush=True)
-    detector = YolopDetector(model_path="data/weights/yolopv2.pt")
+    trt_engine = os.environ.get("YOLOP_TRT_ENGINE")
+    detector = YolopDetector(model_path="data/weights/yolopv2.pt",
+                             trt_engine_path=trt_engine)
     _fallback_compute_homography()
     print("[INFO] ADAS pipeline ready (YOLOPv2 + homography)", flush=True)
     timer = StepTimer()
@@ -970,9 +972,21 @@ def api_set_crop():
 
 
 if __name__ == '__main__':
-    print("=" * 50, flush=True)
+    print("=" * 60, flush=True)
     print("Edge ADAS — YOLOPv2 + homography lane projection", flush=True)
-    print("=" * 50, flush=True)
+    print("=" * 60, flush=True)
+
+    # Build INT8 engine before starting anything else
+    import build_engines
+    int8_engine = build_engines.ensure_yolop_int8_engine(
+        model_path="data/weights/yolopv2.pt",
+        onnx_path="data/weights/yolopv2.onnx",
+        cache_path="data/weights/yolopv2_int8.cache",
+        engine_path="data/weights/yolopv2_int8.engine",
+        calib_video_path=DEV_VIDEO_PATH,
+    )
+    os.environ["YOLOP_TRT_ENGINE"] = int8_engine
+    print(f"[INFO] INT8 engine path: {int8_engine}", flush=True)
 
     print("Starting Capture thread...", flush=True)
     t_capture = threading.Thread(target=capture_loop, daemon=True)

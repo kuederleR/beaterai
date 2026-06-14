@@ -116,11 +116,19 @@ class TrtRunner:
         return [o.cpu().numpy() for o in self.d_outputs]
 
 
+# YOLOPv2 anchors (YOLOv5-style, 3 scales × 3 anchors × 2 dims)
+YOLOP_ANCHOR_GRID = (
+    np.array([[[[[10, 13], [16, 30], [33, 23]]]]], dtype=np.float32),   # P3/8
+    np.array([[[[[30, 61], [62, 45], [59, 119]]]]], dtype=np.float32),  # P4/16
+    np.array([[[[[116, 90], [156, 198], [373, 326]]]]], dtype=np.float32),  # P5/32
+)
+
 # --- YolopDetector wrapper class ---
 
 class YolopDetector:
-    def __init__(self, model_path="data/weights/yolopv2.pt"):
+    def __init__(self, model_path="data/weights/yolopv2.pt", trt_engine_path=None):
         self.model_path = model_path
+        self.trt_engine_path = trt_engine_path
         self.img_size = 480
         self.download_model_if_missing()
 
@@ -128,13 +136,23 @@ class YolopDetector:
         print(f"[INFO] YolopDetector using device: {self.device}", flush=True)
 
         self.half = self.device.type != 'cpu'
-        self.model_dtype = None  # determined after loading
+        self.model_dtype = None
         self.model = None
         self.trt_runner = None
 
         if self.device.type == 'cuda':
             torch.backends.cudnn.benchmark = True
             print("[INFO] Enabled cudnn.benchmark", flush=True)
+
+        # Load pre-built TRT engine if available (INT8 or FP16)
+        if trt_engine_path and os.path.exists(trt_engine_path):
+            try:
+                self.trt_runner = TrtRunner(trt_engine_path)
+                print(f"[INFO] Loaded TensorRT engine from {trt_engine_path}", flush=True)
+                return
+            except Exception as e:
+                print(f"[WARN] Failed to load TRT engine {trt_engine_path}: {e}", flush=True)
+                print("[INFO] Falling back to PyTorch inference.", flush=True)
 
         self._load_pytorch()
         self._build_trt()
@@ -309,7 +327,7 @@ class YolopDetector:
             print("[INFO] YOLOpv2 weights download complete.", flush=True)
 
     def detect(self, img):
-        if self.model is None:
+        if self.model is None and self.trt_runner is None:
             return [], None, None
 
         h_orig, w_orig = img.shape[:2]
@@ -348,9 +366,10 @@ class YolopDetector:
                       f"ll_range=[{ll.min().item():.4f}, {ll.max().item():.4f}] "
                       f"ll_nan={ll_nan}", flush=True)
                 # Use cached anchor_grid (TRT may fold out these constants)
-                anchor_grid = None
                 if self._anchor_grid is not None:
                     anchor_grid = [ag.to(self.device) for ag in self._anchor_grid]
+                else:
+                    anchor_grid = [torch.from_numpy(ag).to(self.device) for ag in YOLOP_ANCHOR_GRID]
                 pred = split_for_trace_model(pred, anchor_grid)
                 t1 = time.perf_counter()
                 print(f"[TIMING] TRT path: {((t1 - t0) * 1000):.1f}ms", flush=True)
