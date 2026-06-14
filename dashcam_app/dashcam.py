@@ -731,7 +731,7 @@ def inference_loop():
 
             _t_render = time.perf_counter()
             im_bev = render_bev_frame(
-                lane_mask, fcw_overlay_boxes,
+                lane_mask, detections,
                 left_coeffs, right_coeffs,
                 compensated_x, lane_position, lane_width,
                 fcw_triggered, left_severity, right_severity,
