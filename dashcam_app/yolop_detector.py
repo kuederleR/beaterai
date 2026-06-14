@@ -347,7 +347,9 @@ class YolopDetector:
                 out = trt.infer(img_chw)
                 trt_ms = (time.perf_counter() - t_trt) * 1000
                 t0 = time.perf_counter()
-                # out are CUDA tensors — no GPU→CPU→GPU round-trips
+                # Ensure out entries are tensors (defensive — TRT runner returns
+                # CUDA tensors, but handle numpy arrays from old code too)
+                out = [torch.from_numpy(o).to(self.device) if isinstance(o, np.ndarray) else o for o in out]
                 pred = out[:3]
                 H = self.img_size
                 seg = ll = None
