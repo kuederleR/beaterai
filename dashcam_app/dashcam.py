@@ -801,6 +801,8 @@ def inference_loop():
                 state["seg_classes"] = []
                 
                 ufld_lanes = TwinLiteDetector.lanes_from_mask(ll_mask, car_center_x) if ll_mask is not None else []
+                if ufld_lanes is not None and len(ufld_lanes) > 0:
+                    print(f"[TRACKS] {len(ufld_lanes)} lanes, sizes: {[len(p) for p in ufld_lanes]}", flush=True)
                 timer.track("inference", time.perf_counter() - _t_inf)
 
                 _t_remap = time.perf_counter()
@@ -1096,9 +1098,14 @@ def inference_loop():
                     ll_overlay[ll_mask > 0] = (0, 255, 255)
                     cv2.addWeighted(ll_overlay, 0.3, im_debug, 0.7, 0, dst=im_debug)
                 if ufld_lanes:
-                    for lane_pts in ufld_lanes:
+                    track_colors = [(0, 255, 255), (255, 0, 255), (0, 128, 255),
+                                    (255, 128, 0), (0, 255, 128), (128, 0, 255)]
+                    for i, lane_pts in enumerate(ufld_lanes):
                         pts_int = lane_pts.astype(np.int32)
-                        cv2.polylines(im_debug, [pts_int], False, (0, 255, 255), 2)
+                        color = track_colors[i % len(track_colors)]
+                        cv2.polylines(im_debug, [pts_int], False, color, 3)
+                        if len(pts_int) > 0:
+                            cv2.circle(im_debug, tuple(pts_int[0]), 5, color, -1)
                     
                 # Bounding boxes are no longer drawn as rectangles, we use tight contours from YOLOv8 above
                 timer.track("bev_render", time.perf_counter() - _t_render)

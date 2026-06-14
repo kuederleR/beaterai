@@ -90,68 +90,60 @@ class TwinLiteDetector:
         return ll_full, da_full
 
     @staticmethod
-    def lanes_from_mask(ll_mask, car_center_x, min_points=4, max_gap=10):
+    def lanes_from_mask(ll_mask, car_center_x, min_points=4, max_gap=15):
         h, w = ll_mask.shape[:2]
 
         class _Track:
             def __init__(self, x, y):
                 self.pts = [(x, y)]
-                self.last_row = y
                 self.gap = 0
             def add(self, x, y):
                 self.pts.append((x, y))
-                self.last_row = y
                 self.gap = 0
             def result(self):
                 return np.array(self.pts, dtype=np.float32) if len(self.pts) >= min_points else None
 
         tracks = []
+        finished = []
 
         for row in range(h - 1, h // 3, -1):
             row_data = ll_mask[row, :].astype(np.float32)
-            if np.max(row_data) == 0:
-                continue
 
             nonzero = np.where(row_data > 0)[0]
-            gaps = np.diff(nonzero) > 3
-            segments = np.split(nonzero, np.where(gaps)[0] + 1)
-            centroids = [float(np.mean(seg)) for seg in segments if len(seg) >= 2]
-            if not centroids:
-                continue
+            centroids = []
+            if len(nonzero) > 0:
+                gaps = np.diff(nonzero) > 3
+                segments = np.split(nonzero, np.where(gaps)[0] + 1)
+                centroids = [float(np.mean(seg)) for seg in segments if len(seg) >= 1]
 
-            matched = [False] * len(centroids)
-            remaining = []
-            finished = []
+            unmatched = set(range(len(centroids)))
 
             for t in tracks:
+                if not unmatched:
+                    t.gap += 1
+                    continue
                 best_idx = -1
                 best_d = float('inf')
-                for ci, cx in enumerate(centroids):
-                    if matched[ci]:
-                        continue
-                    d = abs(cx - t.pts[-1][0])
+                for ci in unmatched:
+                    d = abs(centroids[ci] - t.pts[-1][0])
                     if d < 40 and d < best_d:
                         best_d = d
                         best_idx = ci
-
                 if best_idx >= 0:
-                    matched[best_idx] = True
+                    unmatched.discard(best_idx)
                     t.add(centroids[best_idx], row)
-                    remaining.append(t)
                 else:
                     t.gap += 1
-                    if t.gap > max_gap:
-                        r = t.result()
-                        if r is not None:
-                            finished.append(r)
-                    else:
-                        remaining.append(t)
 
-            for ci, cx in enumerate(centroids):
-                if not matched[ci]:
-                    tracks.append(_Track(cx, row))
+            for ci in unmatched:
+                tracks.append(_Track(centroids[ci], row))
 
-            tracks = remaining
+            dead = [t for t in tracks if t.gap > max_gap]
+            for t in dead:
+                r = t.result()
+                if r is not None:
+                    finished.append(r)
+            tracks = [t for t in tracks if t.gap <= max_gap]
 
         for t in tracks:
             r = t.result()
