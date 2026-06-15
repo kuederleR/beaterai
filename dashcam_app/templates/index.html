@@ -459,7 +459,7 @@
                 </div>
                 <div style="position: relative;">
                     <canvas id="bevCalDstCanvas" style="border-radius: 8px; cursor: default; display: block;"></canvas>
-                    <div id="bevCalDstOverlay" style="position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.7); color: #fff; padding: 4px 10px; border-radius: 4px; font-size: 12px; pointer-events: none;">Select source points first</div>
+                    <div id="bevCalDstOverlay" style="position: absolute; bottom: 8px; left: 8px; background: rgba(0,0,0,0.7); color: #fff; padding: 4px 10px; border-radius: 4px; font-size: 12px; pointer-events: none;">Select source points first</div>
                 </div>
             </div>
         </div>
@@ -1266,6 +1266,23 @@
 
             // Draw points
             const colors = ['#ff4444', '#ffaa00', '#00ccff', '#ff44ff'];
+            ctx.setLineDash([4, 4]);
+            ctx.lineWidth = 1;
+            for (let i = 0; i < pts.length; i++) {
+                const px = pts[i].x * s;
+                const py = pts[i].y * s;
+                ctx.strokeStyle = colors[i] || '#fff';
+                ctx.beginPath();
+                ctx.moveTo(px, 0);
+                ctx.lineTo(px, canvas.height);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(0, py);
+                ctx.lineTo(canvas.width, py);
+                ctx.stroke();
+            }
+            ctx.setLineDash([]);
+
             for (let i = 0; i < pts.length; i++) {
                 const px = pts[i].x * s;
                 const py = pts[i].y * s;
@@ -1306,7 +1323,7 @@
             bevCalRedrawSrc(this, this.getContext('2d'));
         });
 
-        async function bevCalRefreshPreview() {
+        async function bevCalRefreshPreview(skipStateFetch) {
             try {
                 // Fetch preview image
                 const res = await fetch('/api/bev_cal/preview');
@@ -1317,12 +1334,13 @@
                 const blob = await res.blob();
                 const url = URL.createObjectURL(blob);
 
-                // Fetch current dst state
-                const state = await bevCalFetchState();
-                if (state && state.dst_points) {
-                    bevCal.dstPoints = state.dst_points.filter(p => p !== null).map(p => ({x: p[0], y: p[1]}));
-                } else {
-                    bevCal.dstPoints = [{x: 0, y: 500}, {x: 500, y: 500}, {x: 500, y: 0}, {x: 0, y: 0}];
+                if (!skipStateFetch) {
+                    const state = await bevCalFetchState();
+                    if (state && state.dst_points) {
+                        bevCal.dstPoints = state.dst_points.filter(p => p !== null).map(p => ({x: p[0], y: p[1]}));
+                    } else {
+                        bevCal.dstPoints = [{x: 0, y: 500}, {x: 500, y: 500}, {x: 500, y: 0}, {x: 0, y: 0}];
+                    }
                 }
 
                 const canvas = document.getElementById('bevCalDstCanvas');
@@ -1440,8 +1458,7 @@
                 if (isDragging && dragIdx >= 0) {
                     const pt = bevCal.dstPoints[dragIdx];
                     await bevCalSendDstPoint(dragIdx, pt.x, pt.y);
-                    // Refresh preview with new dst
-                    await bevCalRefreshPreview();
+                    await bevCalRefreshPreview(true);
                 }
                 isDragging = false;
                 dragIdx = -1;
