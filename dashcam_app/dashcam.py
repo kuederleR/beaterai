@@ -1438,17 +1438,30 @@ def inference_loop():
             lead_car = None
             if detections:
                 for det in detections:
-                    cx = det["center_x"]
                     cy = det["center_y"]
                     if cy <= 0:
                         continue
                     in_lane = False
-                    if left_coeffs is not None and right_coeffs is not None:
+                    if _bev_warp_M is not None and left_coeffs is not None and right_coeffs is not None:
+                        cx_img = (det.get("img_x1", 0) + det.get("img_x2", 0)) / 2.0
+                        by_img = det.get("img_y2", 0)
+                        pt_img = np.array([[[cx_img, by_img]]], dtype=np.float32)
+                        pt_bev = cv2.perspectiveTransform(pt_img, _bev_warp_M)[0][0]
+                        bvx, bvy = pt_bev[0], pt_bev[1]
+                        if 0 <= bvy < BEV_DISPLAY_HEIGHT:
+                            ry = (1.0 - bvy / BEV_DISPLAY_HEIGHT) * BEV_Y_RANGE[1]
+                            left_rx = np.polyval(left_coeffs, ry)
+                            right_rx = np.polyval(right_coeffs, ry)
+                            left_bvx = ((left_rx / (2 * BEV_X_RANGE[1]) + 0.5) * BEV_DISPLAY_WIDTH)
+                            right_bvx = ((right_rx / (2 * BEV_X_RANGE[1]) + 0.5) * BEV_DISPLAY_WIDTH)
+                            in_lane = left_bvx <= bvx <= right_bvx
+                    elif left_coeffs is not None and right_coeffs is not None:
+                        cx = det["center_x"]
                         left_x = np.polyval(left_coeffs, cy)
                         right_x = np.polyval(right_coeffs, cy)
                         in_lane = left_x <= cx <= right_x
                     else:
-                        in_lane = abs(cx) < LANE_HALF_WIDTH
+                        in_lane = abs(det["center_x"]) < LANE_HALF_WIDTH
                     if in_lane and (lead_car is None or cy < lead_car["center_y"]):
                         lead_car = det
             if lead_car is not None:
