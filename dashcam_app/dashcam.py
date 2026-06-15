@@ -384,8 +384,11 @@ def make_error_frame(message):
 
 class _CamWrapper:
     def __init__(self):
-        if DEV_VIDEO_PATH and os.path.exists(DEV_VIDEO_PATH):
-            self._cap = cv2.VideoCapture(DEV_VIDEO_PATH)
+        self._dev_path = DEV_VIDEO_PATH if (DEV_VIDEO_PATH and os.path.exists(DEV_VIDEO_PATH)) else None
+        self._open()
+    def _open(self):
+        if self._dev_path:
+            self._cap = cv2.VideoCapture(self._dev_path)
         else:
             self._cap = cv2.VideoCapture(VIDEO_SOURCE)
             self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
@@ -395,6 +398,8 @@ class _CamWrapper:
         return self._cap is not None and self._cap.isOpened()
     def read(self):
         return self._cap.read()
+    def seek_to_start(self):
+        self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     def release(self):
         self._cap.release()
 
@@ -418,8 +423,16 @@ def capture_loop():
         try:
             ret, frame = cap.read()
             if not ret:
-                time.sleep(0.01)
-                continue
+                if is_dev_video:
+                    cap.seek_to_start()
+                    ret, frame = cap.read()
+                    if not ret:
+                        time.sleep(0.01)
+                        continue
+                    print("[INFO] Looping dev video", flush=True)
+                else:
+                    time.sleep(0.01)
+                    continue
 
             if is_dev_video:
                 time.sleep(1.0 / TARGET_FPS)
