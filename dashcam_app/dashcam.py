@@ -753,8 +753,30 @@ def build_lane_overlay_payload(left_coeffs, right_coeffs,
     }
 
 
+def _robust_polyfit(road_x, road_y, deg=2):
+    if len(road_x) < deg + 2 or len(road_y) < deg + 2:
+        return None
+    p1 = np.polyfit(road_y, road_x, 1)
+    pred = np.polyval(p1, road_y)
+    residuals = np.abs(road_x - pred)
+    median_res = np.median(residuals)
+    if median_res < 1e-6:
+        median_res = 1e-6
+    mad = np.median(np.abs(residuals - median_res))
+    inliers = residuals < median_res + 2 * mad
+    n_inliers = np.sum(inliers)
+    if n_inliers < deg + 2:
+        return None
+    return np.polyfit(road_y[inliers], road_x[inliers], deg)
+
+
 def inference_loop():
     global latest_web_frame, latest_debug_frame, raw_frame_buffer
+
+    _left_smooth = None
+    _right_smooth = None
+    _left_stale = 0
+    _right_stale = 0
 
     print("[INFO] Loading YOLOPv2 model...", flush=True)
     trt_engine = os.environ.get("YOLOP_TRT_ENGINE")
@@ -903,18 +925,19 @@ def inference_loop():
                             valid = ~np.isnan(road[:, 0]) & ~np.isnan(road[:, 1])
                             road = road[valid]
                             if len(road) >= 4:
-                                poly = np.polyfit(road[:, 1], road[:, 0], 2)
-                                if label == 'left':
-                                    left_coeffs = poly
-                                else:
-                                    right_coeffs = poly
+                                poly = _robust_polyfit(road[:, 0], road[:, 1], 2)
+                                if poly is not None:
+                                    if label == 'left':
+                                        left_coeffs = poly
+                                    else:
+                                        right_coeffs = poly
 
                     if left_coeffs is not None and right_coeffs is not None:
                         y_eval = 5.0
                         lx = np.polyval(left_coeffs, y_eval)
                         rx = np.polyval(right_coeffs, y_eval)
                         lw = rx - lx
-                        if lw > 0.5:
+                        if 2.0 < lw < 5.0:
                             lane_width = lw
                             lane_position = float(np.clip((0.0 - lx) / lw, 0.0, 1.0))
                 else:
@@ -927,6 +950,53 @@ def inference_loop():
                         if lw > 0.5:
                             lane_width = lw
                             lane_position = float(np.clip((0.0 - lx) / lw, 0.0, 1.0))
+
+                # Curvature consistency: reject lanes that curve in opposite directions
+                if left_coeffs is not None and right_coeffs is not None:
+                    l_curve = left_coeffs[0]
+                    r_curve = right_coeffs[0]
+                    if l_curve * r_curve < 0 and abs(l_curve) > 0.001 and abs(r_curve) > 0.001:
+                        left_coeffs = None
+                        right_coeffs = None
+
+                # EMA smoothing
+                alpha = 0.35
+                if left_coeffs is not None:
+                    if _left_smooth is None or len(_left_smooth) != len(left_coeffs):
+                        _left_smooth = left_coeffs.copy()
+                    else:
+                        _left_smooth = _left_smooth * (1 - alpha) + left_coeffs * alpha
+                    _left_stale = 0
+                elif _left_smooth is not None:
+                    _left_stale += 1
+                    if _left_stale > 30:
+                        _left_smooth = None
+                left_coeffs = _left_smooth
+
+                if right_coeffs is not None:
+                    if _right_smooth is None or len(_right_smooth) != len(right_coeffs):
+                        _right_smooth = right_coeffs.copy()
+                    else:
+                        _right_smooth = _right_smooth * (1 - alpha) + right_coeffs * alpha
+                    _right_stale = 0
+                elif _right_smooth is not None:
+                    _right_stale += 1
+                    if _right_stale > 30:
+                        _right_smooth = None
+                right_coeffs = _right_smooth
+
+                # Recompute lane width/position from smoothed coeffs
+                if left_coeffs is not None and right_coeffs is not None:
+                    y_eval = 5.0
+                    lx = np.polyval(left_coeffs, y_eval)
+                    rx = np.polyval(right_coeffs, y_eval)
+                    lw = rx - lx
+                    if 2.0 < lw < 5.0:
+                        lane_width = lw
+                        lane_position = float(np.clip((0.0 - lx) / lw, 0.0, 1.0))
+                    else:
+                        lane_width = 0.0
+                        lane_position = 0.5
 
                 result = {
                     "left_coeffs": left_coeffs, "right_coeffs": right_coeffs,
