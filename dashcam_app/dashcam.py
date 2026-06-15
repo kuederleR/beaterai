@@ -859,6 +859,7 @@ def inference_loop():
     _expected_width_px = None
     _expected_left_missed = 0
     _expected_right_missed = 0
+    _intersection_hold = 0
 
     print("[INFO] Loading YOLOPv2 model...", flush=True)
     trt_engine = os.environ.get("YOLOP_TRT_ENGINE")
@@ -1063,6 +1064,12 @@ def inference_loop():
                             else:
                                 _expected_width_px = new_width
 
+                    # Reset intersection hold when any lane is detected
+                    if left_lane is not None or right_lane is not None:
+                        if _intersection_hold > 0:
+                            print(f"[INTERSECTION] resumed normal tracking after {_intersection_hold} frames", flush=True)
+                        _intersection_hold = 0
+
                     if left_lane is not None or right_lane is not None:
                         le = f"L={_expected_left_bx or 0:.0f}({_expected_left_missed})" if _expected_left_bx is not None else "L=init"
                         re = f"R={_expected_right_bx or 0:.0f}({_expected_right_missed})" if _expected_right_bx is not None else "R=init"
@@ -1081,6 +1088,30 @@ def inference_loop():
                                         left_coeffs = poly
                                     else:
                                         right_coeffs = poly
+
+                    # Intersection hold: when both lanes are lost and expected positions exist,
+                    # project straight lanes from the expected positions
+                    if left_coeffs is None and right_coeffs is None:
+                        should_hold = (_expected_left_bx is not None and _expected_right_bx is not None
+                                       and _expected_width_px is not None
+                                       and 20.0 < _expected_width_px < 350.0
+                                       and _intersection_hold < 60)
+                        if should_hold:
+                            n_synth = 30
+                            y_s = np.linspace(0, h_bev - 1, n_synth, dtype=np.float32)
+                            left_bev = np.column_stack([np.full_like(y_s, _expected_left_bx), y_s])
+                            right_bev = np.column_stack([np.full_like(y_s, _expected_right_bx), y_s])
+                            lr = _bev_px_to_road(left_bev, w_bev, h_bev)
+                            rr = _bev_px_to_road(right_bev, w_bev, h_bev)
+                            lv = ~np.isnan(lr[:, 0]) & ~np.isnan(lr[:, 1])
+                            rv = ~np.isnan(rr[:, 0]) & ~np.isnan(rr[:, 1])
+                            if np.sum(lv) >= 4:
+                                left_coeffs = np.polyfit(lr[lv, 1], lr[lv, 0], 2)
+                            if np.sum(rv) >= 4:
+                                right_coeffs = np.polyfit(rr[rv, 1], rr[rv, 0], 2)
+                            _intersection_hold += 1
+                            if left_coeffs is not None and right_coeffs is not None:
+                                print(f"[INTERSECTION] synthetic straight lanes active ({_intersection_hold})", flush=True)
 
                     if left_coeffs is not None and right_coeffs is not None:
                         y_eval = 5.0
