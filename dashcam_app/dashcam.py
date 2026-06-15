@@ -753,7 +753,7 @@ def build_lane_overlay_payload(left_coeffs, right_coeffs,
     }
 
 
-def _draw_path_ribbon(im, left_coeffs, right_coeffs, lane_width):
+def _draw_path_ribbon(im, left_coeffs, right_coeffs, lane_width, im_bev=None):
     if left_coeffs is None or right_coeffs is None or lane_width < 1.0:
         print(f"[RIBBON] skip: left={left_coeffs is not None} right={right_coeffs is not None} "
               f"lw={lane_width:.2f}", flush=True)
@@ -764,7 +764,12 @@ def _draw_path_ribbon(im, left_coeffs, right_coeffs, lane_width):
         return
 
     h_im, w_im = im.shape[:2]
-    M_inv = np.linalg.inv(_bev_warp_M)
+    ref_w = CAPTURE_WIDTH
+    ref_h = CAPTURE_HEIGHT
+    sx = w_im / ref_w
+    sy = h_im / ref_h
+    S = np.array([[sx, 0, 0], [0, sy, 0], [0, 0, 1]], dtype=np.float64)
+    M_inv = S @ np.linalg.inv(_bev_warp_M)
 
     bw = BEV_DISPLAY_WIDTH
     bh = BEV_DISPLAY_HEIGHT
@@ -782,10 +787,18 @@ def _draw_path_ribbon(im, left_coeffs, right_coeffs, lane_width):
         v = ((1.0 - ry / yr) * bh).astype(np.float32)
         return np.column_stack([u, v])
 
-    pts_left = _road_to_bev_px(center_x - half_w, y_vals)
-    pts_right = _road_to_bev_px(center_x + half_w, y_vals[::-1])
-    pts_ribbon = np.vstack([pts_left, pts_right]).reshape(1, -1, 2)
+    pts_left_bev = _road_to_bev_px(center_x - half_w, y_vals)
+    pts_right_bev = _road_to_bev_px(center_x + half_w, y_vals[::-1])
+    pts_ribbon_bev = np.vstack([pts_left_bev, pts_right_bev]).astype(np.int32)
 
+    if im_bev is not None:
+        ov = im_bev.copy()
+        cv2.fillPoly(ov, [pts_ribbon_bev], (0, 180, 255))
+        cv2.addWeighted(ov, 0.5, im_bev, 0.5, 0, dst=im_bev)
+        pts_center_bev = _road_to_bev_px(center_x, y_vals).astype(np.int32)
+        cv2.polylines(im_bev, [pts_center_bev], False, (255, 255, 255), 2, cv2.LINE_AA)
+
+    pts_ribbon = pts_ribbon_bev.reshape(1, -1, 2).astype(np.float32)
     pts_cam = cv2.perspectiveTransform(pts_ribbon, M_inv).reshape(-1, 2).astype(np.int32)
     pts_cam[:, 0] = np.clip(pts_cam[:, 0], 0, w_im - 1)
     pts_cam[:, 1] = np.clip(pts_cam[:, 1], 0, h_im - 1)
@@ -1106,8 +1119,6 @@ def inference_loop():
                     if left_severity > 0.8 or right_severity > 0.8:
                         ldw_triggered = True
 
-                _draw_path_ribbon(im_debug, left_coeffs, right_coeffs, lane_width)
-
             _t_render = time.perf_counter()
             if _bev_warp_M is not None:
                 im_bev = cv2.warpPerspective(
@@ -1129,6 +1140,8 @@ def inference_loop():
                     compensated_x, lane_position, lane_width,
                     fcw_triggered, left_severity, right_severity,
                 )
+
+            _draw_path_ribbon(im_debug, left_coeffs, right_coeffs, lane_width, im_bev=im_bev)
 
             state["lane_position"] = lane_position
             state["lane_width"] = lane_width
