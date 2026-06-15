@@ -626,6 +626,28 @@
                 Row where lane-edge tracing begins. Higher = closer to car (more stable).
             </div>
         </div>
+
+        <div class="control-card slider-card" style="grid-column: 1 / -1;">
+            <div style="width: 100%; font-size: 14px; font-weight: 600; color: var(--text-secondary); margin-bottom: 4px;">Camera Controls (manual V4L2)</div>
+            <div class="slider-header">
+                <span class="toggle-label">Exposure</span>
+                <span class="slider-value" id="expValue">200</span>
+            </div>
+            <input type="range" id="expSlider" class="range-input" min="1" max="5000" value="200" oninput="previewCamera(this.id, this.value)" onchange="updateCamera(this.id, this.value)">
+            <div class="slider-header">
+                <span class="toggle-label">Gain</span>
+                <span class="slider-value" id="gainValue">0</span>
+            </div>
+            <input type="range" id="gainSlider" class="range-input" min="0" max="100" value="0" oninput="previewCamera(this.id, this.value)" onchange="updateCamera(this.id, this.value)">
+            <div class="slider-header">
+                <span class="toggle-label">Brightness</span>
+                <span class="slider-value" id="brightnessValue">0</span>
+            </div>
+            <input type="range" id="brightnessSlider" class="range-input" min="-64" max="64" value="0" oninput="previewCamera(this.id, this.value)" onchange="updateCamera(this.id, this.value)">
+            <div style="font-size: 12px; color: var(--text-secondary); text-align: center;">
+                Adjust exposure time, sensor gain, and digital brightness. Start with low exposure (~50) for bright outdoor scenes.
+            </div>
+        </div>
     </div>
 
     <script>
@@ -851,6 +873,26 @@
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ trace_start_y: parseInt(value) })
+                });
+            }, 100);
+        }
+
+        function previewCamera(ctrlId, value) {
+            const labelId = ctrlId.replace('Slider', 'Value');
+            const el = document.getElementById(labelId);
+            if (el) el.innerText = value;
+        }
+        let cameraUpdateTimeout = null;
+        function updateCamera(ctrlId, value) {
+            const v4l2Name = ctrlId.replace('Slider', '').toLowerCase();
+            if (cameraUpdateTimeout) clearTimeout(cameraUpdateTimeout);
+            cameraUpdateTimeout = setTimeout(async () => {
+                const body = {};
+                body[v4l2Name] = parseInt(value);
+                await fetch('/api/set_camera', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(body)
                 });
             }, 100);
         }

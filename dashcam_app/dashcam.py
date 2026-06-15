@@ -446,6 +446,7 @@ state = {
 }
 
 video_writer = None
+_camera = None
 
 def _try_load_calibration():
     calib_path = "models/calibration.json"
@@ -493,112 +494,43 @@ def make_error_frame(message):
     return buf.tobytes()
 
 
-class _AdaptiveExposure:
-    """Closed-loop exposure control for UVC cameras via v4l2-ctl.
-    Uses a PI controller on road-region luminance to adjust
-    exposure_time_absolute + gain. Disables backlight compensation
-    (which causes overexposure on bright scenes).
-    Throttled to ~10 updates/sec. No-ops silently on non-Linux.
+class _V4L2Control:
+    """Minimal V4L2 wrapper: sets camera to manual mode on init and exposes
+    a set() method that the /api/set_camera endpoint calls.
+    No-ops silently on non-Linux (where v4l2-ctl is absent).
     """
-    def __init__(self, dev_path="/dev/video0",
-                 target_luminance=85,
-                 exp_min=5, exp_max=5000,
-                 gain_min=0, gain_max=100):
+    def __init__(self, dev_path="/dev/video0"):
         self._dev = dev_path
-        self._target = target_luminance
-        self._exp_min, self._exp_max = exp_min, exp_max
-        self._gain_min, self._gain_max = gain_min, gain_max
-
-        self._exposure = 80
-        self._gain = 0
-        self._lum_ema = None
-        self._alpha = 0.08
-        self._i_term = 0.0
-        self._kp = 4.0
-        self._ki = 0.3
-        self._i_max = 250.0
-        self._frame_count = 0
         self._available = True
-
-    def _ctl(self, control, value):
         try:
-            r = subprocess.run(
-                ["v4l2-ctl", "-d", self._dev, "-c", f"{control}={int(value)}"],
+            subprocess.run(
+                ["v4l2-ctl", "-d", self._dev, "-c", "auto_exposure=1",
+                 "-c", "backlight_compensation=0"],
                 capture_output=True, timeout=500,
             )
-            if r.returncode != 0:
-                err = r.stderr.decode().strip()
-                print(f"[EXPOSURE] v4l2-ctl {control}={value} failed: {err}", flush=True)
-                self._available = False
+            print(f"[CAM] Manual mode set on {self._dev}", flush=True)
         except FileNotFoundError:
-            print("[EXPOSURE] v4l2-ctl not found — disabling adaptive exposure", flush=True)
+            print("[CAM] v4l2-ctl not found — camera controls disabled", flush=True)
             self._available = False
         except subprocess.TimeoutExpired:
             pass
 
-    def start(self):
+    def set(self, control, value):
         if not self._available:
             return
-        self._ctl("auto_exposure", 1)
-        self._ctl("backlight_compensation", 0)
-        self._ctl("exposure_time_absolute", self._exposure)
-        self._ctl("gain", self._gain)
-
-    def update(self, frame):
-        if not self._available:
-            return
-        self._frame_count += 1
-        if self._frame_count % 3 != 0:
-            return
-        h, w = frame.shape[:2]
-        roi = frame[int(h * 0.55):int(h * 0.95), :]
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        lum = float(gray.mean())
-        if self._lum_ema is None:
-            self._lum_ema = lum
-        self._lum_ema += self._alpha * (lum - self._lum_ema)
-        # error = target - lum_ema  (negative = too bright, positive = too dark)
-        error = self._target - self._lum_ema
-        if abs(error) < 3:
-            if abs(self._i_term) > 5:
-                self._i_term *= 0.95  # leaky integrator decay
-            else:
-                self._i_term = 0.0
-            return
-        # PI controller
-        self._i_term += error * self._ki
-        self._i_term = np.clip(self._i_term, -self._i_max, self._i_max)
-        step = error * self._kp + self._i_term
-        new_exp = int(np.round(self._exposure + step))
-        new_exp = np.clip(new_exp, self._exp_min, self._exp_max)
-        if new_exp != self._exposure:
-            self._exposure = new_exp
-            self._ctl("exposure_time_absolute", self._exposure)
-        # Gain as secondary: reduce when still too bright at min exposure
-        if self._exposure <= self._exp_min + 10 and error < -3:
-            new_gain = max(self._gain - 2, self._gain_min)
-            if new_gain != self._gain:
-                self._gain = new_gain
-                self._ctl("gain", self._gain)
-        elif self._exposure >= self._exp_max - 10 and error > 3:
-            new_gain = min(self._gain + 2, self._gain_max)
-            if new_gain != self._gain:
-                self._gain = new_gain
-                self._ctl("gain", self._gain)
-        if self._frame_count % 15 == 0:
-            print(f"[EXPOSURE] lum={lum:.0f} smoothed={self._lum_ema:.0f} "
-                  f"exp={self._exposure} gain={self._gain} i={self._i_term:.0f}", flush=True)
-
-    def release(self):
-        if not self._available:
-            return
-        self._ctl("auto_exposure", 3)
+        try:
+            subprocess.run(
+                ["v4l2-ctl", "-d", self._dev, "-c", f"{control}={int(value)}"],
+                capture_output=True, timeout=500,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
 
 
 class _CamWrapper:
     def __init__(self):
         self._dev_path = DEV_VIDEO_PATH if (DEV_VIDEO_PATH and os.path.exists(DEV_VIDEO_PATH)) else None
-        self._exposure = _AdaptiveExposure(VIDEO_SOURCE) if self._dev_path is None else None
+        self._v4l2 = _V4L2Control(VIDEO_SOURCE) if self._dev_path is None else None
         self._open()
     def _open(self):
         if self._dev_path:
@@ -608,26 +540,23 @@ class _CamWrapper:
             self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
             self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
             self._cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
-            if self._exposure:
-                self._exposure.start()
+    def set_v4l2(self, control, value):
+        if self._v4l2:
+            self._v4l2.set(control, value)
     def start(self):
         return self._cap is not None and self._cap.isOpened()
     def read(self):
-        ret, frame = self._cap.read()
-        if ret and self._exposure is not None:
-            self._exposure.update(frame)
-        return ret, frame
+        return self._cap.read()
     def seek_to_start(self):
         self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     def release(self):
-        if self._exposure:
-            self._exposure.release()
         self._cap.release()
 
 def capture_loop():
-    global raw_frame_buffer, video_writer, calibration_frame
+    global raw_frame_buffer, video_writer, calibration_frame, _camera
 
     cap = _CamWrapper()
+    _camera = cap
 
     if not cap.start():
         state["error"] = "Failed to open camera"
@@ -2021,6 +1950,19 @@ def api_set_trace_start():
 
 @app.route('/api/set_crop', methods=['POST'])
 def api_set_crop():
+    return jsonify({"success": True})
+
+
+@app.route('/api/set_camera', methods=['POST'])
+def api_set_camera():
+    data = request.json or {}
+    ctrl = _camera
+    if ctrl is None:
+        return jsonify({"success": False, "error": "camera not started"}), 503
+    for key in ("exposure_time_absolute", "gain", "brightness"):
+        val = data.get(key)
+        if val is not None:
+            ctrl.set_v4l2(key, int(val))
     return jsonify({"success": True})
 
 
