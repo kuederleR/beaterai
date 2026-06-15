@@ -1512,8 +1512,34 @@ def inference_loop():
                 y1 = int(lead_car.get("img_y1", 0) * sy)
                 x2 = int(lead_car.get("img_x2", 0) * sx)
                 y2 = int(lead_car.get("img_y2", 0) * sy)
-                color = (0, 255, 0) if lead_car.get("threat", False) else (255, 200, 0)
-                cv2.rectangle(im_debug, (x1, y1), (x2, y2), color, 3, cv2.LINE_AA)
+
+                # Distance from bottom edge via BEV warp
+                if _bev_warp_M is not None:
+                    cx_img = (lead_car.get("img_x1", 0) + lead_car.get("img_x2", 0)) / 2.0
+                    by_img = lead_car.get("img_y2", 0)
+                    pt_img = np.array([[[cx_img, by_img]]], dtype=np.float32)
+                    pt_bev = cv2.perspectiveTransform(pt_img, _bev_warp_M)[0][0]
+                    lead_car_dist = (1.0 - pt_bev[1] / BEV_DISPLAY_HEIGHT) * BEV_Y_RANGE[1]
+                else:
+                    lead_car_dist = lead_car.get("center_y", 20.0)
+                lead_car_dist = max(lead_car_dist, 0.5)
+
+                # Green (far) → yellow → red (close) over 5–20m
+                t = np.clip((lead_car_dist - 5.0) / (20.0 - 5.0), 0.0, 1.0)
+                if t < 0.5:
+                    ri, gi, bi = 255, int(255 * t * 2), 0
+                else:
+                    ri, gi, bi = int(255 * (1 - (t - 0.5) * 2)), 255, 0
+                lead_car_color = f"#{ri:02x}{gi:02x}{bi:02x}"
+
+                # Semi-transparent mask + outline
+                overlay = im_debug.copy()
+                cv2.rectangle(overlay, (x1, y1), (x2, y2), (bi, gi, ri), -1)
+                cv2.addWeighted(overlay, 0.35, im_debug, 0.65, 0, im_debug)
+                cv2.rectangle(im_debug, (x1, y1), (x2, y2), (bi, gi, ri), 2, cv2.LINE_AA)
+            else:
+                lead_car_dist = None
+                lead_car_color = None
 
             global _perspective_overlay_data
             overlay_lanes = []
@@ -1542,7 +1568,8 @@ def inference_loop():
                     "x2": float(lead_car.get("img_x2", 0) * sx),
                     "y2": float(lead_car.get("img_y2", 0) * sy),
                     "id": lead_car.get("track_id", -1),
-                    "threat": lead_car.get("threat", False),
+                    "distance": lead_car_dist,
+                    "color": lead_car_color,
                 })
             _perspective_overlay_data = {
                 "width": im_debug.shape[1],
