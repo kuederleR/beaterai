@@ -982,49 +982,39 @@ def inference_loop():
                         bx = float(bot[0])
                         cand_list.append({"pts": pts, "bx": bx})
 
-                    def _best_match(cands, target_x, max_dist=MAX_EXPECTED_DIST, skip=None):
-                        best = None
-                        best_d = max_dist
+                    def _pick_innermost(cands, target_x, max_dist, side, skip=None):
+                        in_range = []
                         for c in cands:
                             if c is skip:
                                 continue
-                            d = abs(c["bx"] - target_x)
-                            if d < best_d:
-                                best_d = d
-                                best = c
-                        return best
+                            if abs(c["bx"] - target_x) < max_dist:
+                                score = -abs(c["bx"] - target_x)  # closer to target is better
+                                in_range.append((c, score))
+                        if not in_range:
+                            return None
+                        # Among in-range candidates, pick the innermost (closest to car center)
+                        if side == 'left':
+                            in_range.sort(key=lambda x: x[0]["bx"], reverse=True)
+                        else:
+                            in_range.sort(key=lambda x: x[0]["bx"])
+                        return in_range[0][0]
 
                     left_cand = None
                     right_cand = None
 
                     if _expected_left_bx is not None:
-                        left_cand = _best_match(cand_list, _expected_left_bx)
+                        left_cand = _pick_innermost(cand_list, _expected_left_bx, MAX_EXPECTED_DIST, 'left')
                     if _expected_right_bx is not None:
-                        right_cand = _best_match(cand_list, _expected_right_bx)
-
-                    # Infer missing lane from expected width + opposite detected lane
-                    if left_cand is None and _expected_width_px is not None and _expected_right_bx is not None:
-                        inferred = _expected_right_bx - _expected_width_px
-                        left_cand = _best_match(cand_list, inferred)
-                    if right_cand is None and _expected_width_px is not None and _expected_left_bx is not None:
-                        inferred = _expected_left_bx + _expected_width_px
-                        right_cand = _best_match(cand_list, inferred, skip=left_cand)
+                        right_cand = _pick_innermost(cand_list, _expected_right_bx, MAX_EXPECTED_DIST, 'right')
 
                     # Ensure left != right
                     if left_cand is not None and right_cand is not None and left_cand is right_cand:
                         dl = abs(left_cand["bx"] - (_expected_left_bx or 0))
                         dr = abs(right_cand["bx"] - (_expected_right_bx or 0))
                         if dl <= dr:
-                            right_cand = None
+                            right_cand = _pick_innermost(cand_list, _expected_right_bx, MAX_EXPECTED_DIST, 'right', skip=left_cand)
                         else:
-                            left_cand = None
-                        # Try width inference again if one side was cleared
-                        if left_cand is None and _expected_width_px is not None and _expected_right_bx is not None:
-                            inferred = _expected_right_bx - _expected_width_px
-                            left_cand = _best_match(cand_list, inferred, skip=right_cand)
-                        if right_cand is None and _expected_width_px is not None and _expected_left_bx is not None:
-                            inferred = _expected_left_bx + _expected_width_px
-                            right_cand = _best_match(cand_list, inferred, skip=left_cand)
+                            left_cand = _pick_innermost(cand_list, _expected_left_bx, MAX_EXPECTED_DIST, 'left', skip=right_cand)
 
                     # Initialization fallback: only for a side with NO expected position
                     if left_cand is None and _expected_left_bx is None:
