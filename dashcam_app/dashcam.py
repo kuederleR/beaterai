@@ -423,6 +423,7 @@ def capture_loop():
 
             with frame_lock:
                 raw_frame_buffer = frame.copy()
+                calibration_frame = frame.copy()
 
             if state["recording"]:
                 if video_writer is None:
@@ -616,7 +617,6 @@ def inference_loop():
             with frame_lock:
                 if raw_frame_buffer is not None:
                     im0 = raw_frame_buffer.copy()
-                    calibration_frame = im0.copy()
                     raw_frame_buffer = None
                     has_frame = True
 

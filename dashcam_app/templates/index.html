@@ -449,7 +449,7 @@
                     Source image — click 4 points forming the lane trapezoid (bottom-left, bottom-right, top-right, top-left)
                 </div>
                 <div style="position: relative;">
-                    <canvas id="bevCalSrcCanvas" style="width: 100%; border-radius: 8px; cursor: crosshair;"></canvas>
+                    <canvas id="bevCalSrcCanvas" style="border-radius: 8px; cursor: crosshair; display: block;"></canvas>
                     <div id="bevCalSrcOverlay" style="position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.7); color: #fff; padding: 4px 10px; border-radius: 4px; font-size: 12px; pointer-events: none;">Click to select point 1/4</div>
                 </div>
             </div>
@@ -458,7 +458,7 @@
                     BEV preview — drag colored handles to adjust the destination rectangle
                 </div>
                 <div style="position: relative;">
-                    <canvas id="bevCalDstCanvas" style="width: 100%; border-radius: 8px; cursor: default;"></canvas>
+                    <canvas id="bevCalDstCanvas" style="border-radius: 8px; cursor: default; display: block;"></canvas>
                     <div id="bevCalDstOverlay" style="position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.7); color: #fff; padding: 4px 10px; border-radius: 4px; font-size: 12px; pointer-events: none;">Select source points first</div>
                 </div>
             </div>
@@ -1162,12 +1162,19 @@
         async function bevCalFetchSrcFrame() {
             try {
                 const res = await fetch('/api/bev_cal/frame');
-                if (!res.ok) throw new Error('no frame');
+                if (!res.ok) {
+                    const errText = await res.text();
+                    console.error('BEV frame fetch failed:', res.status, errText);
+                    document.getElementById('bevCalStatus').innerText = 'No frame from camera';
+                    return null;
+                }
                 const blob = await res.blob();
+                console.log('BEV frame fetched:', blob.size, 'bytes');
                 const url = URL.createObjectURL(blob);
                 return url;
             } catch (e) {
-                document.getElementById('bevCalStatus').innerText = 'Failed to get frame';
+                console.error('BEV frame fetch error:', e);
+                document.getElementById('bevCalStatus').innerText = 'Frame fetch error';
                 return null;
             }
         }
@@ -1206,17 +1213,27 @@
 
             const img = new Image();
             img.onload = () => {
-                const rect = canvas.parentElement.getBoundingClientRect();
-                const maxW = rect.width;
-                const scale = Math.min(maxW / img.width, 600 / img.height, 1);
-                canvas.width = img.width * scale;
-                canvas.height = img.height * scale;
+                const parent = canvas.parentElement;
+                const maxW = parent.clientWidth || 400;
+                const maxH = 600;
+                const scale = Math.min(maxW / img.width, maxH / img.height, 1);
+                const dispW = Math.round(img.width * scale);
+                const dispH = Math.round(img.height * scale);
+                console.log('BEV cal img loaded:', img.width, 'x', img.height, 'scale:', scale, 'disp:', dispW, 'x', dispH);
+                canvas.width = dispW;
+                canvas.height = dispH;
+                canvas.style.width = dispW + 'px';
+                canvas.style.height = dispH + 'px';
                 canvas._imgW = img.width;
                 canvas._imgH = img.height;
                 canvas._scale = scale;
-                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                ctx.drawImage(img, 0, 0, dispW, dispH);
                 bevCalRedrawSrc(canvas, ctx);
                 URL.revokeObjectURL(url);
+            };
+            img.onerror = (e) => {
+                console.error('BEV cal img load error:', e);
+                document.getElementById('bevCalStatus').innerText = 'Image decode error';
             };
             img.src = url;
         }
@@ -1306,16 +1323,20 @@
                 const ctx = canvas.getContext('2d');
                 const img = new Image();
                 img.onload = () => {
-                    const rect = canvas.parentElement.getBoundingClientRect();
-                    const maxW = rect.width;
+                    const parent = canvas.parentElement;
+                    const maxW = parent.clientWidth || 400;
                     const scale = Math.min(maxW / img.width, 500 / img.height, 1);
-                    canvas.width = img.width * scale;
-                    canvas.height = img.height * scale;
+                    const dispW = Math.round(img.width * scale);
+                    const dispH = Math.round(img.height * scale);
+                    canvas.width = dispW;
+                    canvas.height = dispH;
+                    canvas.style.width = dispW + 'px';
+                    canvas.style.height = dispH + 'px';
                     canvas._imgW = img.width;
                     canvas._imgH = img.height;
                     canvas._scale = scale;
-                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                    canvas._imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                    ctx.drawImage(img, 0, 0, dispW, dispH);
+                    canvas._imgData = ctx.getImageData(0, 0, dispW, dispH);
                     bevCalRedrawDst(canvas, ctx);
                     URL.revokeObjectURL(url);
                 };
