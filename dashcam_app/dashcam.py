@@ -310,7 +310,7 @@ def _bev_px_to_road(pts_bev, w, h):
     return np.column_stack([x, y])
 
 
-def _bev_detect_lanes(ll_mask):
+def _bev_detect_lanes(ll_mask, cam_shape=None):
     global _bev_warp_M
     if _bev_warp_M is None:
         return []
@@ -318,8 +318,15 @@ def _bev_detect_lanes(ll_mask):
     w = BEV_DISPLAY_WIDTH
     h = BEV_DISPLAY_HEIGHT
 
+    ll_resized = ll_mask
+    if cam_shape is not None:
+        cw, ch = cam_shape[1], cam_shape[0]
+        if ll_mask.shape[0] != ch or ll_mask.shape[1] != cw:
+            ll_resized = cv2.resize(ll_mask, (cw, ch),
+                                    interpolation=cv2.INTER_NEAREST)
+
     bev_mask = cv2.warpPerspective(
-        (ll_mask * 255).astype(np.uint8), _bev_warp_M, (w, h),
+        (ll_resized * 255).astype(np.uint8), _bev_warp_M, (w, h),
         flags=cv2.INTER_NEAREST,
     )
     _, bev_mask = cv2.threshold(bev_mask, 127, 1, cv2.THRESH_BINARY)
@@ -363,6 +370,11 @@ def _bev_detect_lanes(ll_mask):
 
         if len(pts) >= 3:
             lanes.append(np.array(pts, dtype=np.float32))
+
+    if peaks:
+        print(f"[LANE] {len(peaks)} peaks, {len(lanes)} lanes tracked", flush=True)
+    else:
+        print(f"[LANE] No peaks (thresh={thresh:.0f}, max_hist={np.max(hist_smooth):.0f})", flush=True)
 
     return lanes
 
@@ -768,6 +780,7 @@ def inference_loop():
                                 "conf": b.get("conf", 0.0),
                             })
                 if ll_mask is not None:
+                    lane_mask = ll_mask
                     da_mask_big = cv2.resize(da_mask, (im_debug.shape[1], im_debug.shape[0]),
                                              interpolation=cv2.INTER_NEAREST)
                     ll_mask_big = cv2.resize(ll_mask, (im_debug.shape[1], im_debug.shape[0]),
@@ -809,7 +822,7 @@ def inference_loop():
                 car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
 
                 if _bev_warp_M is not None and ll_mask is not None:
-                    lanes_bev = _bev_detect_lanes(ll_mask)
+                    lanes_bev = _bev_detect_lanes(ll_mask, cam_shape=im0.shape[:2])
                     w_bev = BEV_DISPLAY_WIDTH
                     h_bev = BEV_DISPLAY_HEIGHT
                     car_center_bev = w_bev // 2

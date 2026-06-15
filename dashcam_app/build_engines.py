@@ -122,13 +122,10 @@ def build_yolop_trt_engine(onnx_path="data/weights/yolopv2.onnx",
            precision_flag,
            "--memPoolSize=workspace:2048"]
 
-    print(f"[build] Building {precision.upper()} engine via trtexec ...", flush=True)
-    print(f"[build] Command: {' '.join(cmd)}", flush=True)
-
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1)
     for line in proc.stdout:
-        print(f"[trtexec] {line.rstrip()}", flush=True)
+        pass
     proc.wait(timeout=900)
     if proc.returncode != 0:
         raise RuntimeError(f"trtexec failed with code {proc.returncode}")
@@ -144,7 +141,6 @@ def ensure_yolop_trt_engine(model_path="data/weights/yolopv2.pt",
                             engine_path="data/weights/yolopv2_fp16.engine",
                             precision="fp16"):
     if os.path.exists(engine_path):
-        print(f"[build] {precision.upper()} engine ready at {engine_path}", flush=True)
         return engine_path
 
     print("=" * 60, flush=True)
@@ -157,8 +153,6 @@ def ensure_yolop_trt_engine(model_path="data/weights/yolopv2.pt",
     export_yolop_onnx(model_path, onnx_path)
     build_yolop_trt_engine(onnx_path, engine_path, precision)
     elapsed = time.time() - t0
-    print(f"[build] {precision.upper()} engine build complete in {elapsed:.0f}s.",
-          flush=True)
     return engine_path
 
 

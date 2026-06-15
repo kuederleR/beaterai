@@ -12,7 +12,7 @@ except ImportError:
 
 class TrtRunner:
     def __init__(self, engine_path):
-        logger = trt.Logger(trt.Logger.WARNING)
+        logger = trt.Logger(trt.Logger.ERROR)
         with open(engine_path, 'rb') as f:
             runtime = trt.Runtime(logger)
             self.engine = runtime.deserialize_cuda_engine(f.read())
