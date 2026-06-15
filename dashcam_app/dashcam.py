@@ -757,7 +757,7 @@ def build_lane_overlay_payload(left_coeffs, right_coeffs,
     }
 
 
-def _draw_filtered_lanes_perspective(im, left_coeffs, right_coeffs, bev_warp_M):
+def _draw_filtered_lanes_perspective(im, left_coeffs, right_coeffs, bev_warp_M, lane_position=0.5, lead_car_color=None):
     if bev_warp_M is None:
         return
     if left_coeffs is None and right_coeffs is None:
@@ -772,19 +772,50 @@ def _draw_filtered_lanes_perspective(im, left_coeffs, right_coeffs, bev_warp_M):
     xr, yr = BEV_X_RANGE[1], BEV_Y_RANGE[1]
     y_vals = np.arange(2.0, 18.0, 0.5, dtype=np.float32)
 
-    for coeffs in [left_coeffs, right_coeffs]:
-        if coeffs is None:
-            continue
-        road_x = np.polyval(coeffs, y_vals)
-        u = ((road_x / (2 * xr) + 0.5) * bw).astype(np.float32)
+    left_pts = right_pts = None
+    if left_coeffs is not None:
+        rx = np.polyval(left_coeffs, y_vals)
+        u = ((rx / (2 * xr) + 0.5) * bw).astype(np.float32)
         v = ((1.0 - y_vals / yr) * bh).astype(np.float32)
-        pts_bev = np.column_stack([u, v])
-
-        pts_cam = pts_bev.reshape(1, -1, 2).astype(np.float32)
-        pts_cam = cv2.perspectiveTransform(pts_cam, M_inv).reshape(-1, 2).astype(np.int32)
+        pts_bev = np.column_stack([u, v]).reshape(1, -1, 2).astype(np.float32)
+        pts_cam = cv2.perspectiveTransform(pts_bev, M_inv).reshape(-1, 2).astype(np.int32)
         pts_cam[:, 0] = np.clip(pts_cam[:, 0], 0, w_im - 1)
         pts_cam[:, 1] = np.clip(pts_cam[:, 1], 0, h_im - 1)
-        cv2.polylines(im, [pts_cam], False, (255, 100, 0), 3, cv2.LINE_AA)
+        left_pts = pts_cam
+    if right_coeffs is not None:
+        rx = np.polyval(right_coeffs, y_vals)
+        u = ((rx / (2 * xr) + 0.5) * bw).astype(np.float32)
+        v = ((1.0 - y_vals / yr) * bh).astype(np.float32)
+        pts_bev = np.column_stack([u, v]).reshape(1, -1, 2).astype(np.float32)
+        pts_cam = cv2.perspectiveTransform(pts_bev, M_inv).reshape(-1, 2).astype(np.int32)
+        pts_cam[:, 0] = np.clip(pts_cam[:, 0], 0, w_im - 1)
+        pts_cam[:, 1] = np.clip(pts_cam[:, 1], 0, h_im - 1)
+        right_pts = pts_cam
+
+    # Lane area fill
+    if left_pts is not None and right_pts is not None:
+        min_len = min(len(left_pts), len(right_pts))
+        poly = np.vstack([left_pts[:min_len], right_pts[:min_len][::-1]])
+        if lead_car_color:
+            area_color = (int(lead_car_color[5:7], 16), int(lead_car_color[3:5], 16), int(lead_car_color[1:3], 16))
+        else:
+            area_color = (255, 100, 0)
+        ov = im.copy()
+        cv2.fillPoly(ov, [poly], area_color)
+        cv2.addWeighted(ov, 0.25, im, 0.75, 0, im)
+
+    # Gradient lane lines
+    lp_clamped = max(0.0, min(1.0, lane_position))
+    left_shift = 2 * abs(lp_clamped - 0.5) if lp_clamped < 0.5 else 0.0
+    right_shift = 2 * abs(lp_clamped - 0.5) if lp_clamped > 0.5 else 0.0
+    for pts, shift in [(left_pts, left_shift), (right_pts, right_shift)]:
+        if pts is None or len(pts) < 2:
+            continue
+        b = int(255 * (1 - shift))
+        g = int(100 * (1 - shift))
+        r = int(255 * shift)
+        for i in range(len(pts) - 1):
+            cv2.line(im, tuple(pts[i]), tuple(pts[i + 1]), (b, g, r), 3, cv2.LINE_AA)
 
 
 def _road_to_image(road_pts):
@@ -1417,47 +1448,10 @@ def inference_loop():
                             save_calibration_state()
                         state["calibration_ldw_right_start_time"] = None
 
-            _t_render = time.perf_counter()
-            if _bev_warp_M is not None:
-                im_bev = cv2.warpPerspective(
-                    im0, _bev_warp_M,
-                    (BEV_DISPLAY_WIDTH, BEV_DISPLAY_HEIGHT),
-                    flags=cv2.INTER_LINEAR,
-                )
-                im_bev = render_bev_frame(
-                    lane_mask, detections,
-                    left_coeffs, right_coeffs,
-                    compensated_x, lane_position, lane_width,
-                    fcw_triggered, left_severity, right_severity,
-                    bg_img=im_bev, bev_debug=bev_debug, raw_lanes=lanes_bev,
-                )
-                _draw_filtered_lanes_perspective(im_debug, left_coeffs, right_coeffs, _bev_warp_M)
-            else:
-                im_bev = render_bev_frame(
-                    lane_mask, detections,
-                    left_coeffs, right_coeffs,
-                    compensated_x, lane_position, lane_width,
-                    fcw_triggered, left_severity, right_severity,
-                )
-                if left_coeffs is not None or right_coeffs is not None:
-                    h_im, w_im = im_debug.shape[:2]
-                    for coeffs in [left_coeffs, right_coeffs]:
-                        if coeffs is None:
-                            continue
-                        y_vals = np.arange(2.0, 18.0, 0.5, dtype=np.float32)
-                        road_x = np.polyval(coeffs, y_vals)
-                        road_pts = np.column_stack([road_x, y_vals])
-                        img_pts = _road_to_image(road_pts)
-                        if img_pts is not None:
-                            valid = ~np.isnan(img_pts[:, 0])
-                            pts = img_pts[valid].astype(np.int32)
-                            if len(pts) >= 2:
-                                pts[:, 0] = (pts[:, 0] * im_debug.shape[1] / CAPTURE_WIDTH).astype(np.int32)
-                                pts[:, 1] = (pts[:, 1] * im_debug.shape[0] / CAPTURE_HEIGHT).astype(np.int32)
-                                cv2.polylines(im_debug, [pts], False, (255, 100, 0), 3, cv2.LINE_AA)
-
-            # Draw lead car bounding box on perspective view
+            # ── Lead car detection (before rendering, so lane area can use its color) ──
             lead_car = None
+            lead_car_dist = None
+            lead_car_color = None
             if detections:
                 for det in detections:
                     cy = det["center_y"]
@@ -1478,7 +1472,6 @@ def inference_loop():
                             left_bvx = ((left_rx / (2 * BEV_X_RANGE[1]) + 0.5) * BEV_DISPLAY_WIDTH)
                             right_bvx = ((right_rx / (2 * BEV_X_RANGE[1]) + 0.5) * BEV_DISPLAY_WIDTH)
                             in_lane = left_bvx <= bvx <= right_bvx
-                        # Validate in image space using same BEV warp (consistent)
                         if in_lane:
                             inv_bev = np.linalg.inv(_bev_warp_M)
                             lane_bev = np.array([[[left_bvx, bvy], [right_bvx, bvy]]], dtype=np.float32)
@@ -1487,7 +1480,6 @@ def inference_loop():
                             margin = (rix - lix) * 0.2
                             if cx_img < lix - margin or cx_img > rix + margin:
                                 in_lane = False
-                            # Hard image-edge zone: reject vehicles near frame edges
                             edge_margin = CAPTURE_WIDTH * 0.10
                             if cx_img < edge_margin or cx_img > CAPTURE_WIDTH - edge_margin:
                                 in_lane = False
@@ -1498,22 +1490,14 @@ def inference_loop():
                         in_lane = left_x <= cx <= right_x
                     else:
                         in_lane = abs(det["center_x"]) < LANE_HALF_WIDTH
-                    # Reject vehicles below the drivable Y cutoff
                     if in_lane:
                         dyc = state.get("drivable_y_cutoff")
                         if dyc is not None and det.get("img_y2", CAPTURE_HEIGHT) > dyc:
                             in_lane = False
                     if in_lane and (lead_car is None or cy < lead_car["center_y"]):
                         lead_car = det
-            if lead_car is not None:
-                sx = im_debug.shape[1] / CAPTURE_WIDTH
-                sy = im_debug.shape[0] / CAPTURE_HEIGHT
-                x1 = int(lead_car.get("img_x1", 0) * sx)
-                y1 = int(lead_car.get("img_y1", 0) * sy)
-                x2 = int(lead_car.get("img_x2", 0) * sx)
-                y2 = int(lead_car.get("img_y2", 0) * sy)
 
-                # Distance from bottom edge via BEV warp
+            if lead_car is not None:
                 if _bev_warp_M is not None:
                     cx_img = (lead_car.get("img_x1", 0) + lead_car.get("img_x2", 0)) / 2.0
                     by_img = lead_car.get("img_y2", 0)
@@ -1523,8 +1507,6 @@ def inference_loop():
                 else:
                     lead_car_dist = lead_car.get("center_y", 20.0)
                 lead_car_dist = max(lead_car_dist, 0.5)
-
-                # Green (far) → yellow → red (close) over 5–20m
                 t = np.clip((lead_car_dist - 5.0) / (20.0 - 5.0), 0.0, 1.0)
                 if t < 0.5:
                     ri, gi, bi = 255, int(255 * t * 2), 0
@@ -1532,32 +1514,134 @@ def inference_loop():
                     ri, gi, bi = int(255 * (1 - (t - 0.5) * 2)), 255, 0
                 lead_car_color = f"#{ri:02x}{gi:02x}{bi:02x}"
 
-                # Semi-transparent mask + outline
-                overlay = im_debug.copy()
-                cv2.rectangle(overlay, (x1, y1), (x2, y2), (bi, gi, ri), -1)
-                cv2.addWeighted(overlay, 0.35, im_debug, 0.65, 0, im_debug)
-                cv2.rectangle(im_debug, (x1, y1), (x2, y2), (bi, gi, ri), 2, cv2.LINE_AA)
+            # ── Rendering ───────────────────────────────────────────────────
+            _t_render = time.perf_counter()
+            if _bev_warp_M is not None:
+                im_bev = cv2.warpPerspective(
+                    im0, _bev_warp_M,
+                    (BEV_DISPLAY_WIDTH, BEV_DISPLAY_HEIGHT),
+                    flags=cv2.INTER_LINEAR,
+                )
+                im_bev = render_bev_frame(
+                    lane_mask, detections,
+                    left_coeffs, right_coeffs,
+                    compensated_x, lane_position, lane_width,
+                    fcw_triggered, left_severity, right_severity,
+                    bg_img=im_bev, bev_debug=bev_debug, raw_lanes=lanes_bev,
+                )
+                _draw_filtered_lanes_perspective(im_debug, left_coeffs, right_coeffs, _bev_warp_M, lane_position, lead_car_color)
             else:
-                lead_car_dist = None
-                lead_car_color = None
+                im_bev = render_bev_frame(
+                    lane_mask, detections,
+                    left_coeffs, right_coeffs,
+                    compensated_x, lane_position, lane_width,
+                    fcw_triggered, left_severity, right_severity,
+                )
+                if left_coeffs is not None or right_coeffs is not None:
+                    h_im, w_im = im_debug.shape[:2]
+                    y_vals = np.arange(2.0, 18.0, 0.5, dtype=np.float32)
+                    left_img = right_img = None
+                    if left_coeffs is not None:
+                        road_x = np.polyval(left_coeffs, y_vals)
+                        img_pts = _road_to_image(np.column_stack([road_x, y_vals]))
+                        if img_pts is not None:
+                            valid = ~np.isnan(img_pts[:, 0])
+                            left_img = img_pts[valid].astype(np.int32)
+                    if right_coeffs is not None:
+                        road_x = np.polyval(right_coeffs, y_vals)
+                        img_pts = _road_to_image(np.column_stack([road_x, y_vals]))
+                        if img_pts is not None:
+                            valid = ~np.isnan(img_pts[:, 0])
+                            right_img = img_pts[valid].astype(np.int32)
 
+                    # Lane area fill
+                    if left_img is not None and right_img is not None and len(left_img) >= 2 and len(right_img) >= 2:
+                        min_len = min(len(left_img), len(right_img))
+                        lp = left_img[:min_len].copy()
+                        rp = right_img[:min_len].copy()
+                        lp[:, 0] = (lp[:, 0] * w_im / CAPTURE_WIDTH).astype(np.int32)
+                        lp[:, 1] = (lp[:, 1] * h_im / CAPTURE_HEIGHT).astype(np.int32)
+                        rp[:, 0] = (rp[:, 0] * w_im / CAPTURE_WIDTH).astype(np.int32)
+                        rp[:, 1] = (rp[:, 1] * h_im / CAPTURE_HEIGHT).astype(np.int32)
+                        poly = np.vstack([lp, rp[::-1]])
+                        if lead_car_color:
+                            area_color = (int(lead_car_color[5:7], 16), int(lead_car_color[3:5], 16), int(lead_car_color[1:3], 16))
+                        else:
+                            area_color = (255, 100, 0)
+                        ov = im_debug.copy()
+                        cv2.fillPoly(ov, [poly], area_color)
+                        cv2.addWeighted(ov, 0.25, im_debug, 0.75, 0, im_debug)
+
+                    # Gradient lane lines
+                    lp_clamped = max(0.0, min(1.0, lane_position))
+                    left_shift = 2 * abs(lp_clamped - 0.5) if lp_clamped < 0.5 else 0.0
+                    right_shift = 2 * abs(lp_clamped - 0.5) if lp_clamped > 0.5 else 0.0
+                    for pts, shift in [(left_img, left_shift), (right_img, right_shift)]:
+                        if pts is None or len(pts) < 2:
+                            continue
+                        p = pts.copy()
+                        p[:, 0] = (p[:, 0] * w_im / CAPTURE_WIDTH).astype(np.int32)
+                        p[:, 1] = (p[:, 1] * h_im / CAPTURE_HEIGHT).astype(np.int32)
+                        b = int(255 * (1 - shift))
+                        g = int(100 * (1 - shift))
+                        r = int(255 * shift)
+                        for i in range(len(p) - 1):
+                            cv2.line(im_debug, tuple(p[i]), tuple(p[i + 1]), (b, g, r), 3, cv2.LINE_AA)
+
+            # ── Lead car mask rendering ─────────────────────────────────────
+            if lead_car is not None:
+                sx = im_debug.shape[1] / CAPTURE_WIDTH
+                sy = im_debug.shape[0] / CAPTURE_HEIGHT
+                x1 = int(lead_car.get("img_x1", 0) * sx)
+                y1 = int(lead_car.get("img_y1", 0) * sy)
+                x2 = int(lead_car.get("img_x2", 0) * sx)
+                y2 = int(lead_car.get("img_y2", 0) * sy)
+                r = int(lead_car_color[1:3], 16)
+                g = int(lead_car_color[3:5], 16)
+                b = int(lead_car_color[5:7], 16)
+                overlay = im_debug.copy()
+                cv2.rectangle(overlay, (x1, y1), (x2, y2), (b, g, r), -1)
+                cv2.addWeighted(overlay, 0.35, im_debug, 0.65, 0, im_debug)
+                cv2.rectangle(im_debug, (x1, y1), (x2, y2), (b, g, r), 2, cv2.LINE_AA)
+
+            # ── Frontend overlay data ──────────────────────────────────────
             global _perspective_overlay_data
             overlay_lanes = []
+            overlay_lane_fill = None
             if _bev_warp_M is not None:
-                for coeffs in [left_coeffs, right_coeffs]:
-                    if coeffs is None:
-                        continue
-                    y_vals = np.arange(2.0, 18.0, 0.5, dtype=np.float32)
-                    road_x = np.polyval(coeffs, y_vals)
-                    u = ((road_x / (2 * BEV_X_RANGE[1]) + 0.5) * BEV_DISPLAY_WIDTH).astype(np.float32)
-                    v = ((1.0 - y_vals / BEV_Y_RANGE[1]) * BEV_DISPLAY_HEIGHT).astype(np.float32)
-                    pts_bev = np.column_stack([u, v])
-                    sx, sy = im_debug.shape[1] / CAPTURE_WIDTH, im_debug.shape[0] / CAPTURE_HEIGHT
-                    S = np.array([[sx, 0, 0], [0, sy, 0], [0, 0, 1]], dtype=np.float64)
-                    M_inv = S @ np.linalg.inv(_bev_warp_M)
-                    pts_cam = pts_bev.reshape(1, -1, 2).astype(np.float32)
-                    pts_cam = cv2.perspectiveTransform(pts_cam, M_inv).reshape(-1, 2).astype(np.float32)
+                bw, bh = BEV_DISPLAY_WIDTH, BEV_DISPLAY_HEIGHT
+                xr, yr = BEV_X_RANGE[1], BEV_Y_RANGE[1]
+                y_vals = np.arange(2.0, 18.0, 0.5, dtype=np.float32)
+                sx, sy = im_debug.shape[1] / CAPTURE_WIDTH, im_debug.shape[0] / CAPTURE_HEIGHT
+                S = np.array([[sx, 0, 0], [0, sy, 0], [0, 0, 1]], dtype=np.float64)
+                M_inv = S @ np.linalg.inv(_bev_warp_M)
+
+                left_pts = right_pts = None
+                if left_coeffs is not None:
+                    rx = np.polyval(left_coeffs, y_vals)
+                    u = ((rx / (2 * xr) + 0.5) * bw).astype(np.float32)
+                    v = ((1.0 - y_vals / yr) * bh).astype(np.float32)
+                    pts_bev = np.column_stack([u, v]).reshape(1, -1, 2).astype(np.float32)
+                    pts_cam = cv2.perspectiveTransform(pts_bev, M_inv).reshape(-1, 2).astype(np.float32)
                     overlay_lanes.append([float(v) for pt in pts_cam for v in pt])
+                    left_pts = pts_cam
+                if right_coeffs is not None:
+                    rx = np.polyval(right_coeffs, y_vals)
+                    u = ((rx / (2 * xr) + 0.5) * bw).astype(np.float32)
+                    v = ((1.0 - y_vals / yr) * bh).astype(np.float32)
+                    pts_bev = np.column_stack([u, v]).reshape(1, -1, 2).astype(np.float32)
+                    pts_cam = cv2.perspectiveTransform(pts_bev, M_inv).reshape(-1, 2).astype(np.float32)
+                    overlay_lanes.append([float(v) for pt in pts_cam for v in pt])
+                    right_pts = pts_cam
+
+                if left_pts is not None and right_pts is not None:
+                    min_len = min(len(left_pts), len(right_pts))
+                    poly = np.vstack([left_pts[:min_len], right_pts[:min_len][::-1]])
+                    overlay_lane_fill = {
+                        "points": [float(v) for pt in poly for v in pt],
+                        "color": lead_car_color if lead_car_color else "#0064ff",
+                    }
+
             overlay_vehicles = []
             if lead_car is not None:
                 sx = im_debug.shape[1] / CAPTURE_WIDTH
@@ -1575,7 +1659,9 @@ def inference_loop():
                 "width": im_debug.shape[1],
                 "height": im_debug.shape[0],
                 "lanes": overlay_lanes,
+                "lane_fill": overlay_lane_fill,
                 "vehicles": overlay_vehicles,
+                "lane_position": lane_position,
             }
 
             state["moving"] = motion.is_moving()
