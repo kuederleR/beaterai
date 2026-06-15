@@ -335,6 +335,15 @@ class YolopDetector:
 
         # --- Preprocess (same for both paths) ---
         img_resized = cv2.resize(img, (self.img_size, self.img_size), interpolation=cv2.INTER_LINEAR)
+
+        # CLAHE normalization: equalize luminance to handle over/underexposure
+        lab = cv2.cvtColor(img_resized, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        lab = cv2.merge([l, a, b])
+        img_resized = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
         img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
         img_norm = img_rgb.astype(np.float32) / 255.0
         img_chw = np.transpose(img_norm, (2, 0, 1))[np.newaxis, ...]
