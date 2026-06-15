@@ -1012,12 +1012,9 @@ class _TrackedVehicle:
         z = np.array([x, y], dtype=np.float32)
         y_res = z - H @ self.state
         S = H @ self.P @ H.T + R
-        try:
-            K = self.P @ H.T @ np.linalg.inv(S)
-            self.state = self.state + K @ y_res
-            self.P = (np.eye(4) - K @ H) @ self.P
-        except np.linalg.LinAlgError:
-            pass
+        K = self.P @ H.T @ np.linalg.inv(S)
+        self.state = self.state + K @ y_res
+        self.P = (np.eye(4) - K @ H) @ self.P
         self.hits += 1
         self.missed = 0
         if width is not None:
@@ -1062,29 +1059,21 @@ class _VehicleTracker:
                 matched_dets.add(di)
                 trk = self.tracks[ti]
                 det = detections[di]
-                try:
-                    trk.update(det["center_x"], det["center_y"],
-                               det.get("width"), det.get("length"), det.get("conf"))
-                except Exception:
-                    pass
+                trk.update(det["center_x"], det["center_y"],
+                           det.get("width"), det.get("length"), det.get("conf"))
 
-        num_existing = len(self.tracks)
         for di, det in enumerate(detections):
             if di in matched_dets:
                 continue
-            try:
-                new_t = _TrackedVehicle(self.next_id, det["center_x"], det["center_y"],
-                                        det.get("width", 1.5), det.get("length", 3.0),
-                                        det.get("conf", 0.5))
-                self.tracks.append(new_t)
-                self.next_id += 1
-            except Exception:
-                pass
+            new_t = _TrackedVehicle(self.next_id, det["center_x"], det["center_y"],
+                                    det.get("width", 1.5), det.get("length", 3.0),
+                                    det.get("conf", 0.5))
+            self.tracks.append(new_t)
+            self.next_id += 1
 
-        # Only increment missed for tracks that existed before this update
-        for ti in range(num_existing):
+        for ti, trk in enumerate(self.tracks):
             if ti not in matched:
-                self.tracks[ti].missed += 1
+                trk.missed += 1
 
         self.tracks = [t for t in self.tracks if t.missed <= self.max_missed]
 
@@ -1216,11 +1205,7 @@ def inference_loop():
                                 "length": max(rh, 0.5),
                                 "conf": b.get("conf", 0.0),
                             })
-                try:
-                    tracked_vehicles = vehicle_tracker.update(detections) if detections else vehicle_tracker.update([])
-                except Exception as exc:
-                    print(f"[TRACKER] update error: {exc}", flush=True)
-                    tracked_vehicles = []
+                tracked_vehicles = vehicle_tracker.update(detections) if detections else vehicle_tracker.update([])
                 if ll_mask is not None:
                     lane_mask = ll_mask
                     da_mask_big = cv2.resize(da_mask, (im_debug.shape[1], im_debug.shape[0]),
