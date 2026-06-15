@@ -305,6 +305,7 @@ def _fallback_fit_lanes(left_edge, right_edge, car_center_x):
 latest_web_frame = None
 latest_debug_frame = None
 raw_frame_buffer = None
+calibration_frame = None
 frame_lock = threading.Lock()
 
 state = {
@@ -615,6 +616,7 @@ def inference_loop():
             with frame_lock:
                 if raw_frame_buffer is not None:
                     im0 = raw_frame_buffer.copy()
+                    calibration_frame = im0.copy()
                     raw_frame_buffer = None
                     has_frame = True
 
@@ -1074,8 +1076,8 @@ def api_bev_cal_state():
 
 @app.route('/api/bev_cal/frame')
 def api_bev_cal_frame():
-    with frame_lock:
-        frame = raw_frame_buffer
+    global calibration_frame
+    frame = calibration_frame
     if frame is None:
         return jsonify({"error": "no frame"}), 400
     _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
