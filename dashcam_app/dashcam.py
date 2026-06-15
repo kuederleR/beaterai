@@ -4,6 +4,7 @@ import json
 import logging
 import time
 import threading
+import subprocess
 import datetime
 import cv2
 import numpy as np
@@ -492,9 +493,80 @@ def make_error_frame(message):
     return buf.tobytes()
 
 
+class _AdaptiveExposure:
+    """Closed-loop exposure control for UVC cameras via v4l2-ctl.
+    Switches to manual mode and adjusts exposure_time_absolute + gain
+    based on road-region luminance. Throttled to ~10 updates/sec.
+    No-ops silently on non-Linux (where v4l2-ctl is absent).
+    """
+    def __init__(self, dev_path="/dev/video0",
+                 target_luminance=110,
+                 exp_min=50, exp_max=5000,
+                 gain_min=0, gain_max=100):
+        self._dev = dev_path
+        self._target = target_luminance
+        self._exp_min, self._exp_max = exp_min, exp_max
+        self._gain_min, self._gain_max = gain_min, gain_max
+
+        self._exposure = 500
+        self._gain = 0
+        self._smooth_lum = None
+        self._alpha = 0.10
+        self._frame_count = 0
+
+    def _ctl(self, control, value):
+        try:
+            subprocess.run(
+                ["v4l2-ctl", "-d", self._dev, "-c", f"{control}={int(value)}"],
+                capture_output=True, timeout=500,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    def start(self):
+        self._ctl("auto_exposure", 1)
+        self._ctl("exposure_time_absolute", self._exposure)
+        self._ctl("gain", self._gain)
+
+    def update(self, frame):
+        self._frame_count += 1
+        if self._frame_count % 3 != 0:
+            return
+        h, w = frame.shape[:2]
+        roi = frame[int(h * 0.55):int(h * 0.95), :]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        lum = float(gray.mean())
+        if self._smooth_lum is None:
+            self._smooth_lum = lum
+        self._smooth_lum += self._alpha * (lum - self._smooth_lum)
+        error = self._smooth_lum - self._target
+        if abs(error) < 3:
+            return
+        step = error * 4
+        new_exp = int(np.round(self._exposure + step))
+        new_exp = np.clip(new_exp, self._exp_min, self._exp_max)
+        if new_exp != self._exposure:
+            self._exposure = new_exp
+            self._ctl("exposure_time_absolute", self._exposure)
+        if self._exposure <= self._exp_min + 10 and error > 3:
+            new_gain = max(self._gain - 2, self._gain_min)
+            if new_gain != self._gain:
+                self._gain = new_gain
+                self._ctl("gain", self._gain)
+        elif self._exposure >= self._exp_max - 10 and error < -3:
+            new_gain = min(self._gain + 2, self._gain_max)
+            if new_gain != self._gain:
+                self._gain = new_gain
+                self._ctl("gain", self._gain)
+
+    def release(self):
+        self._ctl("auto_exposure", 3)
+
+
 class _CamWrapper:
     def __init__(self):
         self._dev_path = DEV_VIDEO_PATH if (DEV_VIDEO_PATH and os.path.exists(DEV_VIDEO_PATH)) else None
+        self._exposure = _AdaptiveExposure(VIDEO_SOURCE) if self._dev_path is None else None
         self._open()
     def _open(self):
         if self._dev_path:
@@ -504,13 +576,20 @@ class _CamWrapper:
             self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
             self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
             self._cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
+            if self._exposure:
+                self._exposure.start()
     def start(self):
         return self._cap is not None and self._cap.isOpened()
     def read(self):
-        return self._cap.read()
+        ret, frame = self._cap.read()
+        if ret and self._exposure is not None:
+            self._exposure.update(frame)
+        return ret, frame
     def seek_to_start(self):
         self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     def release(self):
+        if self._exposure:
+            self._exposure.release()
         self._cap.release()
 
 def capture_loop():
