@@ -1061,21 +1061,20 @@
                     ctx.stroke();
                 }
                 for (const v of data.vehicles) {
-                    const x = v.x * sx;
-                    const y = v.y * sy;
-                    ctx.beginPath();
-                    ctx.arc(x, y, 6, 0, Math.PI * 2);
-                    ctx.fillStyle = v.threat ? '#ff3333' : '#ffcc33';
-                    ctx.fill();
-                    ctx.strokeStyle = '#ffffff';
-                    ctx.lineWidth = 2;
-                    ctx.stroke();
-                    ctx.fillStyle = '#ffffff';
-                    ctx.font = 'bold 14px monospace';
-                    ctx.strokeStyle = '#000000';
+                    const x1 = v.x1 * sx;
+                    const y1 = v.y1 * sy;
+                    const x2 = v.x2 * sx;
+                    const y2 = v.y2 * sy;
+                    ctx.strokeStyle = v.threat ? '#ff3333' : '#ffcc00';
                     ctx.lineWidth = 3;
-                    ctx.strokeText(v.id, x + 10, y + 5);
-                    ctx.fillText(v.id, x + 10, y + 5);
+                    ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+                    const label = `#${v.id}`;
+                    ctx.font = 'bold 14px monospace';
+                    const tm = ctx.measureText(label);
+                    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+                    ctx.fillRect(x1, y1 - 20, tm.width + 8, 22);
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillText(label, x1 + 4, y1 - 5);
                 }
             } catch (e) {
                 // overlay fetch failed silently

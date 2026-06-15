@@ -911,6 +911,10 @@ class _VehicleTracker:
                 t["width"] = det.get("width", 0.5)
                 t["length"] = det.get("length", 0.5)
                 t["conf"] = det.get("conf", 0.0)
+                t["img_x1"] = det.get("img_x1", 0)
+                t["img_y1"] = det.get("img_y1", 0)
+                t["img_x2"] = det.get("img_x2", 0)
+                t["img_y2"] = det.get("img_y2", 0)
                 used.add(tid)
                 new_tracks[tid] = t
             else:
@@ -925,6 +929,10 @@ class _VehicleTracker:
                     "width": det.get("width", 0.5),
                     "length": det.get("length", 0.5),
                     "conf": det.get("conf", 0.0),
+                    "img_x1": det.get("img_x1", 0),
+                    "img_y1": det.get("img_y1", 0),
+                    "img_x2": det.get("img_x2", 0),
+                    "img_y2": det.get("img_y2", 0),
                 }
 
         for tid, t in self.tracks.items():
@@ -947,6 +955,10 @@ class _VehicleTracker:
                 "conf": t.get("conf", 0.0),
                 "track_id": tid,
                 "prev_cy": t.get("prev_cy", t["cy"]),
+                "img_x1": t.get("img_x1", 0),
+                "img_y1": t.get("img_y1", 0),
+                "img_x2": t.get("img_x2", 0),
+                "img_y2": t.get("img_y2", 0),
             })
         return result
 
@@ -1046,6 +1058,10 @@ def inference_loop():
                                 "width": max(rw, 0.5),
                                 "length": max(rh, 0.5),
                                 "conf": b.get("conf", 0.0),
+                                "img_x1": float(b["x1"]),
+                                "img_y1": float(b["y1"]),
+                                "img_x2": float(b["x2"]),
+                                "img_y2": float(b["y2"]),
                             })
                 detections = vehicle_tracker.update(detections)
                 if ll_mask is not None:
@@ -1418,20 +1434,32 @@ def inference_loop():
                                 pts[:, 1] = (pts[:, 1] * im_debug.shape[0] / CAPTURE_HEIGHT).astype(np.int32)
                                 cv2.polylines(im_debug, [pts], False, (255, 100, 0), 3, cv2.LINE_AA)
 
-            # Draw vehicle markers on perspective view
+            # Draw lead car bounding box on perspective view
+            lead_car = None
             if detections:
                 for det in detections:
-                    road_pt = np.array([[det["center_x"], det["center_y"]]], dtype=np.float32)
-                    img_pts = _road_to_image(road_pt)
-                    if img_pts is not None and not np.isnan(img_pts[0, 0]):
-                        px = int(img_pts[0, 0] * im_debug.shape[1] / CAPTURE_WIDTH)
-                        py = int(img_pts[0, 1] * im_debug.shape[0] / CAPTURE_HEIGHT)
-                        tid = det.get("track_id", -1)
-                        color = (0, 0, 255) if det.get("threat", False) else (100, 200, 255)
-                        cv2.circle(im_debug, (px, py), 6, color, -1, cv2.LINE_AA)
-                        cv2.circle(im_debug, (px, py), 6, (255, 255, 255), 1, cv2.LINE_AA)
-                        cv2.putText(im_debug, str(tid), (px + 8, py + 4),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
+                    cx = det["center_x"]
+                    cy = det["center_y"]
+                    if cy <= 0:
+                        continue
+                    in_lane = False
+                    if left_coeffs is not None and right_coeffs is not None:
+                        left_x = np.polyval(left_coeffs, cy)
+                        right_x = np.polyval(right_coeffs, cy)
+                        in_lane = left_x <= cx <= right_x
+                    else:
+                        in_lane = abs(cx) < LANE_HALF_WIDTH
+                    if in_lane and (lead_car is None or cy < lead_car["center_y"]):
+                        lead_car = det
+            if lead_car is not None:
+                sx = im_debug.shape[1] / CAPTURE_WIDTH
+                sy = im_debug.shape[0] / CAPTURE_HEIGHT
+                x1 = int(lead_car.get("img_x1", 0) * sx)
+                y1 = int(lead_car.get("img_y1", 0) * sy)
+                x2 = int(lead_car.get("img_x2", 0) * sx)
+                y2 = int(lead_car.get("img_y2", 0) * sy)
+                color = (0, 255, 0) if lead_car.get("threat", False) else (255, 200, 0)
+                cv2.rectangle(im_debug, (x1, y1), (x2, y2), color, 3, cv2.LINE_AA)
 
             global _perspective_overlay_data
             overlay_lanes = []
@@ -1451,17 +1479,17 @@ def inference_loop():
                     pts_cam = cv2.perspectiveTransform(pts_cam, M_inv).reshape(-1, 2).astype(np.float32)
                     overlay_lanes.append([float(v) for pt in pts_cam for v in pt])
             overlay_vehicles = []
-            for det in detections:
-                road_pt = np.array([[det["center_x"], det["center_y"]]], dtype=np.float32)
-                img_pts = _road_to_image(road_pt)
-                if img_pts is not None and not np.isnan(img_pts[0, 0]):
-                    px = float(img_pts[0, 0] * im_debug.shape[1] / CAPTURE_WIDTH)
-                    py = float(img_pts[0, 1] * im_debug.shape[0] / CAPTURE_HEIGHT)
-                    overlay_vehicles.append({
-                        "x": px, "y": py,
-                        "id": det.get("track_id", -1),
-                        "threat": det.get("threat", False),
-                    })
+            if lead_car is not None:
+                sx = im_debug.shape[1] / CAPTURE_WIDTH
+                sy = im_debug.shape[0] / CAPTURE_HEIGHT
+                overlay_vehicles.append({
+                    "x1": float(lead_car.get("img_x1", 0) * sx),
+                    "y1": float(lead_car.get("img_y1", 0) * sy),
+                    "x2": float(lead_car.get("img_x2", 0) * sx),
+                    "y2": float(lead_car.get("img_y2", 0) * sy),
+                    "id": lead_car.get("track_id", -1),
+                    "threat": lead_car.get("threat", False),
+                })
             _perspective_overlay_data = {
                 "width": im_debug.shape[1],
                 "height": im_debug.shape[0],
