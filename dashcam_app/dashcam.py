@@ -371,17 +371,21 @@ def _bev_detect_lanes(ll_mask, cam_shape=None):
             x1 = max(0, int(cx) - win_w // 2)
             x2 = min(w, int(cx) + win_w // 2)
             strip = bev_mask[y1:y2, x1:x2]
-            col_sums = np.sum(strip, axis=0)
-            if np.max(col_sums) == 0:
+            col_sums = np.sum(strip, axis=0).astype(np.float32)
+            total = np.sum(col_sums)
+            if total == 0:
                 wins.append((x1, y1, x2, y2, None, None))
                 break
-            best_col = np.argmax(col_sums)
-            mx = x1 + float(best_col)
+            cols = np.arange(len(col_sums), dtype=np.float32)
+            x_centroid = np.sum(cols * col_sums) / total
+            mx = x1 + x_centroid
             if abs(mx - cx) > win_w * 0.6:
                 wins.append((x1, y1, x2, y2, None, None))
                 break
-            ys_win, _ = np.where(strip > 0)
-            my = y1 + float(np.mean(ys_win))
+            row_sums = np.sum(strip, axis=1).astype(np.float32)
+            rows = np.arange(len(row_sums), dtype=np.float32)
+            y_centroid = np.sum(rows * row_sums) / np.sum(row_sums)
+            my = y1 + y_centroid
             wins.append((x1, y1, x2, y2, mx, my))
             pts.append([mx, my])
             cx = mx
@@ -850,6 +854,11 @@ def inference_loop():
     _left_stale = 0
     _right_stale = 0
 
+    _temporal_left_bx = None
+    _temporal_right_bx = None
+    _temporal_left_age = 0
+    _temporal_right_age = 0
+
     print("[INFO] Loading YOLOPv2 model...", flush=True)
     trt_engine = os.environ.get("YOLOP_TRT_ENGINE")
     detector = YolopDetector(model_path="data/weights/yolopv2.pt",
@@ -963,25 +972,70 @@ def inference_loop():
                     h_bev = BEV_DISPLAY_HEIGHT
                     car_center_bev = w_bev // 2
 
-                    left_lane = None
-                    right_lane = None
-                    left_best = float('inf')
-                    right_best = float('inf')
+                    MAX_LANE_JUMP = 30.0
+                    MAX_LANE_AGE = 10
+                    cand_list = []
                     for pts in lanes_bev:
                         if len(pts) < 3:
                             continue
                         bot = pts[np.argmax(pts[:, 1])]
-                        bx = bot[0]
-                        if bx < car_center_bev:
-                            d = car_center_bev - bx
-                            if d < left_best:
-                                left_best = d
-                                left_lane = pts
+                        bx = float(bot[0])
+                        cand_list.append({"pts": pts, "bx": bx})
+
+                    left_cand = None
+                    right_cand = None
+
+                    if _temporal_left_bx is not None:
+                        for c in cand_list:
+                            d = abs(c["bx"] - _temporal_left_bx)
+                            if d < MAX_LANE_JUMP and (left_cand is None or d < abs(left_cand["bx"] - _temporal_left_bx)):
+                                left_cand = c
+                    if _temporal_right_bx is not None:
+                        for c in cand_list:
+                            d = abs(c["bx"] - _temporal_right_bx)
+                            if d < MAX_LANE_JUMP and (right_cand is None or d < abs(right_cand["bx"] - _temporal_right_bx)):
+                                right_cand = c
+
+                    if left_cand is not None and right_cand is not None and left_cand is right_cand:
+                        dl = abs(left_cand["bx"] - (_temporal_left_bx or 0))
+                        dr = abs(right_cand["bx"] - (_temporal_right_bx or 0))
+                        if dl <= dr:
+                            right_cand = None
                         else:
-                            d = bx - car_center_bev
-                            if d < right_best:
-                                right_best = d
-                                right_lane = pts
+                            left_cand = None
+
+                    if left_cand is None:
+                        for c in cand_list:
+                            if c is right_cand:
+                                continue
+                            if c["bx"] < car_center_bev and (left_cand is None or
+                                (car_center_bev - c["bx"]) < (car_center_bev - left_cand["bx"])):
+                                left_cand = c
+                    if right_cand is None:
+                        for c in cand_list:
+                            if c is left_cand:
+                                continue
+                            if c["bx"] >= car_center_bev and (right_cand is None or
+                                (c["bx"] - car_center_bev) < (right_cand["bx"] - car_center_bev)):
+                                right_cand = c
+
+                    left_lane = left_cand["pts"] if left_cand else None
+                    right_lane = right_cand["pts"] if right_cand else None
+
+                    if left_lane is not None:
+                        _temporal_left_bx = float(left_lane[np.argmax(left_lane[:, 1]), 0])
+                        _temporal_left_age = 0
+                    else:
+                        _temporal_left_age += 1
+                        if _temporal_left_age > MAX_LANE_AGE:
+                            _temporal_left_bx = None
+                    if right_lane is not None:
+                        _temporal_right_bx = float(right_lane[np.argmax(right_lane[:, 1]), 0])
+                        _temporal_right_age = 0
+                    else:
+                        _temporal_right_age += 1
+                        if _temporal_right_age > MAX_LANE_AGE:
+                            _temporal_right_bx = None
 
                     for lane, label in [(left_lane, 'left'), (right_lane, 'right')]:
                         if lane is not None and len(lane) >= 4:
