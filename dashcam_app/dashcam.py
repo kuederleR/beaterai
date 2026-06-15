@@ -302,6 +302,70 @@ def _fallback_fit_lanes(left_edge, right_edge, car_center_x):
     return left, right
 
 
+def _bev_px_to_road(pts_bev, w, h):
+    if len(pts_bev) == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    x = (pts_bev[:, 0] / w - 0.5) * 2 * BEV_X_RANGE[1]
+    y = (1.0 - pts_bev[:, 1] / h) * BEV_Y_RANGE[1]
+    return np.column_stack([x, y])
+
+
+def _bev_detect_lanes(ll_mask):
+    global _bev_warp_M
+    if _bev_warp_M is None:
+        return []
+
+    w = BEV_DISPLAY_WIDTH
+    h = BEV_DISPLAY_HEIGHT
+
+    bev_mask = cv2.warpPerspective(
+        (ll_mask * 255).astype(np.uint8), _bev_warp_M, (w, h),
+        flags=cv2.INTER_NEAREST,
+    )
+    _, bev_mask = cv2.threshold(bev_mask, 127, 1, cv2.THRESH_BINARY)
+
+    hist = np.sum(bev_mask[h // 2:, :], axis=0).astype(np.float32)
+    kernel = np.ones(5, dtype=np.float32) / 5
+    hist_smooth = np.convolve(hist, kernel, mode='same')
+
+    thresh = max(np.max(hist_smooth) * 0.25, 3.0)
+    min_dist = 15
+
+    peaks = []
+    for i in range(1, w - 1):
+        if hist_smooth[i] > thresh and hist_smooth[i] > hist_smooth[i - 1] and hist_smooth[i] > hist_smooth[i + 1]:
+            if all(abs(i - p) >= min_dist for p in peaks):
+                peaks.append(i)
+    peaks.sort()
+
+    win_w = 30
+    win_h = 20
+    y_step = 8
+    y_start = h - 1
+
+    lanes = []
+    for bx in peaks:
+        pts = []
+        cx = float(bx)
+        for y in range(y_start, h // 2 - 1, -y_step):
+            y1 = max(0, y - win_h // 2)
+            y2 = min(h, y + win_h // 2)
+            x1 = max(0, int(cx) - win_w // 2)
+            x2 = min(w, int(cx) + win_w // 2)
+            strip = bev_mask[y1:y2, x1:x2]
+            ys, xs = np.where(strip > 0)
+            if len(xs) == 0:
+                break
+            mx = x1 + float(np.mean(xs))
+            my = y1 + float(np.mean(ys))
+            pts.append([mx, my])
+            cx = mx
+
+        if len(pts) >= 3:
+            lanes.append(np.array(pts, dtype=np.float32))
+
+    return lanes
+
 
 latest_web_frame = None
 latest_debug_frame = None
@@ -522,37 +586,43 @@ def render_bev_frame(lane_mask, detections, left_coeffs, right_coeffs,
                                    interpolation=cv2.INTER_NEAREST)
             im_bev[mask_disp > 0] = (40, 60, 40)
 
-        if left_coeffs is not None and right_coeffs is not None:
-            eval_y = np.arange(1.0, BEV_RENDER_METERS, 1.0, dtype=np.float32)
-            left_x = np.polyval(left_coeffs, eval_y)
-            right_x = np.polyval(right_coeffs, eval_y)
+    if left_coeffs is not None and right_coeffs is not None:
+        eval_y = np.arange(1.0, BEV_RENDER_METERS, 1.0, dtype=np.float32)
+        left_x = np.polyval(left_coeffs, eval_y)
+        right_x = np.polyval(right_coeffs, eval_y)
 
-            def road_to_bev_px(rx, ry):
-                u = int((rx / (2 * BEV_X_RANGE[1]) + 0.5) * w)
-                v = int((1.0 - ry / BEV_Y_RANGE[1]) * h)
-                return u, v
+        def road_to_bev_px(rx, ry):
+            u = int((rx / (2 * BEV_X_RANGE[1]) + 0.5) * w)
+            v = int((1.0 - ry / BEV_Y_RANGE[1]) * h)
+            return u, v
 
-            left_pts = []
-            right_pts = []
-            for ry, rx in zip(eval_y, left_x):
-                u, v = road_to_bev_px(rx, ry)
-                if 0 <= u < w and 0 <= v < h:
-                    left_pts.append([u, v])
-            for ry, rx in zip(eval_y, right_x):
-                u, v = road_to_bev_px(rx, ry)
-                if 0 <= u < w and 0 <= v < h:
-                    right_pts.append([u, v])
+        left_pts = []
+        right_pts = []
+        for ry, rx in zip(eval_y, left_x):
+            u, v = road_to_bev_px(rx, ry)
+            if 0 <= u < w and 0 <= v < h:
+                left_pts.append([u, v])
+        for ry, rx in zip(eval_y, right_x):
+            u, v = road_to_bev_px(rx, ry)
+            if 0 <= u < w and 0 <= v < h:
+                right_pts.append([u, v])
 
-            if len(left_pts) >= 2 and len(right_pts) >= 2:
-                left_arr = np.array(left_pts, dtype=np.int32)
-                right_arr = np.array(right_pts, dtype=np.int32)
-                poly = np.vstack((left_arr, right_arr[::-1]))
-                overlay = im_bev.copy()
-                cv2.fillPoly(overlay, [poly], (120, 60, 30))
-                cv2.addWeighted(overlay, 0.4, im_bev, 0.6, 0, dst=im_bev)
-                cv2.polylines(im_bev, [left_arr], False, (220, 220, 220), 2, cv2.LINE_AA)
-                cv2.polylines(im_bev, [right_arr], False, (220, 220, 220), 2, cv2.LINE_AA)
+        if draw_lanes and len(left_pts) >= 2 and len(right_pts) >= 2:
+            left_arr = np.array(left_pts, dtype=np.int32)
+            right_arr = np.array(right_pts, dtype=np.int32)
+            poly = np.vstack((left_arr, right_arr[::-1]))
+            overlay = im_bev.copy()
+            cv2.fillPoly(overlay, [poly], (120, 60, 30))
+            cv2.addWeighted(overlay, 0.4, im_bev, 0.6, 0, dst=im_bev)
 
+        if len(left_pts) >= 2:
+            cv2.polylines(im_bev, [np.array(left_pts, dtype=np.int32)],
+                          False, (220, 220, 220), 2, cv2.LINE_AA)
+        if len(right_pts) >= 2:
+            cv2.polylines(im_bev, [np.array(right_pts, dtype=np.int32)],
+                          False, (220, 220, 220), 2, cv2.LINE_AA)
+
+    if draw_lanes:
         car_u = int(((compensated_x / (2 * BEV_X_RANGE[1])) + 0.5) * w)
         car_v = int(h * (1.0 - 2.0 / BEV_Y_RANGE[1]))
         cv2.line(im_bev, (car_u, 0), (car_u, h - 1), (100, 100, 100), 1)
@@ -737,15 +807,64 @@ def inference_loop():
 
                 _t_lane = time.perf_counter()
                 car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
-                left_coeffs, right_coeffs = _fallback_fit_lanes(left_lane_pts, right_lane_pts, car_center_x)
-                if left_coeffs is not None and right_coeffs is not None:
-                    y_eval = 5.0
-                    lx = np.polyval(left_coeffs, y_eval)
-                    rx = np.polyval(right_coeffs, y_eval)
-                    lw = rx - lx
-                    if lw > 0.5:
-                        lane_width = lw
-                        lane_position = float(np.clip((0.0 - lx) / lw, 0.0, 1.0))
+
+                if _bev_warp_M is not None and ll_mask is not None:
+                    lanes_bev = _bev_detect_lanes(ll_mask)
+                    w_bev = BEV_DISPLAY_WIDTH
+                    h_bev = BEV_DISPLAY_HEIGHT
+                    car_center_bev = w_bev // 2
+
+                    left_lane = None
+                    right_lane = None
+                    left_best = float('inf')
+                    right_best = float('inf')
+                    for pts in lanes_bev:
+                        if len(pts) < 3:
+                            continue
+                        bot = pts[np.argmax(pts[:, 1])]
+                        bx = bot[0]
+                        if bx < car_center_bev:
+                            d = car_center_bev - bx
+                            if d < left_best:
+                                left_best = d
+                                left_lane = pts
+                        else:
+                            d = bx - car_center_bev
+                            if d < right_best:
+                                right_best = d
+                                right_lane = pts
+
+                    for lane, label in [(left_lane, 'left'), (right_lane, 'right')]:
+                        if lane is not None and len(lane) >= 4:
+                            road = _bev_px_to_road(lane, w_bev, h_bev)
+                            valid = ~np.isnan(road[:, 0]) & ~np.isnan(road[:, 1])
+                            road = road[valid]
+                            if len(road) >= 4:
+                                poly = np.polyfit(road[:, 1], road[:, 0], 2)
+                                if label == 'left':
+                                    left_coeffs = poly
+                                else:
+                                    right_coeffs = poly
+
+                    if left_coeffs is not None and right_coeffs is not None:
+                        y_eval = 5.0
+                        lx = np.polyval(left_coeffs, y_eval)
+                        rx = np.polyval(right_coeffs, y_eval)
+                        lw = rx - lx
+                        if lw > 0.5:
+                            lane_width = lw
+                            lane_position = float(np.clip((0.0 - lx) / lw, 0.0, 1.0))
+                else:
+                    left_coeffs, right_coeffs = _fallback_fit_lanes(left_lane_pts, right_lane_pts, car_center_x)
+                    if left_coeffs is not None and right_coeffs is not None:
+                        y_eval = 5.0
+                        lx = np.polyval(left_coeffs, y_eval)
+                        rx = np.polyval(right_coeffs, y_eval)
+                        lw = rx - lx
+                        if lw > 0.5:
+                            lane_width = lw
+                            lane_position = float(np.clip((0.0 - lx) / lw, 0.0, 1.0))
+
                 result = {
                     "left_coeffs": left_coeffs, "right_coeffs": right_coeffs,
                     "lane_position": lane_position, "lane_width": lane_width,
