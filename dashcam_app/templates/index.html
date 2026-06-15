@@ -429,7 +429,6 @@
                 <div id="fpsDisplay">FPS: --</div>
                 <div id="centerDisplay">Car Center X: --</div>
                 <div id="lanePosDisplay">Lane Pos: --</div>
-                <div id="speedDisplay">Speed: --</div>
                 <div id="segClassesDisplay" style="color: #6ee7b7;">Seg Classes: --</div>
                 <div id="durationDisplay" style="display:none; color: #fca5a5;">REC: 00:00</div>
             </div>
@@ -1005,12 +1004,6 @@
                 } else {
                     calibrateLdwRightBtn.style.opacity = '1';
                     calibrateLdwRightLabel.innerText = data.ldw_calibrated_right ? 'Recalibrate Right' : 'Calibrate Right Edge';
-                }
-
-                // Update Speed display
-                const speedDisplay = document.getElementById('speedDisplay');
-                if (speedDisplay && data.moving !== undefined) {
-                    speedDisplay.innerText = data.moving ? 'Speed: MOVING' : 'Speed: STOP';
                 }
 
                 // Audio beep on spectrum using severity

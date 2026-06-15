@@ -396,13 +396,6 @@ def _bev_detect_lanes(ll_mask, cam_shape=None):
             "y_start": y_start,
         })
 
-    if peaks:
-        tracked_count = sum(1 for a in all_attempts if a["tracked"])
-        print(f"[LANE] {len(peaks)} peaks, {tracked_count} lanes tracked "
-              f"y_starts={[a['y_start'] for a in all_attempts]}", flush=True)
-    else:
-        print(f"[LANE] No peaks (thresh={thresh:.0f}, max_hist={np.max(hist_smooth):.0f})", flush=True)
-
     return lanes, {
         "bev_mask": bev_mask,
         "peaks": peaks,
@@ -752,80 +745,6 @@ def build_lane_overlay_payload(left_coeffs, right_coeffs,
         "lane_position": lane_position if lane_position is not None else 0.5,
         "lane_width": lane_width if lane_width is not None else 0.0,
     }
-
-
-def _draw_path_ribbon(im, left_coeffs, right_coeffs, lane_width, im_bev=None, bev_only=False):
-    if left_coeffs is None or right_coeffs is None or lane_width < 1.0:
-        print(f"[RIBBON] skip: left={left_coeffs is not None} right={right_coeffs is not None} "
-              f"lw={lane_width:.2f}", flush=True)
-        return
-    global _bev_warp_M
-    if _bev_warp_M is None:
-        print("[RIBBON] skip: no _bev_warp_M", flush=True)
-        return
-
-    h_im, w_im = im.shape[:2]
-    ref_w = CAPTURE_WIDTH
-    ref_h = CAPTURE_HEIGHT
-    sx = w_im / ref_w
-    sy = h_im / ref_h
-    S = np.array([[sx, 0, 0], [0, sy, 0], [0, 0, 1]], dtype=np.float64)
-    M_inv = S @ np.linalg.inv(_bev_warp_M)
-
-    bw = BEV_DISPLAY_WIDTH
-    bh = BEV_DISPLAY_HEIGHT
-    xr = BEV_X_RANGE[1]
-    yr = BEV_Y_RANGE[1]
-
-    y_vals = np.arange(1.0, 14.0, 0.5, dtype=np.float32)
-    left_x = np.polyval(left_coeffs, y_vals)
-    right_x = np.polyval(right_coeffs, y_vals)
-    center_x = (left_x + right_x) / 2.0
-    half_w = max(lane_width / 4.0, 0.5)
-
-    def _road_to_bev_px(rx, ry):
-        u = ((rx / (2 * xr) + 0.5) * bw).astype(np.float32)
-        v = ((1.0 - ry / yr) * bh).astype(np.float32)
-        return np.column_stack([u, v])
-
-    pts_left_bev = _road_to_bev_px(center_x - half_w, y_vals)
-    pts_right_bev = _road_to_bev_px(center_x + half_w, y_vals[::-1])
-    pts_ribbon_bev = np.vstack([pts_left_bev, pts_right_bev]).astype(np.int32)
-
-    if im_bev is not None:
-        ov = im_bev.copy()
-        cv2.fillPoly(ov, [pts_ribbon_bev], (0, 180, 255))
-        cv2.addWeighted(ov, 0.5, im_bev, 0.5, 0, dst=im_bev)
-        pts_center_bev = _road_to_bev_px(center_x, y_vals).astype(np.int32)
-        cv2.polylines(im_bev, [pts_center_bev], False, (255, 255, 255), 2, cv2.LINE_AA)
-    if bev_only:
-        return
-
-    pts_ribbon = pts_ribbon_bev.reshape(1, -1, 2).astype(np.float32)
-    pts_cam = cv2.perspectiveTransform(pts_ribbon, M_inv).reshape(-1, 2).astype(np.int32)
-    pts_cam[:, 0] = np.clip(pts_cam[:, 0], 0, w_im - 1)
-    pts_cam[:, 1] = np.clip(pts_cam[:, 1], 0, h_im - 1)
-
-    if len(pts_cam) >= 3:
-        x_min, y_min = pts_cam.min(axis=0)
-        x_max, y_max = pts_cam.max(axis=0)
-        print(f"[RIBBON] poly pts={len(pts_cam)} bbox=({x_min},{y_min})-({x_max},{y_max}) "
-              f"in ({w_im}x{h_im})", flush=True)
-
-        overlay = im.copy()
-        cv2.fillPoly(overlay, [pts_cam], (0, 180, 255))
-        cv2.addWeighted(overlay, 0.65, im, 0.35, 0, dst=im)
-        cv2.polylines(im, [pts_cam], True, (0, 255, 255), 2, cv2.LINE_AA)
-        for pt in pts_cam[::4]:
-            cv2.circle(im, tuple(pt), 4, (0, 255, 0), -1)
-        cv2.putText(im, "PATH", (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 180, 255), 3)
-    else:
-        print(f"[RIBBON] fail: only {len(pts_cam)} cam pts from {len(y_vals)} road pts", flush=True)
-
-    pts_center = _road_to_bev_px(center_x, y_vals).reshape(1, -1, 2)
-    pts_cen_cam = cv2.perspectiveTransform(pts_center, M_inv).reshape(-1, 2).astype(np.int32)
-    if len(pts_cen_cam) >= 2:
-        cv2.polylines(im, [pts_cen_cam], False, (255, 255, 255), 3, cv2.LINE_AA)
 
 
 def _draw_raw_lanes_perspective(im, raw_lanes, bev_warp_M):
@@ -1274,17 +1193,8 @@ def inference_loop():
                             else:
                                 _expected_width_px = new_width
 
-                    # Reset intersection hold when any lane is detected
                     if left_lane is not None or right_lane is not None:
-                        if _intersection_hold > 0:
-                            print(f"[INTERSECTION] resumed normal tracking after {_intersection_hold} frames", flush=True)
                         _intersection_hold = 0
-
-                    if left_lane is not None or right_lane is not None:
-                        le = f"L={_expected_left_bx or 0:.0f}({_expected_left_missed})" if _expected_left_bx is not None else "L=init"
-                        re = f"R={_expected_right_bx or 0:.0f}({_expected_right_missed})" if _expected_right_bx is not None else "R=init"
-                        w = f"W={_expected_width_px or 0:.0f}" if _expected_width_px is not None else "W=?"
-                        print(f"[LANE] {le} {re} {w}", flush=True)
 
                     for lane, label in [(left_lane, 'left'), (right_lane, 'right')]:
                         if lane is not None and len(lane) >= 4:
@@ -1309,12 +1219,10 @@ def inference_loop():
                         rw = _expected_width_px * (2 * BEV_X_RANGE[1]) / BEV_DISPLAY_WIDTH
                         left_coeffs = right_coeffs.copy()
                         left_coeffs[2] = right_coeffs[2] - rw
-                        print(f"[PREDICT] left from right w={_expected_width_px:.0f}px={rw:.1f}m", flush=True)
                     if right_coeffs is None and left_coeffs is not None and _expected_width_px is not None:
                         rw = _expected_width_px * (2 * BEV_X_RANGE[1]) / BEV_DISPLAY_WIDTH
                         right_coeffs = left_coeffs.copy()
                         right_coeffs[2] = left_coeffs[2] + rw
-                        print(f"[PREDICT] right from left w={_expected_width_px:.0f}px={rw:.1f}m", flush=True)
 
                     # Intersection hold: when both lanes are lost and expected positions exist,
                     # project straight lanes from the expected positions
@@ -1337,8 +1245,6 @@ def inference_loop():
                             if np.sum(rv) >= 4:
                                 right_coeffs = np.polyfit(rr[rv, 1], rr[rv, 0], 2)
                             _intersection_hold += 1
-                            if left_coeffs is not None and right_coeffs is not None:
-                                print(f"[INTERSECTION] synthetic straight lanes active ({_intersection_hold})", flush=True)
 
                     if left_coeffs is not None and right_coeffs is not None:
                         y_eval = 5.0
@@ -1502,8 +1408,6 @@ def inference_loop():
                     (BEV_DISPLAY_WIDTH, BEV_DISPLAY_HEIGHT),
                     flags=cv2.INTER_LINEAR,
                 )
-                # BEV ribbon first → underneath lane lines
-                _draw_path_ribbon(im_debug, left_coeffs, right_coeffs, lane_width, im_bev=im_bev, bev_only=True)
                 im_bev = render_bev_frame(
                     lane_mask, detections,
                     left_coeffs, right_coeffs,
@@ -1519,14 +1423,7 @@ def inference_loop():
                     compensated_x, lane_position, lane_width,
                     fcw_triggered, left_severity, right_severity,
                 )
-                _draw_path_ribbon(im_debug, left_coeffs, right_coeffs, lane_width, im_bev=im_bev, bev_only=True)
-
-            _draw_path_ribbon(im_debug, left_coeffs, right_coeffs, lane_width)
-            _draw_filtered_lanes_perspective(im_debug, left_coeffs, right_coeffs, left_severity, right_severity)
-
-            cv2.putText(im_debug, "MOVING" if motion.is_moving() else "STOP",
-                        (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
-                        1.0, (0, 255, 255), 2, cv2.LINE_AA)
+                _draw_filtered_lanes_perspective(im_debug, left_coeffs, right_coeffs, left_severity, right_severity)
 
             state["moving"] = motion.is_moving()
             state["left_severity"] = left_severity
