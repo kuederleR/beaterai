@@ -313,7 +313,7 @@ def _bev_px_to_road(pts_bev, w, h):
 def _bev_detect_lanes(ll_mask, cam_shape=None):
     global _bev_warp_M
     if _bev_warp_M is None:
-        return []
+        return [], None
 
     w = BEV_DISPLAY_WIDTH
     h = BEV_DISPLAY_HEIGHT
@@ -348,12 +348,22 @@ def _bev_detect_lanes(ll_mask, cam_shape=None):
     win_w = 30
     win_h = 20
     y_step = 8
-    y_start = h - 1
 
     lanes = []
+    all_attempts = []
     for bx in peaks:
         pts = []
         cx = float(bx)
+        x1_base = max(0, int(cx) - win_w // 2)
+        x2_base = min(w, int(cx) + win_w // 2)
+
+        y_start = h - 1
+        for yr in range(h - 1, h // 2 - 1, -1):
+            if np.any(bev_mask[yr, x1_base:x2_base] > 0):
+                y_start = yr
+                break
+
+        wins = []
         for y in range(y_start, h // 2 - 1, -y_step):
             y1 = max(0, y - win_h // 2)
             y2 = min(h, y + win_h // 2)
@@ -362,21 +372,35 @@ def _bev_detect_lanes(ll_mask, cam_shape=None):
             strip = bev_mask[y1:y2, x1:x2]
             ys, xs = np.where(strip > 0)
             if len(xs) == 0:
+                wins.append((x1, y1, x2, y2, None, None))
                 break
             mx = x1 + float(np.mean(xs))
             my = y1 + float(np.mean(ys))
+            wins.append((x1, y1, x2, y2, mx, my))
             pts.append([mx, my])
             cx = mx
 
-        if len(pts) >= 3:
+        tracked = len(pts) >= 3
+        if tracked:
             lanes.append(np.array(pts, dtype=np.float32))
+        all_attempts.append({
+            "peak": bx, "windows": wins,
+            "lane_pts": pts, "tracked": tracked,
+            "y_start": y_start,
+        })
 
     if peaks:
-        print(f"[LANE] {len(peaks)} peaks, {len(lanes)} lanes tracked", flush=True)
+        tracked_count = sum(1 for a in all_attempts if a["tracked"])
+        print(f"[LANE] {len(peaks)} peaks, {tracked_count} lanes tracked "
+              f"y_starts={[a['y_start'] for a in all_attempts]}", flush=True)
     else:
         print(f"[LANE] No peaks (thresh={thresh:.0f}, max_hist={np.max(hist_smooth):.0f})", flush=True)
 
-    return lanes
+    return lanes, {
+        "bev_mask": bev_mask,
+        "peaks": peaks,
+        "attempts": all_attempts,
+    }
 
 
 latest_web_frame = None
@@ -576,13 +600,29 @@ class StepTimer:
 def render_bev_frame(lane_mask, detections, left_coeffs, right_coeffs,
                      compensated_x, lane_position, lane_width,
                      fcw_warning, left_sev, right_sev,
-                     bg_img=None):
+                     bg_img=None, bev_debug=None):
     w = BEV_DISPLAY_WIDTH
     h = BEV_DISPLAY_HEIGHT
 
     if bg_img is not None:
         im_bev = cv2.resize(bg_img, (w, h), interpolation=cv2.INTER_LINEAR)
         draw_lanes = False
+        if bev_debug is not None:
+            mask = bev_debug["bev_mask"]
+            green = np.zeros_like(im_bev, dtype=np.uint8)
+            green[mask > 0] = (0, 180, 0)
+            cv2.addWeighted(green, 0.2, im_bev, 0.8, 0, dst=im_bev)
+            for bx in bev_debug["peaks"]:
+                cv2.line(im_bev, (bx, 0), (bx, h - 1), (100, 100, 255), 1)
+            for attempt in bev_debug["attempts"]:
+                color = (0, 255, 255) if attempt["tracked"] else (0, 100, 255)
+                for x1, y1, x2, y2, mx, my in attempt["windows"]:
+                    cv2.rectangle(im_bev, (x1, y1), (x2, y2), color, 1)
+                    if mx is not None:
+                        cv2.circle(im_bev, (int(mx), int(my)), 2, (0, 255, 0), -1)
+                if attempt["tracked"] and len(attempt["lane_pts"]) >= 2:
+                    pts_arr = np.array(attempt["lane_pts"], dtype=np.int32)
+                    cv2.polylines(im_bev, [pts_arr], False, (0, 255, 255), 2)
     else:
         im_bev = np.zeros((h, w, 3), dtype=np.uint8)
         draw_lanes = True
@@ -758,6 +798,7 @@ def inference_loop():
             right_severity = 0.0
             fcw_overlay_boxes = []
             compensated_x = 0.0
+            bev_debug = None
 
             if state["adas_enabled"]:
                 _t_inf = time.perf_counter()
@@ -822,7 +863,7 @@ def inference_loop():
                 car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
 
                 if _bev_warp_M is not None and ll_mask is not None:
-                    lanes_bev = _bev_detect_lanes(ll_mask, cam_shape=im0.shape[:2])
+                    lanes_bev, bev_debug = _bev_detect_lanes(ll_mask, cam_shape=im0.shape[:2])
                     w_bev = BEV_DISPLAY_WIDTH
                     h_bev = BEV_DISPLAY_HEIGHT
                     car_center_bev = w_bev // 2
@@ -947,7 +988,7 @@ def inference_loop():
                     left_coeffs, right_coeffs,
                     compensated_x, lane_position, lane_width,
                     fcw_triggered, left_severity, right_severity,
-                    bg_img=im_bev,
+                    bg_img=im_bev, bev_debug=bev_debug,
                 )
             else:
                 im_bev = render_bev_frame(
