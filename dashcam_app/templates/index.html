@@ -1228,6 +1228,7 @@
                 canvas._imgH = img.height;
                 canvas._scale = scale;
                 ctx.drawImage(img, 0, 0, dispW, dispH);
+                canvas._bgImg = img;
                 bevCalRedrawSrc(canvas, ctx);
                 URL.revokeObjectURL(url);
             };
@@ -1241,7 +1242,11 @@
         function bevCalRedrawSrc(canvas, ctx) {
             const pts = bevCal.srcPoints;
             const s = canvas._scale || 1;
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (canvas._bgImg) {
+                ctx.drawImage(canvas._bgImg, 0, 0, canvas.width, canvas.height);
+            } else {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }
 
             // Draw connected lines
             if (pts.length >= 2) {
