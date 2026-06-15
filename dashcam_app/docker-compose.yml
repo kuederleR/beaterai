@@ -30,8 +30,8 @@ services:
       - ./models:/app/models
       - ./templates:/app/templates
       - jetson-networks:/usr/local/bin/networks
-    # devices:
-    #   - /dev/video0:/dev/video0
+    devices:
+      - /dev/video0:/dev/video0
     restart: unless-stopped
 
 volumes:

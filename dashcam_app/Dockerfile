@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
     python3-opencv \
+    v4l-utils \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
