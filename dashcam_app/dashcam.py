@@ -495,12 +495,13 @@ def make_error_frame(message):
 
 class _AdaptiveExposure:
     """Closed-loop exposure control for UVC cameras via v4l2-ctl.
-    Switches to manual mode and adjusts exposure_time_absolute + gain
-    based on road-region luminance. Throttled to ~10 updates/sec.
-    No-ops silently on non-Linux (where v4l2-ctl is absent).
+    Uses a PI controller on road-region luminance to adjust
+    exposure_time_absolute + gain. Disables backlight compensation
+    (which causes overexposure on bright scenes).
+    Throttled to ~10 updates/sec. No-ops silently on non-Linux.
     """
     def __init__(self, dev_path="/dev/video0",
-                 target_luminance=100,
+                 target_luminance=85,
                  exp_min=5, exp_max=5000,
                  gain_min=0, gain_max=100):
         self._dev = dev_path
@@ -508,10 +509,14 @@ class _AdaptiveExposure:
         self._exp_min, self._exp_max = exp_min, exp_max
         self._gain_min, self._gain_max = gain_min, gain_max
 
-        self._exposure = 200
+        self._exposure = 80
         self._gain = 0
-        self._smooth_lum = None
-        self._alpha = 0.15
+        self._lum_ema = None
+        self._alpha = 0.08
+        self._i_term = 0.0
+        self._kp = 4.0
+        self._ki = 0.3
+        self._i_max = 250.0
         self._frame_count = 0
         self._available = True
 
@@ -523,9 +528,8 @@ class _AdaptiveExposure:
             )
             if r.returncode != 0:
                 err = r.stderr.decode().strip()
-                if err:
-                    print(f"[EXPOSURE] v4l2-ctl {control}={value} failed: {err}", flush=True)
-                    self._available = False
+                print(f"[EXPOSURE] v4l2-ctl {control}={value} failed: {err}", flush=True)
+                self._available = False
         except FileNotFoundError:
             print("[EXPOSURE] v4l2-ctl not found — disabling adaptive exposure", flush=True)
             self._available = False
@@ -536,6 +540,7 @@ class _AdaptiveExposure:
         if not self._available:
             return
         self._ctl("auto_exposure", 1)
+        self._ctl("backlight_compensation", 0)
         self._ctl("exposure_time_absolute", self._exposure)
         self._ctl("gain", self._gain)
 
@@ -549,15 +554,21 @@ class _AdaptiveExposure:
         roi = frame[int(h * 0.55):int(h * 0.95), :]
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         lum = float(gray.mean())
-        if self._smooth_lum is None:
-            self._smooth_lum = lum
-        self._smooth_lum += self._alpha * (lum - self._smooth_lum)
-        # error = target - smooth_lum  (negative = too bright, positive = too dark)
-        error = self._target - self._smooth_lum
+        if self._lum_ema is None:
+            self._lum_ema = lum
+        self._lum_ema += self._alpha * (lum - self._lum_ema)
+        # error = target - lum_ema  (negative = too bright, positive = too dark)
+        error = self._target - self._lum_ema
         if abs(error) < 3:
+            if abs(self._i_term) > 5:
+                self._i_term *= 0.95  # leaky integrator decay
+            else:
+                self._i_term = 0.0
             return
-        # Proportional with larger gain for fast correction
-        step = error * 8
+        # PI controller
+        self._i_term += error * self._ki
+        self._i_term = np.clip(self._i_term, -self._i_max, self._i_max)
+        step = error * self._kp + self._i_term
         new_exp = int(np.round(self._exposure + step))
         new_exp = np.clip(new_exp, self._exp_min, self._exp_max)
         if new_exp != self._exposure:
@@ -574,6 +585,9 @@ class _AdaptiveExposure:
             if new_gain != self._gain:
                 self._gain = new_gain
                 self._ctl("gain", self._gain)
+        if self._frame_count % 15 == 0:
+            print(f"[EXPOSURE] lum={lum:.0f} smoothed={self._lum_ema:.0f} "
+                  f"exp={self._exposure} gain={self._gain} i={self._i_term:.0f}", flush=True)
 
     def release(self):
         if not self._available:
