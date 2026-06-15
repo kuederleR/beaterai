@@ -791,9 +791,17 @@ def _draw_path_ribbon(im, left_coeffs, right_coeffs, lane_width):
     pts_cam[:, 1] = np.clip(pts_cam[:, 1], 0, h_im - 1)
 
     if len(pts_cam) >= 3:
+        x_min, y_min = pts_cam.min(axis=0)
+        x_max, y_max = pts_cam.max(axis=0)
+        print(f"[RIBBON] poly pts={len(pts_cam)} bbox=({x_min},{y_min})-({x_max},{y_max}) "
+              f"in ({w_im}x{h_im})", flush=True)
+
         overlay = im.copy()
         cv2.fillPoly(overlay, [pts_cam], (0, 180, 255))
-        cv2.addWeighted(overlay, 0.35, im, 0.65, 0, dst=im)
+        cv2.addWeighted(overlay, 0.65, im, 0.35, 0, dst=im)
+        cv2.polylines(im, [pts_cam], True, (0, 255, 255), 2, cv2.LINE_AA)
+        for pt in pts_cam[::4]:
+            cv2.circle(im, tuple(pt), 4, (0, 255, 0), -1)
         cv2.putText(im, "PATH", (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 180, 255), 3)
     else:
         print(f"[RIBBON] fail: only {len(pts_cam)} cam pts from {len(y_vals)} road pts", flush=True)
@@ -801,7 +809,7 @@ def _draw_path_ribbon(im, left_coeffs, right_coeffs, lane_width):
     pts_center = _road_to_bev_px(center_x, y_vals).reshape(1, -1, 2)
     pts_cen_cam = cv2.perspectiveTransform(pts_center, M_inv).reshape(-1, 2).astype(np.int32)
     if len(pts_cen_cam) >= 2:
-        cv2.polylines(im, [pts_cen_cam], False, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.polylines(im, [pts_cen_cam], False, (255, 255, 255), 3, cv2.LINE_AA)
 
 
 def _robust_polyfit(road_x, road_y, deg=2):
