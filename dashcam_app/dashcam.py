@@ -1195,10 +1195,27 @@ def _load_bev_calibration():
 _load_bev_calibration()
 
 
+def _watchdog_loop():
+    while True:
+        time.sleep(5.0)
+        now = time.time()
+        inf_time = state.get("last_frame_time", 0.0)
+        cap_time = state.get("capture_last_frame_time", 0.0)
+        if inf_time > 0 and now - inf_time > 8.0:
+            print(f"[WATCHDOG] Inference thread stalled for {now - inf_time:.0f}s "
+                  f"(capture last frame: {now - cap_time:.0f}s ago)", flush=True)
+        if cap_time > 0 and now - cap_time > 8.0:
+            print(f"[WATCHDOG] Capture thread stalled for {now - cap_time:.0f}s "
+                  f"(inference last frame: {now - inf_time:.0f}s ago)", flush=True)
+
+
 if __name__ == '__main__':
     print("=" * 60, flush=True)
     print("Edge ADAS — YOLOPv2 + homography lane projection", flush=True)
     print("=" * 60, flush=True)
+
+    t_watchdog = threading.Thread(target=_watchdog_loop, daemon=True)
+    t_watchdog.start()
 
     # Build TensorRT engine before starting anything else
     TRT_PRECISION = os.environ.get("TRT_PRECISION", "fp16")
