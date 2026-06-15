@@ -464,6 +464,9 @@
             </div>
         </div>
         <div style="padding: 0 16px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+            <button onclick="bevCalRefreshPreview()" class="record-btn" style="padding: 8px 20px; font-size: 13px;">
+                <span class="record-label">Refresh Preview</span>
+            </button>
             <button onclick="bevCalSave()" class="record-btn" style="padding: 8px 20px; font-size: 13px;">
                 <span class="record-label">Save Calibration</span>
             </button>
@@ -1407,7 +1410,7 @@
                 ctx.fillText(labels[i], px + 12, py + 4);
             }
 
-            document.getElementById('bevCalDstOverlay').innerText = 'Drag colored handles to adjust';
+            document.getElementById('bevCalDstOverlay').innerText = 'Drag handles, then click Refresh Preview';
         }
 
         // Drag handling for destination canvas
@@ -1452,13 +1455,13 @@
                     ctx.putImageData(canvas._imgData, 0, 0);
                 }
                 bevCalRedrawDst(canvas, ctx);
+                document.getElementById('bevCalDstOverlay').innerText = 'Drag done — click Refresh Preview to update warp';
             });
 
             document.addEventListener('mouseup', async function(e) {
                 if (isDragging && dragIdx >= 0) {
                     const pt = bevCal.dstPoints[dragIdx];
                     await bevCalSendDstPoint(dragIdx, pt.x, pt.y);
-                    await bevCalRefreshPreview(true);
                 }
                 isDragging = false;
                 dragIdx = -1;
