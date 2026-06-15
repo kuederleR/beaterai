@@ -561,7 +561,7 @@ class _V4L2Control:
         return result
 
     def set_scale(self, value):
-        self._scale = max(0.1, min(3.0, value))
+        self._scale = max(0.02, min(3.0, value))
 
     def apply(self, frame):
         """Apply software exposure compensation to a frame copy."""
