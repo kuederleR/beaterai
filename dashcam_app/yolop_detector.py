@@ -88,7 +88,7 @@ def scale_coords(img1_shape, coords, img0_shape):
 
 class TrtRunner:
     def __init__(self, engine_path):
-        logger = trt.Logger(trt.Logger.WARNING)
+        logger = trt.Logger(trt.Logger.ERROR)
         with open(engine_path, 'rb') as f:
             runtime = trt.Runtime(logger)
             self.engine = runtime.deserialize_cuda_engine(f.read())
@@ -237,7 +237,7 @@ class YolopDetector:
             ]
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             for line in proc.stdout:
-                print(f"[trtexec] {line.rstrip()}", flush=True)
+                pass
             proc.wait(timeout=600)
             if proc.returncode != 0:
                 raise RuntimeError(f"trtexec failed with code {proc.returncode}")
@@ -367,9 +367,9 @@ class YolopDetector:
                 if ll_nan > 0 or seg_nan > 0:
                     raise RuntimeError(f"TRT produced NaN (ll_nan={ll_nan}/{ll.numel()}, "
                                        f"seg_nan={seg_nan}/{seg.numel()})")
-                print(f"[TRT] {len(out)} outputs, seg={seg.shape} ll={ll.shape} "
-                      f"ll_range=[{ll.min().item():.4f}, {ll.max().item():.4f}] "
-                      f"ll_nan={ll_nan}", flush=True)
+                # print(f"[TRT] {len(out)} outputs, seg={seg.shape} ll={ll.shape} "
+                #       f"ll_range=[{ll.min().item():.4f}, {ll.max().item():.4f}] "
+                #       f"ll_nan={ll_nan}", flush=True)
                 if self._anchor_grid is not None:
                     anchor_grid = [ag.to(self.device) for ag in self._anchor_grid]
                 else:
@@ -398,8 +398,8 @@ class YolopDetector:
             pred = split_for_trace_model(pred, anchor_grid)
             t1 = time.perf_counter()
             # print(f"[TIMING] PyTorch path: {((t1 - t0) * 1000):.1f}ms", flush=True)
-            print(f"[PYTORCH] seg={seg.shape} ll={ll.shape} "
-                  f"ll_range=[{ll.min().item():.4f}, {ll.max().item():.4f}]", flush=True)
+            # print(f"[PYTORCH] seg={seg.shape} ll={ll.shape} "
+            #       f"ll_range=[{ll.min().item():.4f}, {ll.max().item():.4f}]", flush=True)
         pred = non_max_suppression(pred, conf_thres=0.3, iou_thres=0.45, classes=[2, 3, 4])
 
         det_boxes = []
