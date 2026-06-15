@@ -1089,6 +1089,20 @@ def inference_loop():
                                     else:
                                         right_coeffs = poly
 
+                    # Per-side prediction: when one lane is detected but the other is lost,
+                    # predict the missing lane from the detected lane + expected width.
+                    # This prevents jumping to a far lane when the correct lane is temporarily lost.
+                    if left_coeffs is None and right_coeffs is not None and _expected_width_px is not None:
+                        rw = _expected_width_px * (2 * BEV_X_RANGE[1]) / BEV_DISPLAY_WIDTH
+                        left_coeffs = right_coeffs.copy()
+                        left_coeffs[2] = right_coeffs[2] - rw
+                        print(f"[PREDICT] left from right w={_expected_width_px:.0f}px={rw:.1f}m", flush=True)
+                    if right_coeffs is None and left_coeffs is not None and _expected_width_px is not None:
+                        rw = _expected_width_px * (2 * BEV_X_RANGE[1]) / BEV_DISPLAY_WIDTH
+                        right_coeffs = left_coeffs.copy()
+                        right_coeffs[2] = left_coeffs[2] + rw
+                        print(f"[PREDICT] right from left w={_expected_width_px:.0f}px={rw:.1f}m", flush=True)
+
                     # Intersection hold: when both lanes are lost and expected positions exist,
                     # project straight lanes from the expected positions
                     if left_coeffs is None and right_coeffs is None:
