@@ -400,7 +400,7 @@ class YolopDetector:
             # print(f"[TIMING] PyTorch path: {((t1 - t0) * 1000):.1f}ms", flush=True)
             # print(f"[PYTORCH] seg={seg.shape} ll={ll.shape} "
             #       f"ll_range=[{ll.min().item():.4f}, {ll.max().item():.4f}]", flush=True)
-        pred = non_max_suppression(pred, conf_thres=0.3, iou_thres=0.45, classes=[2, 3, 4])
+        pred = non_max_suppression(pred, conf_thres=0.55, iou_thres=0.45, classes=[2, 3, 4])
 
         det_boxes = []
         if len(pred) > 0 and pred[0] is not None and len(pred[0]) > 0:
