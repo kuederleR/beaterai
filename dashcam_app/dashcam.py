@@ -871,64 +871,22 @@ def _robust_polyfit(road_x, road_y, deg=2):
     return np.polyfit(road_y[inliers], road_x[inliers], deg)
 
 
-class _MotionTracker:
-    CAL_TARGET_SAMPLES = 200
-
-    def __init__(self, cal_file="speed_calibration.json"):
+class _SimpleMotionDetector:
+    def __init__(self):
         self.prev_gray = None
         self.prev_pts = np.empty((0, 2), dtype=np.float32)
-        self.speed_mph = 0.0
-        self.cal_disp = None
-        self.ref_speed = 60.0
-        self.alpha = 0.15
-        self.cal_dir = os.path.dirname(os.path.abspath(__file__))
-        self.cal_file = os.path.join(self.cal_dir, cal_file)
-        self._load_cal()
-        self._calibrating = False
-        self._cal_samples = []
-        self._frame_count = 0
+        self._dy_mean = 0.0
+        self._mean_alpha = 0.08
+        self._moving = False
+        self._dy_value = 0.0
 
-    def _load_cal(self):
-        if os.path.exists(self.cal_file):
-            try:
-                with open(self.cal_file) as f:
-                    d = json.load(f)
-                    v = d.get("px_per_frame_at_60mph")
-                    if v is not None and v > 0:
-                        self.cal_disp = v
-                        print(f"[SPEED] loaded cal: {v:.2f} px/frame @60mph", flush=True)
-            except Exception:
-                pass
+    def is_moving(self):
+        return self._moving
 
-    def save_cal(self):
-        if self.cal_disp is not None and self.cal_disp > 0:
-            with open(self.cal_file, 'w') as f:
-                json.dump({"px_per_frame_at_60mph": self.cal_disp}, f)
-            print(f"[SPEED] saved cal: {self.cal_disp:.2f}", flush=True)
-
-    def start_cal(self):
-        self._calibrating = True
-        self._cal_samples = []
-        print("[SPEED] calibration started — drive at 60mph", flush=True)
-
-    def stop_cal(self):
-        self._calibrating = False
-        if len(self._cal_samples) > 10:
-            self.cal_disp = float(np.median(self._cal_samples))
-            self.save_cal()
-            print(f"[SPEED] cal done: median={self.cal_disp:.2f} px/frame ({len(self._cal_samples)} samples)", flush=True)
-            return self.cal_disp
-        print(f"[SPEED] cal aborted: {len(self._cal_samples)} samples (<11)", flush=True)
-        return None
-
-    def get_speed(self):
-        return self.speed_mph
-
-    def is_calibrated(self):
-        return self.cal_disp is not None and self.cal_disp > 0
+    def get_dy(self):
+        return self._dy_value
 
     def update(self, frame_gray):
-        self._frame_count += 1
         h, w = frame_gray.shape
         roi_y1, roi_y2 = int(h * 0.55), int(h * 0.85)
         roi_x1, roi_x2 = int(w * 0.25), int(w * 0.75)
@@ -960,15 +918,12 @@ class _MotionTracker:
                 gn = next_pts[good].reshape(-1, 2)
                 dy = np.abs(gn[:, 1] - gp[:, 1])
                 mdy = float(np.median(dy))
+                self._dy_value = mdy
 
-                if self.is_calibrated():
-                    raw = self.ref_speed * mdy / self.cal_disp
-                    self.speed_mph = self.alpha * raw + (1.0 - self.alpha) * self.speed_mph
+                self._dy_mean = self._mean_alpha * mdy + (1.0 - self._mean_alpha) * self._dy_mean
 
-                if self._calibrating:
-                    self._cal_samples.append(mdy)
-                    if len(self._cal_samples) >= self.CAL_TARGET_SAMPLES:
-                        self.stop_cal()
+                thresh = max(self._dy_mean * 0.3, 2.0)
+                self._moving = mdy > thresh
 
                 self.prev_pts = gn[:200].copy()
             else:
@@ -979,16 +934,7 @@ class _MotionTracker:
         self.prev_gray = frame_gray.copy()
 
 
-def _max_curvature_at_speed(speed_mph):
-    if speed_mph < 8.0:
-        return None
-    v = speed_mph * 0.44704
-    a_lat = 1.47
-    max_curv = a_lat / (v * v)
-    return max_curv / 2.0
-
-
-tracker = _MotionTracker()
+motion = _SimpleMotionDetector()
 
 
 def inference_loop():
@@ -1041,7 +987,7 @@ def inference_loop():
                 im_debug = im0.copy()
 
             gray = cv2.cvtColor(im0, cv2.COLOR_BGR2GRAY)
-            tracker.update(gray)
+            motion.update(gray)
 
             if DEBUG_SCALE != 1.0:
                 new_w = int(im_debug.shape[1] * DEBUG_SCALE)
@@ -1117,7 +1063,10 @@ def inference_loop():
                 _t_lane = time.perf_counter()
                 car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
 
-                max_a = _max_curvature_at_speed(tracker.get_speed())
+                if motion.is_moving():
+                    max_a = 0.003
+                else:
+                    max_a = None
 
                 if _bev_warp_M is not None and ll_mask is not None:
                     lanes_bev, bev_debug = _bev_detect_lanes(ll_mask, cam_shape=im0.shape[:2])
@@ -1308,8 +1257,8 @@ def inference_loop():
                         left_coeffs = None
                         right_coeffs = None
 
-                # EMA smoothing
-                alpha = 0.35
+                # EMA smoothing — slow adaptation when moving (hold lane trajectory)
+                alpha = 0.10 if motion.is_moving() else 0.35
                 if left_coeffs is not None:
                     if _left_smooth is None or len(_left_smooth) != len(left_coeffs):
                         _left_smooth = left_coeffs.copy()
@@ -1432,13 +1381,11 @@ def inference_loop():
 
             _draw_path_ribbon(im_debug, left_coeffs, right_coeffs, lane_width)
 
-            spd = tracker.get_speed()
-            cal_str = "C" if tracker.is_calibrated() else "U"
-            speed_text = f"{spd:.0f}mph({cal_str})" if spd > 0.5 else "STOP"
-            cv2.putText(im_debug, speed_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
+            cv2.putText(im_debug, "MOVING" if motion.is_moving() else "STOP",
+                        (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
                         1.0, (0, 255, 255), 2, cv2.LINE_AA)
 
-            state["speed_mph"] = spd
+            state["moving"] = motion.is_moving()
             state["lane_width"] = lane_width
             timer.track("bev_render", time.perf_counter() - _t_render)
 
@@ -1601,10 +1548,7 @@ def status():
         "ldw_calibrated_left": state["ldw_calibration"] is not None and "left_comfort_dist" in state["ldw_calibration"],
         "ldw_calibrated_right": state["ldw_calibration"] is not None and "right_comfort_dist" in state["ldw_calibration"],
         "car_center_x": state.get("car_center_x", 640),
-        "speed_mph": state.get("speed_mph", 0.0),
-        "speed_calibrated": tracker.is_calibrated(),
-        "speed_calibrating": tracker._calibrating,
-        "speed_cal_samples": len(tracker._cal_samples),
+        "moving": state.get("moving", False),
         "cuda_available": True,
         "gpu_device_name": "NVIDIA Jetson",
         "model": "YOLOPv2",
@@ -1658,29 +1602,6 @@ def api_calibrate_ldw_right():
     state["calibration_ldw_left_start_time"] = None
     state["error"] = None
     return jsonify({"status": "calibrating_right"})
-
-
-@app.route('/api/calibrate_speed/start', methods=['POST'])
-def api_calibrate_speed_start():
-    tracker.start_cal()
-    return jsonify({"status": "calibrating_speed"})
-
-
-@app.route('/api/calibrate_speed/stop', methods=['POST'])
-def api_calibrate_speed_stop():
-    val = tracker.stop_cal()
-    return jsonify({"status": "done" if val is not None else "aborted",
-                    "px_per_frame": val})
-
-
-@app.route('/api/calibrate_speed/state')
-def api_calibrate_speed_state():
-    return jsonify({
-        "calibrating": tracker._calibrating,
-        "samples": len(tracker._cal_samples),
-        "calibrated": tracker.is_calibrated(),
-        "speed_mph": round(tracker.get_speed(), 1),
-    })
 
 
 @app.route('/api/set_center_x', methods=['POST'])

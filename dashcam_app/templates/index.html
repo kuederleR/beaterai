@@ -421,7 +421,7 @@
                 <div id="fpsDisplay">FPS: --</div>
                 <div id="centerDisplay">Car Center X: --</div>
                 <div id="lanePosDisplay">Lane Pos: --</div>
-                <div id="speedDisplay">Speed: -- mph</div>
+                <div id="speedDisplay">Speed: --</div>
                 <div id="segClassesDisplay" style="color: #6ee7b7;">Seg Classes: --</div>
                 <div id="durationDisplay" style="display:none; color: #fca5a5;">REC: 00:00</div>
             </div>
@@ -533,18 +533,6 @@
             </button>
             <div style="font-size: 12px; color: var(--text-secondary); text-align: center; margin-top: 8px;">
                 Drive at right-most comfortable edge for 10s to learn right threshold.
-            </div>
-        </div>
-
-        <div class="control-card">
-            <button class="record-btn" id="speedCalBtn" onclick="toggleSpeedCal()">
-                <div class="record-icon" style="border-color: var(--accent-blue);">
-                    <div class="record-inner" style="background-color: var(--accent-blue); border-radius: 50%; transform: scale(0.5);"></div>
-                </div>
-                <span class="record-label" id="speedCalLabel">Calibrate Speed</span>
-            </button>
-            <div style="font-size: 12px; color: var(--text-secondary); text-align: center; margin-top: 8px;">
-                Drive at 60mph and click Start to calibrate pixel flow to speed.
             </div>
         </div>
 
@@ -1009,20 +997,10 @@
                     calibrateLdwRightLabel.innerText = data.ldw_calibrated_right ? 'Recalibrate Right' : 'Calibrate Right Edge';
                 }
 
-                // Update Speed display and calibration UI
+                // Update Speed display
                 const speedDisplay = document.getElementById('speedDisplay');
-                if (speedDisplay && data.speed_mph !== undefined) {
-                    const calMark = data.speed_calibrated ? 'C' : 'U';
-                    speedDisplay.innerText = `Speed: ${data.speed_mph.toFixed(1)}mph(${calMark})`;
-                }
-                const scLabel = document.getElementById('speedCalLabel');
-                const scBtn = document.getElementById('speedCalBtn');
-                if (data.speed_calibrating) {
-                    if (scLabel) scLabel.innerText = `Calibrating Speed (${data.speed_cal_samples} samples)`;
-                    if (scBtn) scBtn.style.opacity = '0.5';
-                } else {
-                    if (scBtn) scBtn.style.opacity = '1';
-                    if (scLabel) scLabel.innerText = data.speed_calibrated ? 'Recalibrate Speed' : 'Calibrate Speed';
+                if (speedDisplay && data.moving !== undefined) {
+                    speedDisplay.innerText = data.moving ? 'Speed: MOVING' : 'Speed: STOP';
                 }
 
             } catch (err) {
@@ -1087,20 +1065,6 @@
             } catch(e) {
                 isDebugFeedActive = !isDebugFeedActive;
                 checkbox.checked = isDebugFeedActive;
-            }
-        }
-
-        async function toggleSpeedCal() {
-            try {
-                const stateRes = await fetch('/api/calibrate_speed/state');
-                const stateData = await stateRes.json();
-                if (stateData.calibrating) {
-                    await fetch('/api/calibrate_speed/stop', { method: 'POST' });
-                } else {
-                    await fetch('/api/calibrate_speed/start', { method: 'POST' });
-                }
-            } catch(e) {
-                console.error('speed cal error', e);
             }
         }
 
