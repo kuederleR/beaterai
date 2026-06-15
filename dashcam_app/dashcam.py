@@ -607,8 +607,7 @@ class StepTimer:
 def render_bev_frame(lane_mask, detections, left_coeffs, right_coeffs,
                      compensated_x, lane_position, lane_width,
                      fcw_warning, left_sev, right_sev,
-                     bg_img=None, bev_debug=None, raw_lanes=None,
-                     tracked_vehicles=None):
+                     bg_img=None, bev_debug=None, raw_lanes=None):
     w = BEV_DISPLAY_WIDTH
     h = BEV_DISPLAY_HEIGHT
 
@@ -699,21 +698,15 @@ def render_bev_frame(lane_mask, detections, left_coeffs, right_coeffs,
         cv2.fillPoly(im_bev, [ego_car], (60, 60, 60))
         cv2.polylines(im_bev, [ego_car], True, (255, 120, 0), 2)
 
-        vehicles = tracked_vehicles if tracked_vehicles else detections
-        for tv in vehicles:
-            cx = tv["center_x"]
-            cy = tv["center_y"]
+        for det in detections:
+            cx = det["center_x"]
+            cy = det["center_y"]
             du = int(((cx / (2 * BEV_X_RANGE[1])) + 0.5) * w)
             dv = int((1.0 - cy / BEV_Y_RANGE[1]) * h)
             if 0 <= dv < h:
-                is_threat = tv.get("threat", False)
-                color = (0, 0, 255) if is_threat else (0, 200, 200)
+                color = (0, 0, 255) if det.get("threat", False) else (0, 200, 200)
                 cv2.circle(im_bev, (du, dv), 5, color, -1, cv2.LINE_AA)
                 cv2.circle(im_bev, (du, dv), 5, (255, 255, 255), 1, cv2.LINE_AA)
-                if "id" in tv:
-                    vid = tv["id"]
-                    cv2.putText(im_bev, f"v{vid}", (du + 8, dv + 4),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
 
     if lane_width > 0.5:
         bar_y = 8
@@ -974,142 +967,7 @@ class _SimpleMotionDetector:
         self.prev_gray = frame_gray.copy()
 
 
-# --- Vehicle tracker with per-vehicle Kalman filters ---
-
-_KF_DT_BASE = 1.0 / 13.0  # ~77ms per frame at 13fps
-
-class _TrackedVehicle:
-    def __init__(self, track_id, x, y, width, length, conf):
-        self.id = track_id
-        self.width = width
-        self.length = length
-        self.conf = conf
-        self.hits = 1
-        self.missed = 0
-        self.age = 0
-        # state: [x, y, vx, vy]
-        self.state = np.array([x, y, 0.0, 0.0], dtype=np.float32)
-        self.P = np.eye(4, dtype=np.float32) * 10.0
-
-    def predict(self, dt):
-        self.age += 1
-        F = np.array([
-            [1, 0, dt, 0],
-            [0, 1, 0, dt],
-            [0, 0, 1, 0],
-            [0, 0, 0, 1],
-        ], dtype=np.float32)
-        Q = np.eye(4, dtype=np.float32) * 0.5
-        self.state = F @ self.state
-        self.P = F @ self.P @ F.T + Q
-
-    def update(self, x, y, width=None, length=None, conf=None):
-        H = np.array([
-            [1, 0, 0, 0],
-            [0, 1, 0, 0],
-        ], dtype=np.float32)
-        R = np.eye(2, dtype=np.float32) * 3.0
-        z = np.array([x, y], dtype=np.float32)
-        y_res = z - H @ self.state
-        S = H @ self.P @ H.T + R
-        K = self.P @ H.T @ np.linalg.inv(S)
-        self.state = self.state + K @ y_res
-        self.P = (np.eye(4) - K @ H) @ self.P
-        self.hits += 1
-        self.missed = 0
-        if width is not None:
-            self.width = width
-        if length is not None:
-            self.length = length
-        if conf is not None:
-            self.conf = conf
-
-
-class _VehicleTracker:
-    def __init__(self, dist_thresh=3.0, max_missed=8, min_hits=2):
-        self.tracks = []
-        self.next_id = 0
-        self.dist_thresh = dist_thresh
-        self.max_missed = max_missed
-        self.min_hits = min_hits
-        self._dt = _KF_DT_BASE
-
-    def update(self, detections, dt=None):
-        if dt is not None:
-            self._dt = max(dt, 0.01)
-
-        for t in self.tracks:
-            t.predict(self._dt)
-
-        matched = set()
-        matched_dets = set()
-        if self.tracks and detections:
-            pairs = []
-            for ti, trk in enumerate(self.tracks):
-                tx, ty = trk.state[0], trk.state[1]
-                for di, det in enumerate(detections):
-                    d = np.hypot(tx - det["center_x"], ty - det["center_y"])
-                    if d < self.dist_thresh:
-                        pairs.append((d, ti, di))
-            pairs.sort(key=lambda x: x[0])
-            for _, ti, di in pairs:
-                if ti in matched or di in matched_dets:
-                    continue
-                matched.add(ti)
-                matched_dets.add(di)
-                trk = self.tracks[ti]
-                det = detections[di]
-                trk.update(det["center_x"], det["center_y"],
-                           det.get("width"), det.get("length"), det.get("conf"))
-
-        for di, det in enumerate(detections):
-            if di in matched_dets:
-                continue
-            new_t = _TrackedVehicle(self.next_id, det["center_x"], det["center_y"],
-                                    det.get("width", 1.5), det.get("length", 3.0),
-                                    det.get("conf", 0.5))
-            self.tracks.append(new_t)
-            self.next_id += 1
-
-        for ti, trk in enumerate(self.tracks):
-            if ti not in matched:
-                trk.missed += 1
-
-        self.tracks = [t for t in self.tracks if t.missed <= self.max_missed]
-
-        return self._get_active()
-
-    def _get_active(self):
-        out = []
-        for t in self.tracks:
-            cx = float(t.state[0])
-            cy = float(t.state[1])
-            vx = float(t.state[2])
-            vy = float(t.state[3])
-            ttc = 99.0
-            if vy < -0.1:
-                ttc = cy / max(-vy, 0.01)
-                ttc = min(ttc, 99.0)
-            out.append({
-                "id": t.id,
-                "center_x": cx,
-                "center_y": cy,
-                "vx": vx,
-                "vy": vy,
-                "width": t.width,
-                "length": t.length,
-                "conf": t.conf,
-                "age": t.age,
-                "missed": t.missed,
-                "hits": t.hits,
-                "confirmed": t.hits >= self.min_hits,
-                "ttc": ttc,
-            })
-        return out
-
-
 motion = _SimpleMotionDetector()
-vehicle_tracker = _VehicleTracker()
 
 
 def inference_loop():
@@ -1183,7 +1041,6 @@ def inference_loop():
             compensated_x = 0.0
             bev_debug = None
             lanes_bev = []
-            tracked_vehicles = []
 
             if state["adas_enabled"]:
                 _t_inf = time.perf_counter()
@@ -1205,7 +1062,6 @@ def inference_loop():
                                 "length": max(rh, 0.5),
                                 "conf": b.get("conf", 0.0),
                             })
-                tracked_vehicles = vehicle_tracker.update(detections) if detections else vehicle_tracker.update([])
                 if ll_mask is not None:
                     lane_mask = ll_mask
                     da_mask_big = cv2.resize(da_mask, (im_debug.shape[1], im_debug.shape[0]),
@@ -1486,22 +1342,19 @@ def inference_loop():
                 timer.track("lane_post", time.perf_counter() - _t_lane)
 
                 _t_fcw = time.perf_counter()
-                for tv in tracked_vehicles:
-                    cx = tv["center_x"]
-                    cy = tv["center_y"]
+                for det in detections:
+                    cx = det["center_x"]
+                    cy = det["center_y"]
                     is_threat = False
-                    in_lane = abs(cx - compensated_x) < LANE_HALF_WIDTH
-                    near = cy < FCW_WARNING_DISTANCE
-                    ttc_threat = tv["confirmed"] and tv["ttc"] < 4.0
-                    if in_lane and (near or ttc_threat):
+                    if abs(cx - compensated_x) < LANE_HALF_WIDTH and cy < FCW_WARNING_DISTANCE:
                         fcw_triggered = True
                         is_threat = True
-                    tv["threat"] = is_threat
+                    det["threat"] = is_threat
                     fcw_overlay_boxes.append({
-                        "x1": cx - tv["width"] / 2.0,
-                        "y1": cy + tv["length"] / 2.0,
-                        "x2": cx + tv["width"] / 2.0,
-                        "y2": cy - tv["length"] / 2.0,
+                        "x1": cx - det["width"] / 2.0,
+                        "y1": cy + det["length"] / 2.0,
+                        "x2": cx + det["width"] / 2.0,
+                        "y2": cy - det["length"] / 2.0,
                         "threat": is_threat,
                     })
                 timer.track("fcw", time.perf_counter() - _t_fcw)
@@ -1571,7 +1424,6 @@ def inference_loop():
                     compensated_x, lane_position, lane_width,
                     fcw_triggered, left_severity, right_severity,
                     bg_img=im_bev, bev_debug=bev_debug, raw_lanes=lanes_bev,
-                    tracked_vehicles=tracked_vehicles,
                 )
                 _draw_raw_lanes_perspective(im_debug, lanes_bev, _bev_warp_M)
             else:
@@ -1580,7 +1432,6 @@ def inference_loop():
                     left_coeffs, right_coeffs,
                     compensated_x, lane_position, lane_width,
                     fcw_triggered, left_severity, right_severity,
-                    tracked_vehicles=tracked_vehicles,
                 )
                 _draw_path_ribbon(im_debug, left_coeffs, right_coeffs, lane_width, im_bev=im_bev, bev_only=True)
 
