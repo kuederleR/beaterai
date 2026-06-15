@@ -1939,6 +1939,7 @@ def status():
         "cuda_available": True,
         "gpu_device_name": "NVIDIA Jetson",
         "model": "YOLOPv2",
+        "camera": _camera.camera_state() if _camera else {"scale": 1.0, "v4l2_available": False, "v4l2_values": {}},
     })
 
 

@@ -638,7 +638,14 @@
                 Software brightness multiplier. Lower = darker. Always works — use this as your primary control.
             </div>
             <div style="width: 100%; height: 1px; background: rgba(255,255,255,0.08); margin: 8px 0;"></div>
-            <div style="width: 100%; font-size: 12px; font-weight: 600; color: var(--text-secondary);">V4L2 Controls (best-effort — may not work in all containers)</div>
+            <div style="width: 100%; font-size: 12px; font-weight: 600; color: var(--text-secondary);">V4L2 Controls</div>
+            <div class="toggle-container" onclick="document.getElementById('autoExpToggle').click()">
+                <span class="toggle-label">Auto Exposure</span>
+                <label class="switch" onclick="event.stopPropagation()">
+                    <input type="checkbox" id="autoExpToggle" onchange="toggleAutoExposure(this)">
+                    <span class="slider"></span>
+                </label>
+            </div>
             <div class="slider-header">
                 <span class="toggle-label">V4L2 Exposure Time</span>
                 <span class="slider-value" id="expValue">--</span>
@@ -936,15 +943,21 @@
 
         function updateV4l2Status(data) {
             const el = document.getElementById('v4l2Status');
+            const aeCb = document.getElementById('autoExpToggle');
             if (data.v4l2_available && data.v4l2_values) {
                 const v = data.v4l2_values;
+                const ae = parseInt(v.auto_exposure);
+                if (aeCb) aeCb.checked = ae === 3;
+                const aeLabel = ae === 1 ? 'Manual' : ae === 3 ? 'Auto' : `Mode ${ae}`;
                 let parts = [];
                 for (const [k, val] of Object.entries(v)) {
+                    if (k === 'auto_exposure') continue;
                     parts.push(`${k}=${val}`);
                 }
-                el.innerText = 'V4L2: OK | ' + parts.join(' ') + ' | Software scale: ' + data.scale;
+                el.innerText = `V4L2: ${aeLabel} | ${parts.join(' ')} | Software scale: ${data.scale}`;
             } else if (data.v4l2_available === false) {
-                el.innerText = 'V4L2: not available (v4l2-ctl missing) | Software scale: ' + data.scale;
+                el.innerText = 'V4L2: not available | Software scale: ' + data.scale;
+                if (aeCb) aeCb.checked = false;
             } else {
                 el.innerText = 'V4L2: unknown | Software scale: ' + data.scale;
             }
@@ -1069,6 +1082,11 @@
                 if (data.debug_feed_active !== undefined && data.debug_feed_active !== isDebugFeedActive) {
                     isDebugFeedActive = data.debug_feed_active;
                     document.getElementById('debugFeedToggle').checked = isDebugFeedActive;
+                }
+
+                // Update Camera state from status poll
+                if (data.camera) {
+                    updateV4l2Status(data.camera);
                 }
 
                 // Update Lens Calibration UI
@@ -1260,7 +1278,23 @@
                 checkbox.checked = isAdasEnabled;
             }
         }
-        
+
+        async function toggleAutoExposure(checkbox) {
+            const val = checkbox.checked ? 3 : 1;
+            try {
+                const res = await fetch('/api/set_camera', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ auto_exposure: val })
+                });
+                const data = await res.json();
+                if (data.v4l2_values) {
+                    const ae = parseInt(data.v4l2_values.auto_exposure);
+                    checkbox.checked = ae === 3;
+                }
+            } catch(e) {}
+        }
+
         async function requestCalibration() {
             calibrateBtn.style.opacity = '0.5';
             calibrateLabel.innerText = 'Calibrating Lens (0%)';
