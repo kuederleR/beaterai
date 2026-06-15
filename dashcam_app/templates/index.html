@@ -1150,12 +1150,13 @@
             bevH: 500,
         };
 
-        function bevCalStart() {
+        async function bevCalStart() {
             document.getElementById('bevCalSection').style.display = 'block';
             document.getElementById('bevCalStartBtn').style.opacity = '0.5';
             bevCal.active = true;
             bevCal.srcPoints = [];
             bevCal.dstPoints = [];
+            await fetch('/api/bev_cal/start', {method: 'POST'});
             bevCalFetchAndDrawSrc();
         }
 
@@ -1292,7 +1293,7 @@
         }
 
         // Click handler for source canvas
-        document.getElementById('bevCalSrcCanvas').addEventListener('click', function(e) {
+        document.getElementById('bevCalSrcCanvas').addEventListener('click', async function(e) {
             if (!bevCal.active) return;
             if (bevCal.srcPoints.length >= 4) return;
 
@@ -1301,7 +1302,7 @@
             const y = (e.clientY - rect.top) / (this._scale || 1);
 
             bevCal.srcPoints.push({x, y});
-            bevCalSendSrcPoint(bevCal.srcPoints.length - 1, x, y);
+            await bevCalSendSrcPoint(bevCal.srcPoints.length - 1, x, y);
             bevCalRedrawSrc(this, this.getContext('2d'));
         });
 

@@ -376,7 +376,7 @@ class YolopDetector:
                     anchor_grid = [torch.from_numpy(ag).to(self.device) for ag in YOLOP_ANCHOR_GRID]
                 pred = split_for_trace_model(pred, anchor_grid)
                 t1 = time.perf_counter()
-                print(f"[TIMING] TRT infer={trt_ms:.1f}ms post={((t1 - t0) * 1000):.1f}ms", flush=True)
+                # print(f"[TIMING] TRT infer={trt_ms:.1f}ms post={((t1 - t0) * 1000):.1f}ms", flush=True)
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -397,7 +397,7 @@ class YolopDetector:
                 anchor_grid = list(anchor_grid)
             pred = split_for_trace_model(pred, anchor_grid)
             t1 = time.perf_counter()
-            print(f"[TIMING] PyTorch path: {((t1 - t0) * 1000):.1f}ms", flush=True)
+            # print(f"[TIMING] PyTorch path: {((t1 - t0) * 1000):.1f}ms", flush=True)
             print(f"[PYTORCH] seg={seg.shape} ll={ll.shape} "
                   f"ll_range=[{ll.min().item():.4f}, {ll.max().item():.4f}]", flush=True)
         pred = non_max_suppression(pred, conf_thres=0.3, iou_thres=0.45, classes=[2, 3, 4])

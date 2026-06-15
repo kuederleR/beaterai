@@ -477,7 +477,7 @@ class StepTimer:
         ordered = ["total", "preprocess", "inference", "lane_post", "fcw", "bev_render", "encode"]
         parts = [f"{n}: {self.avg(n)*1000:.1f}ms" for n in ordered if n in self.times]
         total_avg = self.avg("total")
-        print(f"[PERF] {' | '.join(parts)} | total: {total_avg*1000:.1f}ms ({1.0/total_avg:.1f}fps)", flush=True)
+        # print(f"[PERF] {' | '.join(parts)} | total: {total_avg*1000:.1f}ms ({1.0/total_avg:.1f}fps)", flush=True)
 
 
 def render_bev_frame(lane_mask, detections, left_coeffs, right_coeffs,
