@@ -396,7 +396,7 @@ class _CamWrapper:
         self._cap.release()
 
 def capture_loop():
-    global raw_frame_buffer, video_writer
+    global raw_frame_buffer, video_writer, calibration_frame
 
     cap = _CamWrapper()
 
