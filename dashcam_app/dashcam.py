@@ -1030,7 +1030,7 @@ bev_cal = {
     "bev_height": 500,
 }
 
-DEFAULT_BEV_DST = [[0, 500], [500, 500], [500, 0], [0, 0]]
+DEFAULT_BEV_DST = [[20, 480], [480, 480], [480, 20], [20, 20]]
 
 
 @app.route('/api/bev_cal/start', methods=['POST'])
