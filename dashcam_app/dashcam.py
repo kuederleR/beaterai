@@ -405,6 +405,11 @@ def _bev_detect_lanes(ll_mask, cam_shape=None):
 
 latest_web_frame = None
 latest_debug_frame = None
+_perspective_overlay_data = {
+    "width": 640, "height": 400,
+    "lanes": [],
+    "vehicles": [],
+}
 raw_frame_buffer = None
 calibration_frame = None
 frame_lock = threading.Lock()
@@ -747,28 +752,8 @@ def build_lane_overlay_payload(left_coeffs, right_coeffs,
     }
 
 
-def _draw_raw_lanes_perspective(im, raw_lanes, bev_warp_M):
-    if raw_lanes is None or bev_warp_M is None:
-        return
-    h_im, w_im = im.shape[:2]
-    ref_w = CAPTURE_WIDTH
-    ref_h = CAPTURE_HEIGHT
-    sx = w_im / ref_w
-    sy = h_im / ref_h
-    S = np.array([[sx, 0, 0], [0, sy, 0], [0, 0, 1]], dtype=np.float64)
-    M_inv = S @ np.linalg.inv(bev_warp_M)
-    for pts in raw_lanes:
-        if len(pts) < 2:
-            continue
-        pts_bev = pts.reshape(1, -1, 2).astype(np.float32)
-        pts_cam = cv2.perspectiveTransform(pts_bev, M_inv).reshape(-1, 2).astype(np.int32)
-        pts_cam[:, 0] = np.clip(pts_cam[:, 0], 0, w_im - 1)
-        pts_cam[:, 1] = np.clip(pts_cam[:, 1], 0, h_im - 1)
-        cv2.polylines(im, [pts_cam], False, (220, 220, 220), 1, cv2.LINE_AA)
-
-
-def _draw_filtered_lanes_perspective(im, left_coeffs, right_coeffs, left_sev, right_sev):
-    if _bev_warp_M is None:
+def _draw_filtered_lanes_perspective(im, left_coeffs, right_coeffs, bev_warp_M):
+    if bev_warp_M is None:
         return
     if left_coeffs is None and right_coeffs is None:
         return
@@ -776,22 +761,13 @@ def _draw_filtered_lanes_perspective(im, left_coeffs, right_coeffs, left_sev, ri
     h_im, w_im = im.shape[:2]
     sx, sy = w_im / CAPTURE_WIDTH, h_im / CAPTURE_HEIGHT
     S = np.array([[sx, 0, 0], [0, sy, 0], [0, 0, 1]], dtype=np.float64)
-    M_inv = S @ np.linalg.inv(_bev_warp_M)
+    M_inv = S @ np.linalg.inv(bev_warp_M)
 
     bw, bh = BEV_DISPLAY_WIDTH, BEV_DISPLAY_HEIGHT
     xr, yr = BEV_X_RANGE[1], BEV_Y_RANGE[1]
     y_vals = np.arange(2.0, 18.0, 0.5, dtype=np.float32)
 
-    def _sev_color(sev):
-        sev = np.clip(sev, 0.0, 1.0)
-        if sev < 0.5:
-            t = sev / 0.5
-            return (int(255 * (1.0 - t)), int(100 + 155 * t), 0)
-        else:
-            t = (sev - 0.5) / 0.5
-            return (0, int(255 * (1.0 - t)), int(255 * t))
-
-    for coeffs, sev in [(left_coeffs, left_sev), (right_coeffs, right_sev)]:
+    for coeffs in [left_coeffs, right_coeffs]:
         if coeffs is None:
             continue
         road_x = np.polyval(coeffs, y_vals)
@@ -803,7 +779,21 @@ def _draw_filtered_lanes_perspective(im, left_coeffs, right_coeffs, left_sev, ri
         pts_cam = cv2.perspectiveTransform(pts_cam, M_inv).reshape(-1, 2).astype(np.int32)
         pts_cam[:, 0] = np.clip(pts_cam[:, 0], 0, w_im - 1)
         pts_cam[:, 1] = np.clip(pts_cam[:, 1], 0, h_im - 1)
-        cv2.polylines(im, [pts_cam], False, _sev_color(sev), 3, cv2.LINE_AA)
+        cv2.polylines(im, [pts_cam], False, (255, 100, 0), 3, cv2.LINE_AA)
+
+
+def _road_to_image(road_pts):
+    if H_inv is None:
+        return None
+    H = np.linalg.inv(H_inv)
+    pts_h = np.hstack([road_pts, np.ones((len(road_pts), 1), dtype=np.float32)])
+    img_h = (H @ pts_h.T).T
+    valid = img_h[:, 2] > 1e-5
+    out = np.zeros((len(road_pts), 2), dtype=np.float32)
+    out[valid, 0] = img_h[valid, 0] / img_h[valid, 2]
+    out[valid, 1] = img_h[valid, 1] / img_h[valid, 2]
+    out[~valid] = np.nan
+    return out
 
 
 def _robust_polyfit(road_x, road_y, deg=2):
@@ -1060,21 +1050,9 @@ def inference_loop():
                 detections = vehicle_tracker.update(detections)
                 if ll_mask is not None:
                     lane_mask = ll_mask
-                    da_mask_big = cv2.resize(da_mask, (im_debug.shape[1], im_debug.shape[0]),
-                                             interpolation=cv2.INTER_NEAREST)
-                    ll_mask_big = cv2.resize(ll_mask, (im_debug.shape[1], im_debug.shape[0]),
-                                             interpolation=cv2.INTER_NEAREST)
-                    da_overlay = np.zeros_like(im_debug)
-                    da_overlay[da_mask_big > 0] = (40, 40, 40)
-                    cv2.addWeighted(da_overlay, 0.4, im_debug, 0.6, 0, dst=im_debug)
                     car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
-                    draw_scale = np.array([im_debug.shape[1] / ll_mask.shape[1],
-                                           im_debug.shape[0] / ll_mask.shape[0]], dtype=np.float32)
                     tr_start = int(ll_mask.shape[0] * TRACE_START_Y / 480)
                     left_edge, right_edge = _compute_lane_boundaries(da_mask, ll_mask, car_center_x, tr_start)
-                    ll_overlay = np.zeros_like(im_debug)
-                    ll_overlay[ll_mask_big > 0] = (0, 255, 255)
-                    cv2.addWeighted(ll_overlay, 0.3, im_debug, 0.7, 0, dst=im_debug)
                     if left_edge is not None:
                         left_lane_pts = left_edge
                     else:
@@ -1415,7 +1393,7 @@ def inference_loop():
                     fcw_triggered, left_severity, right_severity,
                     bg_img=im_bev, bev_debug=bev_debug, raw_lanes=lanes_bev,
                 )
-                _draw_raw_lanes_perspective(im_debug, lanes_bev, _bev_warp_M)
+                _draw_filtered_lanes_perspective(im_debug, left_coeffs, right_coeffs, _bev_warp_M)
             else:
                 im_bev = render_bev_frame(
                     lane_mask, detections,
@@ -1423,7 +1401,73 @@ def inference_loop():
                     compensated_x, lane_position, lane_width,
                     fcw_triggered, left_severity, right_severity,
                 )
-                _draw_filtered_lanes_perspective(im_debug, left_coeffs, right_coeffs, left_severity, right_severity)
+                if left_coeffs is not None or right_coeffs is not None:
+                    h_im, w_im = im_debug.shape[:2]
+                    for coeffs in [left_coeffs, right_coeffs]:
+                        if coeffs is None:
+                            continue
+                        y_vals = np.arange(2.0, 18.0, 0.5, dtype=np.float32)
+                        road_x = np.polyval(coeffs, y_vals)
+                        road_pts = np.column_stack([road_x, y_vals])
+                        img_pts = _road_to_image(road_pts)
+                        if img_pts is not None:
+                            valid = ~np.isnan(img_pts[:, 0])
+                            pts = img_pts[valid].astype(np.int32)
+                            if len(pts) >= 2:
+                                pts[:, 0] = (pts[:, 0] * im_debug.shape[1] / CAPTURE_WIDTH).astype(np.int32)
+                                pts[:, 1] = (pts[:, 1] * im_debug.shape[0] / CAPTURE_HEIGHT).astype(np.int32)
+                                cv2.polylines(im_debug, [pts], False, (255, 100, 0), 3, cv2.LINE_AA)
+
+            # Draw vehicle markers on perspective view
+            if detections:
+                for det in detections:
+                    road_pt = np.array([[det["center_x"], det["center_y"]]], dtype=np.float32)
+                    img_pts = _road_to_image(road_pt)
+                    if img_pts is not None and not np.isnan(img_pts[0, 0]):
+                        px = int(img_pts[0, 0] * im_debug.shape[1] / CAPTURE_WIDTH)
+                        py = int(img_pts[0, 1] * im_debug.shape[0] / CAPTURE_HEIGHT)
+                        tid = det.get("track_id", -1)
+                        color = (0, 0, 255) if det.get("threat", False) else (100, 200, 255)
+                        cv2.circle(im_debug, (px, py), 6, color, -1, cv2.LINE_AA)
+                        cv2.circle(im_debug, (px, py), 6, (255, 255, 255), 1, cv2.LINE_AA)
+                        cv2.putText(im_debug, str(tid), (px + 8, py + 4),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
+
+            global _perspective_overlay_data
+            overlay_lanes = []
+            if _bev_warp_M is not None:
+                for coeffs in [left_coeffs, right_coeffs]:
+                    if coeffs is None:
+                        continue
+                    y_vals = np.arange(2.0, 18.0, 0.5, dtype=np.float32)
+                    road_x = np.polyval(coeffs, y_vals)
+                    u = ((road_x / (2 * BEV_X_RANGE[1]) + 0.5) * BEV_DISPLAY_WIDTH).astype(np.float32)
+                    v = ((1.0 - y_vals / BEV_Y_RANGE[1]) * BEV_DISPLAY_HEIGHT).astype(np.float32)
+                    pts_bev = np.column_stack([u, v])
+                    sx, sy = im_debug.shape[1] / CAPTURE_WIDTH, im_debug.shape[0] / CAPTURE_HEIGHT
+                    S = np.array([[sx, 0, 0], [0, sy, 0], [0, 0, 1]], dtype=np.float64)
+                    M_inv = S @ np.linalg.inv(_bev_warp_M)
+                    pts_cam = pts_bev.reshape(1, -1, 2).astype(np.float32)
+                    pts_cam = cv2.perspectiveTransform(pts_cam, M_inv).reshape(-1, 2).astype(np.float32)
+                    overlay_lanes.append([float(v) for pt in pts_cam for v in pt])
+            overlay_vehicles = []
+            for det in detections:
+                road_pt = np.array([[det["center_x"], det["center_y"]]], dtype=np.float32)
+                img_pts = _road_to_image(road_pt)
+                if img_pts is not None and not np.isnan(img_pts[0, 0]):
+                    px = float(img_pts[0, 0] * im_debug.shape[1] / CAPTURE_WIDTH)
+                    py = float(img_pts[0, 1] * im_debug.shape[0] / CAPTURE_HEIGHT)
+                    overlay_vehicles.append({
+                        "x": px, "y": py,
+                        "id": det.get("track_id", -1),
+                        "threat": det.get("threat", False),
+                    })
+            _perspective_overlay_data = {
+                "width": im_debug.shape[1],
+                "height": im_debug.shape[0],
+                "lanes": overlay_lanes,
+                "vehicles": overlay_vehicles,
+            }
 
             state["moving"] = motion.is_moving()
             state["left_severity"] = left_severity
@@ -1539,6 +1583,11 @@ def lane_overlay():
             "right_points": [],
             "polygon": [],
         })
+
+
+@app.route('/api/perspective_overlay')
+def perspective_overlay():
+    return jsonify(_perspective_overlay_data)
 
 
 @app.route('/api/status')

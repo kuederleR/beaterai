@@ -421,10 +421,10 @@
 
     <div class="video-container">
         <div style="padding: 10px 16px; font-weight: 600; font-size: 13px; border-bottom: 1px solid rgba(255,255,255,0.08); background: rgba(0,0,0,0.15); display: flex; justify-content: space-between;">
-            <span>Perspective Mask View</span>
-            <span style="color: var(--text-secondary); font-size: 11px;">Raw perspective feed with lane and vehicle masks</span>
+            <span>Perspective View</span>
+            <span style="color: var(--text-secondary); font-size: 11px;">Lane lines and vehicle tracking overlay</span>
         </div>
-        <div class="video-stage">
+        <div class="video-stage" style="position: relative;">
             <div class="stats-overlay">
                 <div id="fpsDisplay">FPS: --</div>
                 <div id="centerDisplay">Car Center X: --</div>
@@ -432,7 +432,8 @@
                 <div id="segClassesDisplay" style="color: #6ee7b7;">Seg Classes: --</div>
                 <div id="durationDisplay" style="display:none; color: #fca5a5;">REC: 00:00</div>
             </div>
-            <img id="videoFeed" src="/debug_feed" class="video-feed" alt="Perspective Mask Feed" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjgwIiBoZWlnaHQ9IjgwMCI+PHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsbD0iIzIyMiIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LWZhbWlseT0iYXJpYWwiIGZvbnQtc2l6ZT0iMjQiIGZpbGw9IiM2NjYiIGRvbWluYW50LWJhc2VsaW5lPSJtaWRkbGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPlBlcnNwZWN0aXZlIEZlZWQgT2ZmbGluZTwvdGV4dD48L3N2Zz4='" />
+            <canvas id="perspectiveCanvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;"></canvas>
+            <img id="videoFeed" src="/debug_feed" class="video-feed" alt="Perspective Feed" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMjgwIiBoZWlnaHQ9IjgwMCI+PHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsbD0iIzIyMiIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LWZhbWlseT0iYXJpYWwiIGZvbnQtc2l6ZT0iMjQiIGZpbGw9IiM2NjYiIGRvbWluYW50LWJhc2VsaW5lPSJtaWRkbGUiIHRleHQtYW5jaG9yPSJtaWRkbGUiPlBlcnNwZWN0aXZlIEZlZWQgT2ZmbGluZTwvdGV4dD48L3N2Zz4='" />
         </div>
 
     <div class="video-container" style="margin-bottom: 24px;">
@@ -1029,6 +1030,63 @@
             await fetchStatus();
             statusPollHandle = window.setTimeout(pollStatus, 700);
         }
+
+        // ── Perspective canvas overlay ──────────────────────────────────────
+        async function fetchPerspectiveOverlay() {
+            try {
+                const res = await fetch('/api/perspective_overlay');
+                const data = await res.json();
+                const canvas = document.getElementById('perspectiveCanvas');
+                const img = document.getElementById('videoFeed');
+                if (!canvas || !img || !img.complete) return;
+                const rect = img.getBoundingClientRect();
+                canvas.width = rect.width;
+                canvas.height = rect.height;
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                const sx = canvas.width / data.width;
+                const sy = canvas.height / data.height;
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = '#3399ff';
+                ctx.setLineDash([]);
+                for (const lane of data.lanes) {
+                    if (lane.length < 4) continue;
+                    ctx.beginPath();
+                    for (let i = 0; i < lane.length; i += 2) {
+                        const x = lane[i] * sx;
+                        const y = lane[i + 1] * sy;
+                        if (i === 0) ctx.moveTo(x, y);
+                        else ctx.lineTo(x, y);
+                    }
+                    ctx.stroke();
+                }
+                for (const v of data.vehicles) {
+                    const x = v.x * sx;
+                    const y = v.y * sy;
+                    ctx.beginPath();
+                    ctx.arc(x, y, 6, 0, Math.PI * 2);
+                    ctx.fillStyle = v.threat ? '#ff3333' : '#ffcc33';
+                    ctx.fill();
+                    ctx.strokeStyle = '#ffffff';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                    ctx.fillStyle = '#ffffff';
+                    ctx.font = 'bold 14px monospace';
+                    ctx.strokeStyle = '#000000';
+                    ctx.lineWidth = 3;
+                    ctx.strokeText(v.id, x + 10, y + 5);
+                    ctx.fillText(v.id, x + 10, y + 5);
+                }
+            } catch (e) {
+                // overlay fetch failed silently
+            }
+        }
+
+        function pollPerspectiveOverlay() {
+            fetchPerspectiveOverlay();
+            setTimeout(pollPerspectiveOverlay, 100);
+        }
+        pollPerspectiveOverlay();
 
         function updateRecordingUI() {
             if (isRecording) {
