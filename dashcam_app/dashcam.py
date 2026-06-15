@@ -753,6 +753,51 @@ def build_lane_overlay_payload(left_coeffs, right_coeffs,
     }
 
 
+def _draw_path_ribbon(im, left_coeffs, right_coeffs, lane_width):
+    if left_coeffs is None or right_coeffs is None or lane_width < 1.0:
+        return
+    global _bev_warp_M
+    if _bev_warp_M is None:
+        return
+
+    h_im, w_im = im.shape[:2]
+    M_inv = np.linalg.inv(_bev_warp_M)
+
+    bw = BEV_DISPLAY_WIDTH
+    bh = BEV_DISPLAY_HEIGHT
+    xr = BEV_X_RANGE[1]
+    yr = BEV_Y_RANGE[1]
+
+    y_vals = np.arange(1.0, 14.0, 0.5, dtype=np.float32)
+    left_x = np.polyval(left_coeffs, y_vals)
+    right_x = np.polyval(right_coeffs, y_vals)
+    center_x = (left_x + right_x) / 2.0
+    half_w = max(lane_width / 4.0, 0.5)
+
+    def _road_to_bev_px(rx, ry):
+        u = ((rx / (2 * xr) + 0.5) * bw).astype(np.float32)
+        v = ((1.0 - ry / yr) * bh).astype(np.float32)
+        return np.column_stack([u, v])
+
+    pts_left = _road_to_bev_px(center_x - half_w, y_vals)
+    pts_right = _road_to_bev_px(center_x + half_w, y_vals[::-1])
+    pts_ribbon = np.vstack([pts_left, pts_right]).reshape(1, -1, 2)
+
+    pts_cam = cv2.perspectiveTransform(pts_ribbon, M_inv).reshape(-1, 2).astype(np.int32)
+    pts_cam[:, 0] = np.clip(pts_cam[:, 0], 0, w_im - 1)
+    pts_cam[:, 1] = np.clip(pts_cam[:, 1], 0, h_im - 1)
+
+    if len(pts_cam) >= 3:
+        overlay = im.copy()
+        cv2.fillPoly(overlay, [pts_cam], (0, 180, 255))
+        cv2.addWeighted(overlay, 0.35, im, 0.65, 0, dst=im)
+
+    pts_center = _road_to_bev_px(center_x, y_vals).reshape(1, -1, 2)
+    pts_cen_cam = cv2.perspectiveTransform(pts_center, M_inv).reshape(-1, 2).astype(np.int32)
+    if len(pts_cen_cam) >= 2:
+        cv2.polylines(im, [pts_cen_cam], False, (255, 255, 255), 2, cv2.LINE_AA)
+
+
 def _robust_polyfit(road_x, road_y, deg=2):
     if len(road_x) < deg + 2 or len(road_y) < deg + 2:
         return None
@@ -865,22 +910,14 @@ def inference_loop():
                                            im_debug.shape[0] / ll_mask.shape[0]], dtype=np.float32)
                     tr_start = int(ll_mask.shape[0] * TRACE_START_Y / 480)
                     left_edge, right_edge = _compute_lane_boundaries(da_mask, ll_mask, car_center_x, tr_start)
-                    if left_edge is not None and right_edge is not None:
-                        poly = np.vstack([left_edge, right_edge[::-1]])
-                        poly_scaled = (poly * draw_scale).astype(np.int32)
-                        cv2.fillPoly(im_debug, [poly_scaled], (0, 180, 0))
                     ll_overlay = np.zeros_like(im_debug)
                     ll_overlay[ll_mask_big > 0] = (0, 255, 255)
                     cv2.addWeighted(ll_overlay, 0.3, im_debug, 0.7, 0, dst=im_debug)
                     if left_edge is not None:
-                        pts_int = (left_edge * draw_scale).astype(np.int32)
-                        cv2.polylines(im_debug, [pts_int], False, (255, 0, 255), 3)
                         left_lane_pts = left_edge
                     else:
                         left_lane_pts = None
                     if right_edge is not None:
-                        pts_int = (right_edge * draw_scale).astype(np.int32)
-                        cv2.polylines(im_debug, [pts_int], False, (0, 255, 0), 3)
                         right_lane_pts = right_edge
                     else:
                         right_lane_pts = None
@@ -1054,6 +1091,8 @@ def inference_loop():
                 if state["adas_enabled"]:
                     if left_severity > 0.8 or right_severity > 0.8:
                         ldw_triggered = True
+
+                _draw_path_ribbon(im_debug, left_coeffs, right_coeffs, lane_width)
 
             _t_render = time.perf_counter()
             if _bev_warp_M is not None:
