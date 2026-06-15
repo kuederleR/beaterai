@@ -1456,15 +1456,19 @@ def inference_loop():
                             left_bvx = ((left_rx / (2 * BEV_X_RANGE[1]) + 0.5) * BEV_DISPLAY_WIDTH)
                             right_bvx = ((right_rx / (2 * BEV_X_RANGE[1]) + 0.5) * BEV_DISPLAY_WIDTH)
                             in_lane = left_bvx <= bvx <= right_bvx
+                        # Validate in image space using same BEV warp (consistent)
                         if in_lane:
-                            road_pts = np.array([[left_rx, ry], [right_rx, ry]], dtype=np.float32)
-                            img_pts = _road_to_image(road_pts)
-                            if img_pts is not None and len(img_pts) >= 2:
-                                lix, rix = img_pts[0, 0], img_pts[1, 0]
-                                if not np.isnan(lix) and not np.isnan(rix):
-                                    margin = (rix - lix) * 0.25
-                                    if cx_img < lix - margin or cx_img > rix + margin:
-                                        in_lane = False
+                            inv_bev = np.linalg.inv(_bev_warp_M)
+                            lane_bev = np.array([[[left_bvx, bvy], [right_bvx, bvy]]], dtype=np.float32)
+                            lane_img = cv2.perspectiveTransform(lane_bev, inv_bev)[0]
+                            lix, rix = lane_img[0, 0], lane_img[1, 0]
+                            margin = (rix - lix) * 0.2
+                            if cx_img < lix - margin or cx_img > rix + margin:
+                                in_lane = False
+                            # Hard image-edge zone: reject vehicles near frame edges
+                            edge_margin = CAPTURE_WIDTH * 0.10
+                            if cx_img < edge_margin or cx_img > CAPTURE_WIDTH - edge_margin:
+                                in_lane = False
                     elif left_coeffs is not None and right_coeffs is not None:
                         cx = det["center_x"]
                         left_x = np.polyval(left_coeffs, cy)
