@@ -613,7 +613,7 @@ class StepTimer:
 def render_bev_frame(lane_mask, detections, left_coeffs, right_coeffs,
                      compensated_x, lane_position, lane_width,
                      fcw_warning, left_sev, right_sev,
-                     bg_img=None, bev_debug=None):
+                     bg_img=None, bev_debug=None, raw_lanes=None):
     w = BEV_DISPLAY_WIDTH
     h = BEV_DISPLAY_HEIGHT
 
@@ -633,9 +633,6 @@ def render_bev_frame(lane_mask, detections, left_coeffs, right_coeffs,
                     cv2.rectangle(im_bev, (x1, y1), (x2, y2), color, 1)
                     if mx is not None:
                         cv2.circle(im_bev, (int(mx), int(my)), 2, (0, 255, 0), -1)
-                if attempt["tracked"] and len(attempt["lane_pts"]) >= 2:
-                    pts_arr = np.array(attempt["lane_pts"], dtype=np.int32)
-                    cv2.polylines(im_bev, [pts_arr], False, (0, 255, 255), 2)
     else:
         im_bev = np.zeros((h, w, 3), dtype=np.uint8)
         draw_lanes = True
@@ -680,12 +677,18 @@ def render_bev_frame(lane_mask, detections, left_coeffs, right_coeffs,
             cv2.fillPoly(overlay, [poly], (120, 60, 30))
             cv2.addWeighted(overlay, 0.4, im_bev, 0.6, 0, dst=im_bev)
 
+        if raw_lanes is not None:
+            for pts in raw_lanes:
+                if len(pts) >= 2:
+                    cv2.polylines(im_bev, [pts.astype(np.int32)],
+                                  False, (220, 220, 220), 2, cv2.LINE_AA)
+
         if len(left_pts) >= 2:
             cv2.polylines(im_bev, [np.array(left_pts, dtype=np.int32)],
-                          False, (220, 220, 220), 2, cv2.LINE_AA)
+                          False, (200, 100, 0), 2, cv2.LINE_AA)
         if len(right_pts) >= 2:
             cv2.polylines(im_bev, [np.array(right_pts, dtype=np.int32)],
-                          False, (220, 220, 220), 2, cv2.LINE_AA)
+                          False, (200, 100, 0), 2, cv2.LINE_AA)
 
     if draw_lanes:
         car_u = int(((compensated_x / (2 * BEV_X_RANGE[1])) + 0.5) * w)
@@ -757,7 +760,7 @@ def build_lane_overlay_payload(left_coeffs, right_coeffs,
     }
 
 
-def _draw_path_ribbon(im, left_coeffs, right_coeffs, lane_width, im_bev=None):
+def _draw_path_ribbon(im, left_coeffs, right_coeffs, lane_width, im_bev=None, bev_only=False):
     if left_coeffs is None or right_coeffs is None or lane_width < 1.0:
         print(f"[RIBBON] skip: left={left_coeffs is not None} right={right_coeffs is not None} "
               f"lw={lane_width:.2f}", flush=True)
@@ -801,6 +804,8 @@ def _draw_path_ribbon(im, left_coeffs, right_coeffs, lane_width, im_bev=None):
         cv2.addWeighted(ov, 0.5, im_bev, 0.5, 0, dst=im_bev)
         pts_center_bev = _road_to_bev_px(center_x, y_vals).astype(np.int32)
         cv2.polylines(im_bev, [pts_center_bev], False, (255, 255, 255), 2, cv2.LINE_AA)
+    if bev_only:
+        return
 
     pts_ribbon = pts_ribbon_bev.reshape(1, -1, 2).astype(np.float32)
     pts_cam = cv2.perspectiveTransform(pts_ribbon, M_inv).reshape(-1, 2).astype(np.int32)
@@ -827,6 +832,26 @@ def _draw_path_ribbon(im, left_coeffs, right_coeffs, lane_width, im_bev=None):
     pts_cen_cam = cv2.perspectiveTransform(pts_center, M_inv).reshape(-1, 2).astype(np.int32)
     if len(pts_cen_cam) >= 2:
         cv2.polylines(im, [pts_cen_cam], False, (255, 255, 255), 3, cv2.LINE_AA)
+
+
+def _draw_raw_lanes_perspective(im, raw_lanes, bev_warp_M):
+    if raw_lanes is None or bev_warp_M is None:
+        return
+    h_im, w_im = im.shape[:2]
+    ref_w = CAPTURE_WIDTH
+    ref_h = CAPTURE_HEIGHT
+    sx = w_im / ref_w
+    sy = h_im / ref_h
+    S = np.array([[sx, 0, 0], [0, sy, 0], [0, 0, 1]], dtype=np.float64)
+    M_inv = S @ np.linalg.inv(bev_warp_M)
+    for pts in raw_lanes:
+        if len(pts) < 2:
+            continue
+        pts_bev = pts.reshape(1, -1, 2).astype(np.float32)
+        pts_cam = cv2.perspectiveTransform(pts_bev, M_inv).reshape(-1, 2).astype(np.int32)
+        pts_cam[:, 0] = np.clip(pts_cam[:, 0], 0, w_im - 1)
+        pts_cam[:, 1] = np.clip(pts_cam[:, 1], 0, h_im - 1)
+        cv2.polylines(im, [pts_cam], False, (220, 220, 220), 1, cv2.LINE_AA)
 
 
 def _robust_polyfit(road_x, road_y, deg=2):
@@ -913,6 +938,7 @@ def inference_loop():
             fcw_overlay_boxes = []
             compensated_x = 0.0
             bev_debug = None
+            lanes_bev = []
 
             if state["adas_enabled"]:
                 _t_inf = time.perf_counter()
@@ -1257,13 +1283,16 @@ def inference_loop():
                     (BEV_DISPLAY_WIDTH, BEV_DISPLAY_HEIGHT),
                     flags=cv2.INTER_LINEAR,
                 )
+                # BEV ribbon first → underneath lane lines
+                _draw_path_ribbon(im_debug, left_coeffs, right_coeffs, lane_width, im_bev=im_bev, bev_only=True)
                 im_bev = render_bev_frame(
                     lane_mask, detections,
                     left_coeffs, right_coeffs,
                     compensated_x, lane_position, lane_width,
                     fcw_triggered, left_severity, right_severity,
-                    bg_img=im_bev, bev_debug=bev_debug,
+                    bg_img=im_bev, bev_debug=bev_debug, raw_lanes=lanes_bev,
                 )
+                _draw_raw_lanes_perspective(im_debug, lanes_bev, _bev_warp_M)
             else:
                 im_bev = render_bev_frame(
                     lane_mask, detections,
@@ -1271,8 +1300,9 @@ def inference_loop():
                     compensated_x, lane_position, lane_width,
                     fcw_triggered, left_severity, right_severity,
                 )
+                _draw_path_ribbon(im_debug, left_coeffs, right_coeffs, lane_width, im_bev=im_bev, bev_only=True)
 
-            _draw_path_ribbon(im_debug, left_coeffs, right_coeffs, lane_width, im_bev=im_bev)
+            _draw_path_ribbon(im_debug, left_coeffs, right_coeffs, lane_width)
 
             state["lane_position"] = lane_position
             state["lane_width"] = lane_width
