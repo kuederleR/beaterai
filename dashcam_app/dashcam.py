@@ -103,6 +103,7 @@ if K_INFER is None:
 H_inv = None
 _road_to_bev_M = None
 _fallback_vp = None
+_bev_warp_M = None
 
 def _fallback_compute_homography(vp_x=None, vp_y=None):
     global H_inv, _road_to_bev_M, _fallback_vp
@@ -482,74 +483,82 @@ class StepTimer:
 
 def render_bev_frame(lane_mask, detections, left_coeffs, right_coeffs,
                      compensated_x, lane_position, lane_width,
-                     fcw_warning, left_sev, right_sev):
+                     fcw_warning, left_sev, right_sev,
+                     bg_img=None):
     w = BEV_DISPLAY_WIDTH
     h = BEV_DISPLAY_HEIGHT
-    im_bev = np.zeros((h, w, 3), dtype=np.uint8)
+
+    if bg_img is not None:
+        im_bev = cv2.resize(bg_img, (w, h), interpolation=cv2.INTER_LINEAR)
+        draw_lanes = False
+    else:
+        im_bev = np.zeros((h, w, 3), dtype=np.uint8)
+        draw_lanes = True
 
     s_x = w / (2 * BEV_X_RANGE[1])
     s_y = h / BEV_Y_RANGE[1]
 
-    if lane_mask is not None:
-        mask_disp = cv2.resize(lane_mask, (BEV_GRID_SIZE, BEV_GRID_SIZE),
-                               interpolation=cv2.INTER_NEAREST)
-        mask_disp = cv2.resize(mask_disp.astype(np.uint8) * 255, (w, h),
-                               interpolation=cv2.INTER_NEAREST)
-        im_bev[mask_disp > 0] = (40, 60, 40)
+    if draw_lanes:
+        if lane_mask is not None:
+            mask_disp = cv2.resize(lane_mask, (BEV_GRID_SIZE, BEV_GRID_SIZE),
+                                   interpolation=cv2.INTER_NEAREST)
+            mask_disp = cv2.resize(mask_disp.astype(np.uint8) * 255, (w, h),
+                                   interpolation=cv2.INTER_NEAREST)
+            im_bev[mask_disp > 0] = (40, 60, 40)
 
-    if left_coeffs is not None and right_coeffs is not None:
-        eval_y = np.arange(1.0, BEV_RENDER_METERS, 1.0, dtype=np.float32)
-        left_x = np.polyval(left_coeffs, eval_y)
-        right_x = np.polyval(right_coeffs, eval_y)
+        if left_coeffs is not None and right_coeffs is not None:
+            eval_y = np.arange(1.0, BEV_RENDER_METERS, 1.0, dtype=np.float32)
+            left_x = np.polyval(left_coeffs, eval_y)
+            right_x = np.polyval(right_coeffs, eval_y)
 
-        def road_to_bev_px(rx, ry):
-            u = int((rx / (2 * BEV_X_RANGE[1]) + 0.5) * w)
-            v = int((1.0 - ry / BEV_Y_RANGE[1]) * h)
-            return u, v
+            def road_to_bev_px(rx, ry):
+                u = int((rx / (2 * BEV_X_RANGE[1]) + 0.5) * w)
+                v = int((1.0 - ry / BEV_Y_RANGE[1]) * h)
+                return u, v
 
-        left_pts = []
-        right_pts = []
-        for ry, rx in zip(eval_y, left_x):
-            u, v = road_to_bev_px(rx, ry)
-            if 0 <= u < w and 0 <= v < h:
-                left_pts.append([u, v])
-        for ry, rx in zip(eval_y, right_x):
-            u, v = road_to_bev_px(rx, ry)
-            if 0 <= u < w and 0 <= v < h:
-                right_pts.append([u, v])
+            left_pts = []
+            right_pts = []
+            for ry, rx in zip(eval_y, left_x):
+                u, v = road_to_bev_px(rx, ry)
+                if 0 <= u < w and 0 <= v < h:
+                    left_pts.append([u, v])
+            for ry, rx in zip(eval_y, right_x):
+                u, v = road_to_bev_px(rx, ry)
+                if 0 <= u < w and 0 <= v < h:
+                    right_pts.append([u, v])
 
-        if len(left_pts) >= 2 and len(right_pts) >= 2:
-            left_arr = np.array(left_pts, dtype=np.int32)
-            right_arr = np.array(right_pts, dtype=np.int32)
-            poly = np.vstack((left_arr, right_arr[::-1]))
-            overlay = im_bev.copy()
-            cv2.fillPoly(overlay, [poly], (120, 60, 30))
-            cv2.addWeighted(overlay, 0.4, im_bev, 0.6, 0, dst=im_bev)
-            cv2.polylines(im_bev, [left_arr], False, (220, 220, 220), 2, cv2.LINE_AA)
-            cv2.polylines(im_bev, [right_arr], False, (220, 220, 220), 2, cv2.LINE_AA)
+            if len(left_pts) >= 2 and len(right_pts) >= 2:
+                left_arr = np.array(left_pts, dtype=np.int32)
+                right_arr = np.array(right_pts, dtype=np.int32)
+                poly = np.vstack((left_arr, right_arr[::-1]))
+                overlay = im_bev.copy()
+                cv2.fillPoly(overlay, [poly], (120, 60, 30))
+                cv2.addWeighted(overlay, 0.4, im_bev, 0.6, 0, dst=im_bev)
+                cv2.polylines(im_bev, [left_arr], False, (220, 220, 220), 2, cv2.LINE_AA)
+                cv2.polylines(im_bev, [right_arr], False, (220, 220, 220), 2, cv2.LINE_AA)
 
-    car_u = int(((compensated_x / (2 * BEV_X_RANGE[1])) + 0.5) * w)
-    car_v = int(h * (1.0 - 2.0 / BEV_Y_RANGE[1]))
-    cv2.line(im_bev, (car_u, 0), (car_u, h - 1), (100, 100, 100), 1)
+        car_u = int(((compensated_x / (2 * BEV_X_RANGE[1])) + 0.5) * w)
+        car_v = int(h * (1.0 - 2.0 / BEV_Y_RANGE[1]))
+        cv2.line(im_bev, (car_u, 0), (car_u, h - 1), (100, 100, 100), 1)
 
-    ego_car = np.array([
-        [car_u - 12, car_v - 8],
-        [car_u - 12, car_v + 8],
-        [car_u + 12, car_v + 8],
-        [car_u + 12, car_v - 8],
-    ], dtype=np.int32)
-    cv2.fillPoly(im_bev, [ego_car], (60, 60, 60))
-    cv2.polylines(im_bev, [ego_car], True, (255, 120, 0), 2)
+        ego_car = np.array([
+            [car_u - 12, car_v - 8],
+            [car_u - 12, car_v + 8],
+            [car_u + 12, car_v + 8],
+            [car_u + 12, car_v - 8],
+        ], dtype=np.int32)
+        cv2.fillPoly(im_bev, [ego_car], (60, 60, 60))
+        cv2.polylines(im_bev, [ego_car], True, (255, 120, 0), 2)
 
-    for det in detections:
-        cx = det["center_x"]
-        cy = det["center_y"]
-        du = int(((cx / (2 * BEV_X_RANGE[1])) + 0.5) * w)
-        dv = int((1.0 - cy / BEV_Y_RANGE[1]) * h)
-        if 0 <= dv < h:
-            color = (0, 0, 255) if det.get("threat", False) else (0, 200, 200)
-            cv2.circle(im_bev, (du, dv), 5, color, -1, cv2.LINE_AA)
-            cv2.circle(im_bev, (du, dv), 5, (255, 255, 255), 1, cv2.LINE_AA)
+        for det in detections:
+            cx = det["center_x"]
+            cy = det["center_y"]
+            du = int(((cx / (2 * BEV_X_RANGE[1])) + 0.5) * w)
+            dv = int((1.0 - cy / BEV_Y_RANGE[1]) * h)
+            if 0 <= dv < h:
+                color = (0, 0, 255) if det.get("threat", False) else (0, 200, 200)
+                cv2.circle(im_bev, (du, dv), 5, color, -1, cv2.LINE_AA)
+                cv2.circle(im_bev, (du, dv), 5, (255, 255, 255), 1, cv2.LINE_AA)
 
     if lane_width > 0.5:
         bar_y = 8
@@ -779,12 +788,26 @@ def inference_loop():
                         ldw_triggered = True
 
             _t_render = time.perf_counter()
-            im_bev = render_bev_frame(
-                lane_mask, detections,
-                left_coeffs, right_coeffs,
-                compensated_x, lane_position, lane_width,
-                fcw_triggered, left_severity, right_severity,
-            )
+            if _bev_warp_M is not None:
+                im_bev = cv2.warpPerspective(
+                    im0, _bev_warp_M,
+                    (BEV_DISPLAY_WIDTH, BEV_DISPLAY_HEIGHT),
+                    flags=cv2.INTER_LINEAR,
+                )
+                im_bev = render_bev_frame(
+                    lane_mask, detections,
+                    left_coeffs, right_coeffs,
+                    compensated_x, lane_position, lane_width,
+                    fcw_triggered, left_severity, right_severity,
+                    bg_img=im_bev,
+                )
+            else:
+                im_bev = render_bev_frame(
+                    lane_mask, detections,
+                    left_coeffs, right_coeffs,
+                    compensated_x, lane_position, lane_width,
+                    fcw_triggered, left_severity, right_severity,
+                )
 
             state["lane_position"] = lane_position
             state["lane_width"] = lane_width
@@ -820,19 +843,22 @@ def inference_loop():
 
 
 def generate_mjpeg():
-    while True:
-        with frame_lock:
-            frame = latest_web_frame
-        if frame is None:
-            wait_img = np.zeros((480, 800, 3), dtype=np.uint8)
-            cv2.putText(wait_img, "Initializing...",
-                        (40, 240), cv2.FONT_HERSHEY_SIMPLEX, 1,
-                        (255, 255, 255), 2)
-            _, buf = cv2.imencode('.jpg', wait_img)
-            frame = buf.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-        time.sleep(0.033)
+    try:
+        while True:
+            with frame_lock:
+                frame = latest_web_frame
+            if frame is None:
+                wait_img = np.zeros((480, 800, 3), dtype=np.uint8)
+                cv2.putText(wait_img, "Initializing...",
+                            (40, 240), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                            (255, 255, 255), 2)
+                _, buf = cv2.imencode('.jpg', wait_img)
+                frame = buf.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            time.sleep(0.033)
+    except GeneratorExit:
+        pass
 
 
 @app.route('/')
@@ -848,29 +874,32 @@ def video_feed():
 
 def generate_debug_mjpeg():
     no_feed_frame = None
-    while True:
-        with frame_lock:
-            is_active = state.get("debug_feed_active", True)
-            frame = latest_debug_frame
-        if not is_active:
-            if no_feed_frame is None:
-                img = np.zeros((480, 640, 3), dtype=np.uint8)
-                cv2.putText(img, "Perspective feed disabled",
+    try:
+        while True:
+            with frame_lock:
+                is_active = state.get("debug_feed_active", True)
+                frame = latest_debug_frame
+            if not is_active:
+                if no_feed_frame is None:
+                    img = np.zeros((480, 640, 3), dtype=np.uint8)
+                    cv2.putText(img, "Perspective feed disabled",
+                                (40, 200), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                                (100, 100, 100), 2)
+                    _, buf = cv2.imencode('.jpg', img)
+                    no_feed_frame = buf.tobytes()
+                frame = no_feed_frame
+            elif frame is None:
+                wait_img = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(wait_img, "Initializing Debug Feed...",
                             (40, 200), cv2.FONT_HERSHEY_SIMPLEX, 1,
-                            (100, 100, 100), 2)
-                _, buf = cv2.imencode('.jpg', img)
-                no_feed_frame = buf.tobytes()
-            frame = no_feed_frame
-        elif frame is None:
-            wait_img = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(wait_img, "Initializing Debug Feed...",
-                        (40, 200), cv2.FONT_HERSHEY_SIMPLEX, 1,
-                        (255, 255, 255), 2)
-            _, buf = cv2.imencode('.jpg', wait_img)
-            frame = buf.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-        time.sleep(0.04)
+                            (255, 255, 255), 2)
+                _, buf = cv2.imencode('.jpg', wait_img)
+                frame = buf.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+            time.sleep(0.04)
+    except GeneratorExit:
+        pass
 
 
 @app.route('/debug_feed')
@@ -1136,6 +1165,7 @@ def api_bev_cal_save():
 
 
 def _load_bev_calibration():
+    global _bev_warp_M
     calib_path = "models/calibration.json"
     if not os.path.exists(calib_path):
         return
@@ -1146,6 +1176,13 @@ def _load_bev_calibration():
             bev_cal["src_points"] = data["bev_cal_src"]
             bev_cal["dst_points"] = data["bev_cal_dst"]
             bev_cal["active"] = data.get("bev_cal_active", True)
+            src = bev_cal["src_points"]
+            dst = bev_cal["dst_points"]
+            if len(src) == 4 and len(dst) == 4 and all(p is not None for p in src) and all(p is not None for p in dst):
+                _bev_warp_M = cv2.getPerspectiveTransform(
+                    np.array(src, dtype=np.float32),
+                    np.array(dst, dtype=np.float32),
+                )
             print("[INFO] Loaded BEV calibration", flush=True)
     except Exception as e:
         print(f"[WARN] BEV calibration load failed: {e}", flush=True)
