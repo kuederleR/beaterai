@@ -892,7 +892,12 @@
         }
         let cameraUpdateTimeout = null;
         function updateCamera(ctrlId, value) {
-            const v4l2Name = ctrlId.replace('Slider', '').toLowerCase();
+            const nameMap = {
+                'expSlider': 'exposure_time_absolute',
+                'gainSlider': 'gain',
+                'brightnessSlider': 'brightness',
+            };
+            const v4l2Name = nameMap[ctrlId] || ctrlId.replace('Slider', '').toLowerCase();
             if (cameraUpdateTimeout) clearTimeout(cameraUpdateTimeout);
             cameraUpdateTimeout = setTimeout(async () => {
                 const body = {};

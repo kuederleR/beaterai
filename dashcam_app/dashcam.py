@@ -513,7 +513,8 @@ class _V4L2Control:
                 print(f"[CAM] Manual mode set on {self._dev}", flush=True)
             else:
                 err = r.stderr.decode().strip()
-                print(f"[CAM] v4l2-ctl init failed: {err}", flush=True)
+                print(f"[CAM] v4l2-ctl init FAILED: {err}", flush=True)
+                self._available = False
         except FileNotFoundError:
             print("[CAM] v4l2-ctl not found — using software exposure only", flush=True)
             self._available = False
@@ -529,7 +530,7 @@ class _V4L2Control:
                 capture_output=True, timeout=500,
             )
             if r.returncode != 0:
-                print(f"[CAM] v4l2-ctl {control}={value} failed: {r.stderr.decode().strip()}", flush=True)
+                print(f"[CAM] v4l2-ctl {control}={value} FAILED: {r.stderr.decode().strip()}", flush=True)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
@@ -545,7 +546,15 @@ class _V4L2Control:
                     capture_output=True, timeout=500, text=True,
                 )
                 if r.returncode == 0:
-                    val = r.stdout.strip().split(":")[-1].strip()
+                    raw = r.stdout.strip()
+                    # Try to extract numeric value from various output formats:
+                    # "5" or "auto_exposure: 5" or "auto_exposure: ... value=5"
+                    if "value=" in raw:
+                        val = raw.split("value=")[-1].split()[0]
+                    elif ":" in raw:
+                        val = raw.split(":")[-1].strip()
+                    else:
+                        val = raw
                     result[ctrl] = val
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 pass
@@ -2009,7 +2018,7 @@ def api_set_camera():
     ctrl = _camera
     if ctrl is None:
         return jsonify({"success": False, "error": "camera not started"}), 503
-    for key in ("exposure_time_absolute", "gain", "brightness"):
+    for key in ("auto_exposure", "exposure_time_absolute", "gain", "brightness"):
         val = data.get(key)
         if val is not None:
             ctrl.set_v4l2(key, int(val))
