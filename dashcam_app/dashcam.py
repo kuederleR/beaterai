@@ -755,9 +755,12 @@ def build_lane_overlay_payload(left_coeffs, right_coeffs,
 
 def _draw_path_ribbon(im, left_coeffs, right_coeffs, lane_width):
     if left_coeffs is None or right_coeffs is None or lane_width < 1.0:
+        print(f"[RIBBON] skip: left={left_coeffs is not None} right={right_coeffs is not None} "
+              f"lw={lane_width:.2f}", flush=True)
         return
     global _bev_warp_M
     if _bev_warp_M is None:
+        print("[RIBBON] skip: no _bev_warp_M", flush=True)
         return
 
     h_im, w_im = im.shape[:2]
@@ -791,6 +794,9 @@ def _draw_path_ribbon(im, left_coeffs, right_coeffs, lane_width):
         overlay = im.copy()
         cv2.fillPoly(overlay, [pts_cam], (0, 180, 255))
         cv2.addWeighted(overlay, 0.35, im, 0.65, 0, dst=im)
+        cv2.putText(im, "PATH", (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 180, 255), 3)
+    else:
+        print(f"[RIBBON] fail: only {len(pts_cam)} cam pts from {len(y_vals)} road pts", flush=True)
 
     pts_center = _road_to_bev_px(center_x, y_vals).reshape(1, -1, 2)
     pts_cen_cam = cv2.perspectiveTransform(pts_center, M_inv).reshape(-1, 2).astype(np.int32)
