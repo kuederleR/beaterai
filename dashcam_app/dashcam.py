@@ -1450,11 +1450,21 @@ def inference_loop():
                         bvx, bvy = pt_bev[0], pt_bev[1]
                         if 0 <= bvy < BEV_DISPLAY_HEIGHT:
                             ry = (1.0 - bvy / BEV_DISPLAY_HEIGHT) * BEV_Y_RANGE[1]
+                            ry = np.clip(ry, 1.5, 18.0)
                             left_rx = np.polyval(left_coeffs, ry)
                             right_rx = np.polyval(right_coeffs, ry)
                             left_bvx = ((left_rx / (2 * BEV_X_RANGE[1]) + 0.5) * BEV_DISPLAY_WIDTH)
                             right_bvx = ((right_rx / (2 * BEV_X_RANGE[1]) + 0.5) * BEV_DISPLAY_WIDTH)
                             in_lane = left_bvx <= bvx <= right_bvx
+                        if in_lane:
+                            road_pts = np.array([[left_rx, ry], [right_rx, ry]], dtype=np.float32)
+                            img_pts = _road_to_image(road_pts)
+                            if img_pts is not None and len(img_pts) >= 2:
+                                lix, rix = img_pts[0, 0], img_pts[1, 0]
+                                if not np.isnan(lix) and not np.isnan(rix):
+                                    margin = (rix - lix) * 0.25
+                                    if cx_img < lix - margin or cx_img > rix + margin:
+                                        in_lane = False
                     elif left_coeffs is not None and right_coeffs is not None:
                         cx = det["center_x"]
                         left_x = np.polyval(left_coeffs, cy)
