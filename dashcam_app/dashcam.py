@@ -980,6 +980,7 @@ def inference_loop():
                         lx = np.polyval(left_coeffs, y_eval)
                         rx = np.polyval(right_coeffs, y_eval)
                         lw = rx - lx
+                        print(f"[LANE_WIDTH] raw lx={lx:.2f} rx={rx:.2f} lw={lw:.2f}")
                         if 1.0 < lw < 10.0:
                             lane_width = lw
                             lane_position = float(np.clip((0.0 - lx) / lw, 0.0, 1.0))
@@ -1034,6 +1035,7 @@ def inference_loop():
                     lx = np.polyval(left_coeffs, y_eval)
                     rx = np.polyval(right_coeffs, y_eval)
                     lw = rx - lx
+                    print(f"[LANE_WIDTH] smth lx={lx:.2f} rx={rx:.2f} lw={lw:.2f}")
                     if 1.0 < lw < 10.0:
                         lane_width = lw
                         lane_position = float(np.clip((0.0 - lx) / lw, 0.0, 1.0))
