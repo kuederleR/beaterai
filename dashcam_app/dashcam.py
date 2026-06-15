@@ -1016,6 +1016,142 @@ def api_set_crop():
     return jsonify({"success": True})
 
 
+# ---------------------------------------------------------------------------
+# BEV calibration tool
+# ---------------------------------------------------------------------------
+
+bev_cal = {
+    "active": False,
+    "src_points": [],  # 4 [x,y] in source image (1280x800) space
+    "dst_points": [],  # 4 [x,y] in BEV output space
+    "bev_width": 500,
+    "bev_height": 500,
+}
+
+DEFAULT_BEV_DST = [[0, 500], [500, 500], [500, 0], [0, 0]]
+
+
+@app.route('/api/bev_cal/start', methods=['POST'])
+def api_bev_cal_start():
+    bev_cal["active"] = True
+    bev_cal["src_points"] = []
+    bev_cal["dst_points"] = [list(p) for p in DEFAULT_BEV_DST]
+    return jsonify(bev_cal)
+
+
+@app.route('/api/bev_cal/clear', methods=['POST'])
+def api_bev_cal_clear():
+    bev_cal["active"] = False
+    bev_cal["src_points"] = []
+    bev_cal["dst_points"] = []
+    return jsonify(bev_cal)
+
+
+@app.route('/api/bev_cal/set_src', methods=['POST'])
+def api_bev_cal_set_src():
+    data = request.json
+    idx = int(data["index"])
+    while len(bev_cal["src_points"]) <= idx:
+        bev_cal["src_points"].append(None)
+    bev_cal["src_points"][idx] = [int(data["x"]), int(data["y"])]
+    return jsonify(bev_cal)
+
+
+@app.route('/api/bev_cal/set_dst', methods=['POST'])
+def api_bev_cal_set_dst():
+    data = request.json
+    idx = int(data["index"])
+    while len(bev_cal["dst_points"]) <= idx:
+        bev_cal["dst_points"].append(None)
+    bev_cal["dst_points"][idx] = [int(data["x"]), int(data["y"])]
+    return jsonify(bev_cal)
+
+
+@app.route('/api/bev_cal/state')
+def api_bev_cal_state():
+    return jsonify(bev_cal)
+
+
+@app.route('/api/bev_cal/frame')
+def api_bev_cal_frame():
+    with frame_lock:
+        frame = raw_frame_buffer
+    if frame is None:
+        return jsonify({"error": "no frame"}), 400
+    _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return Response(buf.tobytes(), mimetype='image/jpeg')
+
+
+@app.route('/api/bev_cal/preview')
+def api_bev_cal_preview():
+    if not bev_cal["active"]:
+        return jsonify({"error": "not active"}), 400
+    src = bev_cal["src_points"]
+    dst = bev_cal["dst_points"]
+    if len(src) < 4 or any(p is None for p in src):
+        return jsonify({"error": "need 4 source points"}), 400
+    if len(dst) < 4 or any(p is None for p in dst):
+        return jsonify({"error": "need 4 destination points"}), 400
+
+    with frame_lock:
+        frame = raw_frame_buffer
+    if frame is None:
+        return jsonify({"error": "no frame"}), 400
+
+    M = cv2.getPerspectiveTransform(
+        np.array(src, dtype=np.float32),
+        np.array(dst, dtype=np.float32),
+    )
+    warped = cv2.warpPerspective(frame, M, (bev_cal["bev_width"], bev_cal["bev_height"]))
+    _, buf = cv2.imencode('.jpg', warped, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return Response(buf.tobytes(), mimetype='image/jpeg')
+
+
+@app.route('/api/bev_cal/save', methods=['POST'])
+def api_bev_cal_save():
+    src = bev_cal["src_points"]
+    dst = bev_cal["dst_points"]
+    if len(src) < 4 or any(p is None for p in src):
+        return jsonify({"success": False, "error": "need 4 source points"}), 400
+    if len(dst) < 4 or any(p is None for p in dst):
+        return jsonify({"success": False, "error": "need 4 destination points"}), 400
+
+    calib = {}
+    calib_path = "models/calibration.json"
+    if os.path.exists(calib_path):
+        try:
+            with open(calib_path) as f:
+                calib = json.load(f)
+        except Exception:
+            pass
+    calib["bev_cal_src"] = src
+    calib["bev_cal_dst"] = dst
+    calib["bev_cal_active"] = True
+    os.makedirs("models", exist_ok=True)
+    with open(calib_path, "w") as f:
+        json.dump(calib, f)
+    return jsonify({"success": True, "message": "BEV calibration saved"})
+
+
+def _load_bev_calibration():
+    calib_path = "models/calibration.json"
+    if not os.path.exists(calib_path):
+        return
+    try:
+        with open(calib_path) as f:
+            data = json.load(f)
+        if "bev_cal_src" in data and "bev_cal_dst" in data:
+            bev_cal["src_points"] = data["bev_cal_src"]
+            bev_cal["dst_points"] = data["bev_cal_dst"]
+            bev_cal["active"] = data.get("bev_cal_active", True)
+            print("[INFO] Loaded BEV calibration", flush=True)
+    except Exception as e:
+        print(f"[WARN] BEV calibration load failed: {e}", flush=True)
+
+
+_load_bev_calibration()
+
+
 if __name__ == '__main__':
     print("=" * 60, flush=True)
     print("Edge ADAS — YOLOPv2 + homography lane projection", flush=True)
