@@ -28,6 +28,8 @@ app = Flask(__name__)
 
 VIDEO_SOURCE = os.environ.get('VIDEO_SOURCE', '/dev/video0')
 DEV_VIDEO_PATH = os.environ.get('DEV_VIDEO_PATH', None)
+UVC_EXPOSURE = os.environ.get('UVC_EXPOSURE', '200')
+UVC_GAIN = os.environ.get('UVC_GAIN', '0')
 CAPTURE_WIDTH = 1280
 CAPTURE_HEIGHT = 800
 TARGET_FPS = 30
@@ -504,6 +506,32 @@ class _CamWrapper:
             self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
             self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
             self._cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
+            # Set fixed exposure for UVC camera (disable auto-exposure)
+            if isinstance(VIDEO_SOURCE, str) and VIDEO_SOURCE.startswith("/dev/"):
+                try:
+                    import subprocess
+                    # Try common UVC control name variations
+                    for ctrl_auto in ("auto_exposure", "exposure_auto", "auto_exposure_mode"):
+                        r = subprocess.run(
+                            ["v4l2-ctl", "-d", VIDEO_SOURCE, "-c", f"{ctrl_auto}=1"],
+                            capture_output=True, timeout=3
+                        )
+                        if r.returncode == 0:
+                            break
+                    for ctrl_exp in ("exposure_time_absolute", "exposure_absolute", "exposure"):
+                        r = subprocess.run(
+                            ["v4l2-ctl", "-d", VIDEO_SOURCE, "-c", f"{ctrl_exp}={UVC_EXPOSURE}"],
+                            capture_output=True, timeout=3
+                        )
+                        if r.returncode == 0:
+                            break
+                    subprocess.run(
+                        ["v4l2-ctl", "-d", VIDEO_SOURCE, "-c", f"gain={UVC_GAIN}"],
+                        capture_output=True, timeout=3
+                    )
+                    print(f"[CAM] Fixed exposure set via v4l2-ctl (exp={UVC_EXPOSURE}, gain={UVC_GAIN})", flush=True)
+                except Exception as e:
+                    print(f"[CAM] v4l2-ctl exposure setup failed: {e}", flush=True)
     def start(self):
         return self._cap is not None and self._cap.isOpened()
     def read(self):
