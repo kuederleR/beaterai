@@ -345,9 +345,10 @@ def _bev_detect_lanes(ll_mask, cam_shape=None):
                 peaks.append(i)
     peaks.sort()
 
-    win_w = 30
-    win_h = 20
-    y_step = 8
+    win_w = 24
+    win_h = 16
+    y_step = 12
+    y_lo = h // 4
 
     lanes = []
     all_attempts = []
@@ -358,29 +359,37 @@ def _bev_detect_lanes(ll_mask, cam_shape=None):
         x2_base = min(w, int(cx) + win_w // 2)
 
         y_start = h - 1
-        for yr in range(h - 1, h // 2 - 1, -1):
+        for yr in range(h - 1, y_lo, -1):
             if np.any(bev_mask[yr, x1_base:x2_base] > 0):
                 y_start = yr
                 break
 
         wins = []
-        for y in range(y_start, h // 2 - 1, -y_step):
+        for y in range(y_start, y_lo, -y_step):
             y1 = max(0, y - win_h // 2)
             y2 = min(h, y + win_h // 2)
             x1 = max(0, int(cx) - win_w // 2)
             x2 = min(w, int(cx) + win_w // 2)
             strip = bev_mask[y1:y2, x1:x2]
-            ys, xs = np.where(strip > 0)
-            if len(xs) == 0:
+            col_sums = np.sum(strip, axis=0)
+            if np.max(col_sums) == 0:
                 wins.append((x1, y1, x2, y2, None, None))
                 break
-            mx = x1 + float(np.mean(xs))
-            my = y1 + float(np.mean(ys))
+            best_col = np.argmax(col_sums)
+            mx = x1 + float(best_col)
+            if abs(mx - cx) > win_w * 0.6:
+                wins.append((x1, y1, x2, y2, None, None))
+                break
+            ys_win, _ = np.where(strip > 0)
+            my = y1 + float(np.mean(ys_win))
             wins.append((x1, y1, x2, y2, mx, my))
             pts.append([mx, my])
             cx = mx
 
-        tracked = len(pts) >= 3
+        # Trim bottom 3 points where warp distortion is worst
+        if len(pts) > 6:
+            pts = pts[3:]
+        tracked = len(pts) >= 4
         if tracked:
             lanes.append(np.array(pts, dtype=np.float32))
         all_attempts.append({
