@@ -854,10 +854,11 @@ def inference_loop():
     _left_stale = 0
     _right_stale = 0
 
-    _temporal_left_bx = None
-    _temporal_right_bx = None
-    _temporal_left_age = 0
-    _temporal_right_age = 0
+    _expected_left_bx = None
+    _expected_right_bx = None
+    _expected_width_px = None
+    _expected_left_missed = 0
+    _expected_right_missed = 0
 
     print("[INFO] Loading YOLOPv2 model...", flush=True)
     trt_engine = os.environ.get("YOLOP_TRT_ENGINE")
@@ -972,8 +973,7 @@ def inference_loop():
                     h_bev = BEV_DISPLAY_HEIGHT
                     car_center_bev = w_bev // 2
 
-                    MAX_LANE_JUMP = 30.0
-                    MAX_LANE_AGE = 10
+                    MAX_EXPECTED_DIST = 60.0
                     cand_list = []
                     for pts in lanes_bev:
                         if len(pts) < 3:
@@ -982,36 +982,59 @@ def inference_loop():
                         bx = float(bot[0])
                         cand_list.append({"pts": pts, "bx": bx})
 
+                    def _best_match(cands, target_x, max_dist=MAX_EXPECTED_DIST, skip=None):
+                        best = None
+                        best_d = max_dist
+                        for c in cands:
+                            if c is skip:
+                                continue
+                            d = abs(c["bx"] - target_x)
+                            if d < best_d:
+                                best_d = d
+                                best = c
+                        return best
+
                     left_cand = None
                     right_cand = None
 
-                    if _temporal_left_bx is not None:
-                        for c in cand_list:
-                            d = abs(c["bx"] - _temporal_left_bx)
-                            if d < MAX_LANE_JUMP and (left_cand is None or d < abs(left_cand["bx"] - _temporal_left_bx)):
-                                left_cand = c
-                    if _temporal_right_bx is not None:
-                        for c in cand_list:
-                            d = abs(c["bx"] - _temporal_right_bx)
-                            if d < MAX_LANE_JUMP and (right_cand is None or d < abs(right_cand["bx"] - _temporal_right_bx)):
-                                right_cand = c
+                    if _expected_left_bx is not None:
+                        left_cand = _best_match(cand_list, _expected_left_bx)
+                    if _expected_right_bx is not None:
+                        right_cand = _best_match(cand_list, _expected_right_bx)
 
+                    # Infer missing lane from expected width + opposite detected lane
+                    if left_cand is None and _expected_width_px is not None and _expected_right_bx is not None:
+                        inferred = _expected_right_bx - _expected_width_px
+                        left_cand = _best_match(cand_list, inferred)
+                    if right_cand is None and _expected_width_px is not None and _expected_left_bx is not None:
+                        inferred = _expected_left_bx + _expected_width_px
+                        right_cand = _best_match(cand_list, inferred, skip=left_cand)
+
+                    # Ensure left != right
                     if left_cand is not None and right_cand is not None and left_cand is right_cand:
-                        dl = abs(left_cand["bx"] - (_temporal_left_bx or 0))
-                        dr = abs(right_cand["bx"] - (_temporal_right_bx or 0))
+                        dl = abs(left_cand["bx"] - (_expected_left_bx or 0))
+                        dr = abs(right_cand["bx"] - (_expected_right_bx or 0))
                         if dl <= dr:
                             right_cand = None
                         else:
                             left_cand = None
+                        # Try width inference again if one side was cleared
+                        if left_cand is None and _expected_width_px is not None and _expected_right_bx is not None:
+                            inferred = _expected_right_bx - _expected_width_px
+                            left_cand = _best_match(cand_list, inferred, skip=right_cand)
+                        if right_cand is None and _expected_width_px is not None and _expected_left_bx is not None:
+                            inferred = _expected_left_bx + _expected_width_px
+                            right_cand = _best_match(cand_list, inferred, skip=left_cand)
 
-                    if left_cand is None:
+                    # Initialization fallback: only for a side with NO expected position
+                    if left_cand is None and _expected_left_bx is None:
                         for c in cand_list:
                             if c is right_cand:
                                 continue
                             if c["bx"] < car_center_bev and (left_cand is None or
                                 (car_center_bev - c["bx"]) < (car_center_bev - left_cand["bx"])):
                                 left_cand = c
-                    if right_cand is None:
+                    if right_cand is None and _expected_right_bx is None:
                         for c in cand_list:
                             if c is left_cand:
                                 continue
@@ -1022,20 +1045,39 @@ def inference_loop():
                     left_lane = left_cand["pts"] if left_cand else None
                     right_lane = right_cand["pts"] if right_cand else None
 
+                    # Update expected positions (SMA blend with detection)
                     if left_lane is not None:
-                        _temporal_left_bx = float(left_lane[np.argmax(left_lane[:, 1]), 0])
-                        _temporal_left_age = 0
+                        det_bx = float(left_lane[np.argmax(left_lane[:, 1]), 0])
+                        _expected_left_bx = _expected_left_bx * 0.3 + det_bx * 0.7 if _expected_left_bx is not None else det_bx
+                        _expected_left_missed = 0
                     else:
-                        _temporal_left_age += 1
-                        if _temporal_left_age > MAX_LANE_AGE:
-                            _temporal_left_bx = None
+                        _expected_left_missed += 1
+                        if _expected_left_missed > 60:
+                            _expected_left_bx = None
+
                     if right_lane is not None:
-                        _temporal_right_bx = float(right_lane[np.argmax(right_lane[:, 1]), 0])
-                        _temporal_right_age = 0
+                        det_bx = float(right_lane[np.argmax(right_lane[:, 1]), 0])
+                        _expected_right_bx = _expected_right_bx * 0.3 + det_bx * 0.7 if _expected_right_bx is not None else det_bx
+                        _expected_right_missed = 0
                     else:
-                        _temporal_right_age += 1
-                        if _temporal_right_age > MAX_LANE_AGE:
-                            _temporal_right_bx = None
+                        _expected_right_missed += 1
+                        if _expected_right_missed > 60:
+                            _expected_right_bx = None
+
+                    # Update expected lane width
+                    if left_lane is not None and right_lane is not None:
+                        new_width = _expected_right_bx - _expected_left_bx
+                        if 20.0 < new_width < 350.0:
+                            if _expected_width_px is not None:
+                                _expected_width_px = _expected_width_px * 0.5 + new_width * 0.5
+                            else:
+                                _expected_width_px = new_width
+
+                    if left_lane is not None or right_lane is not None:
+                        le = f"L={_expected_left_bx or 0:.0f}({_expected_left_missed})" if _expected_left_bx is not None else "L=init"
+                        re = f"R={_expected_right_bx or 0:.0f}({_expected_right_missed})" if _expected_right_bx is not None else "R=init"
+                        w = f"W={_expected_width_px or 0:.0f}" if _expected_width_px is not None else "W=?"
+                        print(f"[LANE] {le} {re} {w}", flush=True)
 
                     for lane, label in [(left_lane, 'left'), (right_lane, 'right')]:
                         if lane is not None and len(lane) >= 4:
