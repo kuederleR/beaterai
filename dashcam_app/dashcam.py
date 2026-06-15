@@ -462,6 +462,9 @@ def _try_load_calibration():
             print("[INFO] Loaded LDW calibration", flush=True)
         if "car_center_x" in data:
             state["car_center_x"] = int(data["car_center_x"])
+        if "drivable_y_cutoff" in data:
+            state["drivable_y_cutoff"] = int(data["drivable_y_cutoff"])
+            print(f"[INFO] Loaded drivable y cutoff: {data['drivable_y_cutoff']}", flush=True)
     except Exception as e:
         print(f"[WARN] Calibration load failed: {e}", flush=True)
 
@@ -475,6 +478,8 @@ def save_calibration_state():
         calib["ldw_calibration"] = state["ldw_calibration"]
     if state.get("car_center_x") is not None:
         calib["car_center_x"] = int(state["car_center_x"])
+    if state.get("drivable_y_cutoff") is not None:
+        calib["drivable_y_cutoff"] = int(state["drivable_y_cutoff"])
     os.makedirs("models", exist_ok=True)
     with open("models/calibration.json", "w") as f:
         json.dump(calib, f)
@@ -1064,6 +1069,23 @@ def inference_loop():
                                 "img_y2": float(b["y2"]),
                             })
                 detections = vehicle_tracker.update(detections)
+
+                # Auto-calibrate drivable Y cutoff from da_mask center column
+                if da_mask is not None and state.get("drivable_y_cutoff") is None:
+                    center_col = da_mask.shape[1] // 2
+                    da_center = da_mask[:, center_col]
+                    drivable_rows = np.where(da_center > 0)[0]
+                    if len(drivable_rows) > 0:
+                        bottom_row = int(drivable_rows[-1])
+                        samples = state.setdefault("calib_drivable_y_samples", [])
+                        samples.append(bottom_row)
+                        if len(samples) >= 30:
+                            cutoff = int(np.median(samples))
+                            state["drivable_y_cutoff"] = cutoff
+                            state["calib_drivable_y_samples"] = []
+                            print(f"[CALIB] Drivable Y cutoff: {cutoff}", flush=True)
+                            save_calibration_state()
+
                 if ll_mask is not None:
                     lane_mask = ll_mask
                     car_center_x = state.get("car_center_x", INFER_WIDTH // 2)
@@ -1476,6 +1498,11 @@ def inference_loop():
                         in_lane = left_x <= cx <= right_x
                     else:
                         in_lane = abs(det["center_x"]) < LANE_HALF_WIDTH
+                    # Reject vehicles below the drivable Y cutoff
+                    if in_lane:
+                        dyc = state.get("drivable_y_cutoff")
+                        if dyc is not None and det.get("img_y2", CAPTURE_HEIGHT) > dyc:
+                            in_lane = False
                     if in_lane and (lead_car is None or cy < lead_car["center_y"]):
                         lead_car = det
             if lead_car is not None:
