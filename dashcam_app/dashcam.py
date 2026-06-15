@@ -572,7 +572,7 @@ class _CamWrapper:
         if self._dev_path:
             self._cap = cv2.VideoCapture(self._dev_path)
         else:
-            self._cap = cv2.VideoCapture(VIDEO_SOURCE)
+            self._cap = cv2.VideoCapture(VIDEO_SOURCE, cv2.CAP_V4L2)
             self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
             self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
             self._cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
