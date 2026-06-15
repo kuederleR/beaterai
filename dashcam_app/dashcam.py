@@ -335,6 +335,8 @@ state = {
     "car_center_offset": 0.0,
     "left_poly_history": [],
     "right_poly_history": [],
+    "last_frame_time": 0.0,
+    "capture_last_frame_time": 0.0,
 }
 
 video_writer = None
@@ -443,6 +445,7 @@ def capture_loop():
                     video_writer = None
                     state["recording_since"] = None
 
+            state["capture_last_frame_time"] = time.time()
             fps_counter += 1
             elapsed = time.time() - fps_start
             if elapsed >= 2.0:
@@ -478,7 +481,7 @@ class StepTimer:
         ordered = ["total", "preprocess", "inference", "lane_post", "fcw", "bev_render", "encode"]
         parts = [f"{n}: {self.avg(n)*1000:.1f}ms" for n in ordered if n in self.times]
         total_avg = self.avg("total")
-        # print(f"[PERF] {' | '.join(parts)} | total: {total_avg*1000:.1f}ms ({1.0/total_avg:.1f}fps)", flush=True)
+        print(f"[PERF] {' | '.join(parts)} | total: {total_avg*1000:.1f}ms ({1.0/total_avg:.1f}fps)", flush=True)
 
 
 def render_bev_frame(lane_mask, detections, left_coeffs, right_coeffs,
@@ -827,6 +830,7 @@ def inference_loop():
                 if state["debug_feed_active"]:
                     latest_debug_frame = buf_debug.tobytes()
 
+            state["last_frame_time"] = time.time()
             timer.track("total", time.perf_counter() - _t_frame)
             timer.maybe_log()
 
