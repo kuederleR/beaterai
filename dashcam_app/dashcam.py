@@ -1095,8 +1095,8 @@ def api_bev_cal_preview():
     if len(dst) < 4 or any(p is None for p in dst):
         return jsonify({"error": "need 4 destination points"}), 400
 
-    with frame_lock:
-        frame = raw_frame_buffer
+    global calibration_frame
+    frame = calibration_frame
     if frame is None:
         return jsonify({"error": "no frame"}), 400
 
