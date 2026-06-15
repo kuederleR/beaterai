@@ -872,6 +872,8 @@ def _robust_polyfit(road_x, road_y, deg=2):
 
 
 class _MotionTracker:
+    CAL_TARGET_SAMPLES = 200
+
     def __init__(self, cal_file="speed_calibration.json"):
         self.prev_gray = None
         self.prev_pts = np.empty((0, 2), dtype=np.float32)
@@ -965,6 +967,8 @@ class _MotionTracker:
 
                 if self._calibrating:
                     self._cal_samples.append(mdy)
+                    if len(self._cal_samples) >= self.CAL_TARGET_SAMPLES:
+                        self.stop_cal()
 
                 self.prev_pts = gn[:200].copy()
             else:
