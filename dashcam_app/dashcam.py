@@ -500,35 +500,48 @@ class _AdaptiveExposure:
     No-ops silently on non-Linux (where v4l2-ctl is absent).
     """
     def __init__(self, dev_path="/dev/video0",
-                 target_luminance=110,
-                 exp_min=50, exp_max=5000,
+                 target_luminance=100,
+                 exp_min=5, exp_max=5000,
                  gain_min=0, gain_max=100):
         self._dev = dev_path
         self._target = target_luminance
         self._exp_min, self._exp_max = exp_min, exp_max
         self._gain_min, self._gain_max = gain_min, gain_max
 
-        self._exposure = 500
+        self._exposure = 200
         self._gain = 0
         self._smooth_lum = None
-        self._alpha = 0.10
+        self._alpha = 0.15
         self._frame_count = 0
+        self._available = True
 
     def _ctl(self, control, value):
         try:
-            subprocess.run(
+            r = subprocess.run(
                 ["v4l2-ctl", "-d", self._dev, "-c", f"{control}={int(value)}"],
                 capture_output=True, timeout=500,
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+            if r.returncode != 0:
+                err = r.stderr.decode().strip()
+                if err:
+                    print(f"[EXPOSURE] v4l2-ctl {control}={value} failed: {err}", flush=True)
+                    self._available = False
+        except FileNotFoundError:
+            print("[EXPOSURE] v4l2-ctl not found — disabling adaptive exposure", flush=True)
+            self._available = False
+        except subprocess.TimeoutExpired:
             pass
 
     def start(self):
+        if not self._available:
+            return
         self._ctl("auto_exposure", 1)
         self._ctl("exposure_time_absolute", self._exposure)
         self._ctl("gain", self._gain)
 
     def update(self, frame):
+        if not self._available:
+            return
         self._frame_count += 1
         if self._frame_count % 3 != 0:
             return
@@ -539,27 +552,32 @@ class _AdaptiveExposure:
         if self._smooth_lum is None:
             self._smooth_lum = lum
         self._smooth_lum += self._alpha * (lum - self._smooth_lum)
-        error = self._smooth_lum - self._target
+        # error = target - smooth_lum  (negative = too bright, positive = too dark)
+        error = self._target - self._smooth_lum
         if abs(error) < 3:
             return
-        step = error * 4
+        # Proportional with larger gain for fast correction
+        step = error * 8
         new_exp = int(np.round(self._exposure + step))
         new_exp = np.clip(new_exp, self._exp_min, self._exp_max)
         if new_exp != self._exposure:
             self._exposure = new_exp
             self._ctl("exposure_time_absolute", self._exposure)
-        if self._exposure <= self._exp_min + 10 and error > 3:
+        # Gain as secondary: reduce when still too bright at min exposure
+        if self._exposure <= self._exp_min + 10 and error < -3:
             new_gain = max(self._gain - 2, self._gain_min)
             if new_gain != self._gain:
                 self._gain = new_gain
                 self._ctl("gain", self._gain)
-        elif self._exposure >= self._exp_max - 10 and error < -3:
+        elif self._exposure >= self._exp_max - 10 and error > 3:
             new_gain = min(self._gain + 2, self._gain_max)
             if new_gain != self._gain:
                 self._gain = new_gain
                 self._ctl("gain", self._gain)
 
     def release(self):
+        if not self._available:
+            return
         self._ctl("auto_exposure", 3)
 
 
