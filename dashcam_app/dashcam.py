@@ -495,22 +495,27 @@ def make_error_frame(message):
 
 
 class _V4L2Control:
-    """Minimal V4L2 wrapper: sets camera to manual mode on init and exposes
-    a set() method that the /api/set_camera endpoint calls.
-    No-ops silently on non-Linux (where v4l2-ctl is absent).
+    """V4L2 wrapper that sets manual mode on init and exposes set/get.
+    Also manages a software luminance scale factor (always works).
+    No-ops silently on non-Linux.
     """
     def __init__(self, dev_path="/dev/video0"):
         self._dev = dev_path
         self._available = True
+        self._scale = 1.0  # software brightness scale (always works)
         try:
-            subprocess.run(
+            r = subprocess.run(
                 ["v4l2-ctl", "-d", self._dev, "-c", "auto_exposure=1",
                  "-c", "backlight_compensation=0"],
                 capture_output=True, timeout=500,
             )
-            print(f"[CAM] Manual mode set on {self._dev}", flush=True)
+            if r.returncode == 0:
+                print(f"[CAM] Manual mode set on {self._dev}", flush=True)
+            else:
+                err = r.stderr.decode().strip()
+                print(f"[CAM] v4l2-ctl init failed: {err}", flush=True)
         except FileNotFoundError:
-            print("[CAM] v4l2-ctl not found — camera controls disabled", flush=True)
+            print("[CAM] v4l2-ctl not found — using software exposure only", flush=True)
             self._available = False
         except subprocess.TimeoutExpired:
             pass
@@ -519,12 +524,49 @@ class _V4L2Control:
         if not self._available:
             return
         try:
-            subprocess.run(
+            r = subprocess.run(
                 ["v4l2-ctl", "-d", self._dev, "-c", f"{control}={int(value)}"],
                 capture_output=True, timeout=500,
             )
+            if r.returncode != 0:
+                print(f"[CAM] v4l2-ctl {control}={value} failed: {r.stderr.decode().strip()}", flush=True)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
+
+    def get(self, *controls):
+        """Query V4L2 control values. Returns dict of {name: value}."""
+        result = {}
+        if not self._available:
+            return result
+        for ctrl in controls:
+            try:
+                r = subprocess.run(
+                    ["v4l2-ctl", "-d", self._dev, "-C", ctrl],
+                    capture_output=True, timeout=500, text=True,
+                )
+                if r.returncode == 0:
+                    val = r.stdout.strip().split(":")[-1].strip()
+                    result[ctrl] = val
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+        return result
+
+    def set_scale(self, value):
+        self._scale = max(0.1, min(3.0, value))
+
+    def apply(self, frame):
+        """Apply software exposure compensation to a frame copy."""
+        if abs(self._scale - 1.0) < 0.01:
+            return frame
+        f = frame.astype(np.float32) * self._scale
+        return np.clip(f, 0, 255).astype(np.uint8)
+
+    def state(self):
+        return {
+            "scale": round(self._scale, 2),
+            "v4l2_available": self._available,
+            "v4l2_values": self.get("auto_exposure", "exposure_time_absolute", "gain", "brightness"),
+        }
 
 
 class _CamWrapper:
@@ -543,6 +585,13 @@ class _CamWrapper:
     def set_v4l2(self, control, value):
         if self._v4l2:
             self._v4l2.set(control, value)
+    def set_scale(self, value):
+        if self._v4l2:
+            self._v4l2.set_scale(value)
+    def apply_exposure(self, frame):
+        return self._v4l2.apply(frame) if self._v4l2 else frame
+    def camera_state(self):
+        return self._v4l2.state() if self._v4l2 else {"scale": 1.0, "v4l2_available": False, "v4l2_values": {}}
     def start(self):
         return self._cap is not None and self._cap.isOpened()
     def read(self):
@@ -1716,7 +1765,8 @@ def inference_loop():
             _t_enc = time.perf_counter()
             _, buf = cv2.imencode('.jpg', im_bev, [cv2.IMWRITE_JPEG_QUALITY, 85])
             if state["debug_feed_active"]:
-                _, buf_debug = cv2.imencode('.jpg', im_debug, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                im_display = _camera.apply_exposure(im_debug) if _camera else im_debug
+                _, buf_debug = cv2.imencode('.jpg', im_display, [cv2.IMWRITE_JPEG_QUALITY, 85])
             timer.track("encode", time.perf_counter() - _t_enc)
 
             with frame_lock:
@@ -1963,7 +2013,10 @@ def api_set_camera():
         val = data.get(key)
         if val is not None:
             ctrl.set_v4l2(key, int(val))
-    return jsonify({"success": True})
+    scale = data.get("scale")
+    if scale is not None:
+        ctrl.set_scale(float(scale))
+    return jsonify({"success": True, **ctrl.camera_state()})
 
 
 # ---------------------------------------------------------------------------
