@@ -54,12 +54,6 @@ BEV_X_RANGE = (-30.0, 30.0)
 BEV_Y_RANGE = (-15.0, 15.0)
 
 
-def compute_severity(distance, comfort_dist=1.1, threshold=0.3):
-    if distance is None or distance > comfort_dist:
-        return 0.0
-    severity = (comfort_dist - distance) / threshold
-    return float(np.clip(severity, 0.0, 1.0))
-
 BEV_WIDTH = 240
 BEV_HEIGHT = 1001
 CAMERA_HEIGHT = 1.2192
@@ -441,8 +435,8 @@ state = {
     "calibration": None,
     "calibration_ldw_left_start_time": None,
     "calibration_ldw_right_start_time": None,
-    "calib_ldw_left_dists": [],
-    "calib_ldw_right_dists": [],
+    "calib_ldw_left_positions": [],
+    "calib_ldw_right_positions": [],
     "ldw_calibration": None,
     "car_center_x": 640,
     "car_center_offset": 0.0,
@@ -852,6 +846,45 @@ def _draw_raw_lanes_perspective(im, raw_lanes, bev_warp_M):
         pts_cam[:, 0] = np.clip(pts_cam[:, 0], 0, w_im - 1)
         pts_cam[:, 1] = np.clip(pts_cam[:, 1], 0, h_im - 1)
         cv2.polylines(im, [pts_cam], False, (220, 220, 220), 1, cv2.LINE_AA)
+
+
+def _draw_filtered_lanes_perspective(im, left_coeffs, right_coeffs, left_sev, right_sev):
+    if _bev_warp_M is None:
+        return
+    if left_coeffs is None and right_coeffs is None:
+        return
+
+    h_im, w_im = im.shape[:2]
+    sx, sy = w_im / CAPTURE_WIDTH, h_im / CAPTURE_HEIGHT
+    S = np.array([[sx, 0, 0], [0, sy, 0], [0, 0, 1]], dtype=np.float64)
+    M_inv = S @ np.linalg.inv(_bev_warp_M)
+
+    bw, bh = BEV_DISPLAY_WIDTH, BEV_DISPLAY_HEIGHT
+    xr, yr = BEV_X_RANGE[1], BEV_Y_RANGE[1]
+    y_vals = np.arange(2.0, 18.0, 0.5, dtype=np.float32)
+
+    def _sev_color(sev):
+        sev = np.clip(sev, 0.0, 1.0)
+        if sev < 0.5:
+            t = sev / 0.5
+            return (int(255 * (1.0 - t)), int(100 + 155 * t), 0)
+        else:
+            t = (sev - 0.5) / 0.5
+            return (0, int(255 * (1.0 - t)), int(255 * t))
+
+    for coeffs, sev in [(left_coeffs, left_sev), (right_coeffs, right_sev)]:
+        if coeffs is None:
+            continue
+        road_x = np.polyval(coeffs, y_vals)
+        u = ((road_x / (2 * xr) + 0.5) * bw).astype(np.float32)
+        v = ((1.0 - y_vals / yr) * bh).astype(np.float32)
+        pts_bev = np.column_stack([u, v])
+
+        pts_cam = pts_bev.reshape(1, -1, 2).astype(np.float32)
+        pts_cam = cv2.perspectiveTransform(pts_cam, M_inv).reshape(-1, 2).astype(np.int32)
+        pts_cam[:, 0] = np.clip(pts_cam[:, 0], 0, w_im - 1)
+        pts_cam[:, 1] = np.clip(pts_cam[:, 1], 0, h_im - 1)
+        cv2.polylines(im, [pts_cam], False, _sev_color(sev), 3, cv2.LINE_AA)
 
 
 def _robust_polyfit(road_x, road_y, deg=2):
@@ -1326,32 +1359,55 @@ def inference_loop():
                     })
                 timer.track("fcw", time.perf_counter() - _t_fcw)
 
-                ldw_cal = state.get("ldw_calibration") or {}
-                lc = ldw_cal.get("left_comfort_dist", 1.1)
-                rc = ldw_cal.get("right_comfort_dist", 1.1)
-                if lc > 10.0:
-                    lc = 1.1
-                if rc > 10.0:
-                    rc = 1.1
+                # LDW severity based on lane_position and calibrated comfort zones
+                if lane_width > 0.5 and lane_position >= 0:
+                    ldw_cal = state.get("ldw_calibration") or {}
+                    left_pos = ldw_cal.get("left_pos", 0.25)
+                    right_pos = ldw_cal.get("right_pos", 0.75)
 
-                y_eval = 5.0
-                if left_coeffs is not None:
-                    lx = np.polyval(left_coeffs, y_eval)
-                    d_left = compensated_x - lx
-                else:
-                    d_left = 999.0
-                if right_coeffs is not None:
-                    rx = np.polyval(right_coeffs, y_eval)
-                    d_right = rx - compensated_x
-                else:
-                    d_right = 999.0
+                    d_left = lane_position
+                    if d_left < left_pos and left_pos > 0:
+                        left_severity = float(np.clip((left_pos - d_left) / left_pos, 0.0, 1.0))
 
-                left_severity = compute_severity(d_left, lc)
-                right_severity = compute_severity(d_right, rc)
+                    d_right = 1.0 - lane_position
+                    if d_right < (1.0 - right_pos) and right_pos < 1.0:
+                        right_severity = float(np.clip(((1.0 - right_pos) - d_right) / (1.0 - right_pos), 0.0, 1.0))
 
-                if state["adas_enabled"]:
-                    if left_severity > 0.8 or right_severity > 0.8:
-                        ldw_triggered = True
+                    if state["adas_enabled"]:
+                        if left_severity > 0.8 or right_severity > 0.8:
+                            ldw_triggered = True
+
+                # LDW calibration data collection (records lane_position at edge of lane)
+                _t_now = time.time()
+                _cal_left = state.get("calibration_ldw_left_start_time")
+                if _cal_left is not None and lane_width > 0.5 and lane_position >= 0:
+                    if _t_now - _cal_left < LDW_CALIBRATION_SECONDS:
+                        state.setdefault("calib_ldw_left_positions", []).append(lane_position)
+                    else:
+                        _ps = state.get("calib_ldw_left_positions", [])
+                        if _ps:
+                            _med = float(np.median(_ps))
+                            _c = state.get("ldw_calibration") or {}
+                            _c["left_pos"] = _med
+                            state["ldw_calibration"] = _c
+                            print(f"[LDW] left cal done: lane_pos={_med:.3f}", flush=True)
+                            save_calibration_state()
+                        state["calibration_ldw_left_start_time"] = None
+
+                _cal_right = state.get("calibration_ldw_right_start_time")
+                if _cal_right is not None and lane_width > 0.5 and lane_position >= 0:
+                    if _t_now - _cal_right < LDW_CALIBRATION_SECONDS:
+                        state.setdefault("calib_ldw_right_positions", []).append(lane_position)
+                    else:
+                        _ps = state.get("calib_ldw_right_positions", [])
+                        if _ps:
+                            _med = float(np.median(_ps))
+                            _c = state.get("ldw_calibration") or {}
+                            _c["right_pos"] = _med
+                            state["ldw_calibration"] = _c
+                            print(f"[LDW] right cal done: lane_pos={_med:.3f}", flush=True)
+                            save_calibration_state()
+                        state["calibration_ldw_right_start_time"] = None
 
             _t_render = time.perf_counter()
             if _bev_warp_M is not None:
@@ -1380,12 +1436,15 @@ def inference_loop():
                 _draw_path_ribbon(im_debug, left_coeffs, right_coeffs, lane_width, im_bev=im_bev, bev_only=True)
 
             _draw_path_ribbon(im_debug, left_coeffs, right_coeffs, lane_width)
+            _draw_filtered_lanes_perspective(im_debug, left_coeffs, right_coeffs, left_severity, right_severity)
 
             cv2.putText(im_debug, "MOVING" if motion.is_moving() else "STOP",
                         (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
                         1.0, (0, 255, 255), 2, cv2.LINE_AA)
 
             state["moving"] = motion.is_moving()
+            state["left_severity"] = left_severity
+            state["right_severity"] = right_severity
             state["lane_width"] = lane_width
             timer.track("bev_render", time.perf_counter() - _t_render)
 
@@ -1545,8 +1604,10 @@ def status():
         "calibration_total": 100,
         "lens_calibrated": state["calibration"] is not None,
         "ldw_calibrated": state["ldw_calibration"] is not None,
-        "ldw_calibrated_left": state["ldw_calibration"] is not None and "left_comfort_dist" in state["ldw_calibration"],
-        "ldw_calibrated_right": state["ldw_calibration"] is not None and "right_comfort_dist" in state["ldw_calibration"],
+        "ldw_calibrated_left": state["ldw_calibration"] is not None and "left_pos" in state["ldw_calibration"],
+        "ldw_calibrated_right": state["ldw_calibration"] is not None and "right_pos" in state["ldw_calibration"],
+        "left_severity": state.get("left_severity", 0.0),
+        "right_severity": state.get("right_severity", 0.0),
         "car_center_x": state.get("car_center_x", 640),
         "moving": state.get("moving", False),
         "cuda_available": True,
@@ -1589,7 +1650,7 @@ def api_calibrate():
 @app.route('/api/calibrate_ldw_left', methods=['POST'])
 def api_calibrate_ldw_left():
     state["calibration_ldw_left_start_time"] = time.time()
-    state["calib_ldw_left_dists"] = []
+    state["calib_ldw_left_positions"] = []
     state["calibration_ldw_right_start_time"] = None
     state["error"] = None
     return jsonify({"status": "calibrating_left"})
@@ -1598,7 +1659,7 @@ def api_calibrate_ldw_left():
 @app.route('/api/calibrate_ldw_right', methods=['POST'])
 def api_calibrate_ldw_right():
     state["calibration_ldw_right_start_time"] = time.time()
-    state["calib_ldw_right_dists"] = []
+    state["calib_ldw_right_positions"] = []
     state["calibration_ldw_left_start_time"] = None
     state["error"] = None
     return jsonify({"status": "calibrating_right"})

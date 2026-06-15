@@ -99,17 +99,21 @@
         /* WARNING BANNER */
         .warning-banner {
             display: none;
+            position: fixed;
+            top: 80px;
+            left: 50%;
+            transform: translateX(-50%);
             width: 100%;
             max-width: 800px;
             text-align: center;
             padding: 16px;
             border-radius: 12px;
-            margin-bottom: 16px;
             font-size: 24px;
             font-weight: 800;
             letter-spacing: 2px;
             text-transform: uppercase;
             animation: warningFlash 0.5s infinite alternate;
+            z-index: 100;
         }
         
         .warning-banner.fcw {
@@ -320,6 +324,10 @@
         
         .error-banner {
             display: none;
+            position: fixed;
+            top: 140px;
+            left: 50%;
+            transform: translateX(-50%);
             width: 100%;
             max-width: 800px;
             background: rgba(239, 68, 68, 0.2);
@@ -327,8 +335,8 @@
             color: #fca5a5;
             padding: 12px 16px;
             border-radius: 8px;
-            margin-bottom: 16px;
             font-size: 14px;
+            z-index: 100;
         }
 
         .slider-card {
@@ -779,8 +787,8 @@
                     return;
                 }
                 const now = audioCtx.currentTime;
-                // Orange severity (>0.4) beeps every 600ms, Red (>0.8) beeps every 300ms
-                const beepInterval = severity > 0.8 ? 0.3 : 0.6;
+                // Continuous spectrum: interval shrinks, pitch rises as severity increases
+                const beepInterval = Math.max(0.1, 1.0 - severity * 0.9);
                 if (now - lastBeepTime < beepInterval) {
                     return;
                 }
@@ -792,12 +800,14 @@
                 osc.connect(gainNode);
                 gainNode.connect(audioCtx.destination);
                 
-                // Red pitch: 880Hz (A5), Orange pitch: 587.33Hz (D5)
-                osc.frequency.setValueAtTime(severity > 0.8 ? 880 : 587.33, now);
+                // Pitch rises from 400Hz to 1200Hz as severity goes 0→1
+                osc.frequency.setValueAtTime(400 + severity * 800, now);
                 osc.type = 'sine';
                 
+                // Volume ramps as severity increases
+                const vol = 0.05 + severity * 0.25;
                 gainNode.gain.setValueAtTime(0.001, now);
-                gainNode.gain.linearRampToValueAtTime(0.2, now + 0.05);
+                gainNode.gain.linearRampToValueAtTime(vol, now + 0.05);
                 gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
                 
                 osc.start(now);
@@ -1001,6 +1011,14 @@
                 const speedDisplay = document.getElementById('speedDisplay');
                 if (speedDisplay && data.moving !== undefined) {
                     speedDisplay.innerText = data.moving ? 'Speed: MOVING' : 'Speed: STOP';
+                }
+
+                // Audio beep on spectrum using severity
+                if (data.left_severity !== undefined || data.right_severity !== undefined) {
+                    const maxSev = Math.max(data.left_severity || 0, data.right_severity || 0);
+                    if (maxSev > 0.3) {
+                        playWarningBeep(maxSev);
+                    }
                 }
 
             } catch (err) {
