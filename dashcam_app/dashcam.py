@@ -967,7 +967,83 @@ class _SimpleMotionDetector:
         self.prev_gray = frame_gray.copy()
 
 
+class _VehicleTracker:
+    def __init__(self, association_dist=4.0, smooth_alpha=0.35, max_missed=8):
+        self.tracks = {}
+        self.next_id = 0
+        self.association_dist = association_dist
+        self.smooth_alpha = smooth_alpha
+        self.max_missed = max_missed
+
+    def update(self, detections):
+        new_tracks = {}
+        used = set()
+
+        for det in detections:
+            cx, cy = det["center_x"], det["center_y"]
+            best_id = None
+            best_dist = self.association_dist
+            for tid, t in self.tracks.items():
+                if tid in used:
+                    continue
+                d = np.hypot(cx - t["cx"], cy - t["cy"])
+                if d < best_dist:
+                    best_dist = d
+                    best_id = tid
+
+            if best_id is not None:
+                tid = best_id
+                t = self.tracks[tid]
+                old_cy = t["cy"]
+                t["cx"] = t["cx"] * (1 - self.smooth_alpha) + cx * self.smooth_alpha
+                t["cy"] = t["cy"] * (1 - self.smooth_alpha) + cy * self.smooth_alpha
+                t["prev_cy"] = old_cy
+                t["missed"] = 0
+                t["width"] = det.get("width", 0.5)
+                t["length"] = det.get("length", 0.5)
+                t["conf"] = det.get("conf", 0.0)
+                used.add(tid)
+                new_tracks[tid] = t
+            else:
+                tid = self.next_id
+                self.next_id += 1
+                new_tracks[tid] = {
+                    "id": tid,
+                    "cx": cx,
+                    "cy": cy,
+                    "prev_cy": cy,
+                    "missed": 0,
+                    "width": det.get("width", 0.5),
+                    "length": det.get("length", 0.5),
+                    "conf": det.get("conf", 0.0),
+                }
+
+        for tid, t in self.tracks.items():
+            if tid not in new_tracks:
+                t["missed"] += 1
+                if t["missed"] <= self.max_missed:
+                    new_tracks[tid] = t
+
+        self.tracks = new_tracks
+
+        result = []
+        for tid, t in self.tracks.items():
+            if t["missed"] > 0:
+                continue
+            result.append({
+                "center_x": t["cx"],
+                "center_y": t["cy"],
+                "width": t.get("width", 0.5),
+                "length": t.get("length", 0.5),
+                "conf": t.get("conf", 0.0),
+                "track_id": tid,
+                "prev_cy": t.get("prev_cy", t["cy"]),
+            })
+        return result
+
+
 motion = _SimpleMotionDetector()
+vehicle_tracker = _VehicleTracker()
 
 
 def inference_loop():
@@ -1062,6 +1138,7 @@ def inference_loop():
                                 "length": max(rh, 0.5),
                                 "conf": b.get("conf", 0.0),
                             })
+                detections = vehicle_tracker.update(detections)
                 if ll_mask is not None:
                     lane_mask = ll_mask
                     da_mask_big = cv2.resize(da_mask, (im_debug.shape[1], im_debug.shape[0]),
@@ -1346,7 +1423,16 @@ def inference_loop():
                     cx = det["center_x"]
                     cy = det["center_y"]
                     is_threat = False
-                    if abs(cx - compensated_x) < LANE_HALF_WIDTH and cy < FCW_WARNING_DISTANCE:
+                    in_lane = False
+                    if left_coeffs is not None and right_coeffs is not None:
+                        left_x = np.polyval(left_coeffs, cy)
+                        right_x = np.polyval(right_coeffs, cy)
+                        in_lane = left_x <= cx <= right_x
+                    else:
+                        in_lane = abs(cx) < LANE_HALF_WIDTH
+                    prev_cy = det.get("prev_cy", cy)
+                    getting_closer = (prev_cy - cy) > 0.3
+                    if in_lane and getting_closer and cy < FCW_WARNING_DISTANCE:
                         fcw_triggered = True
                         is_threat = True
                     det["threat"] = is_threat
