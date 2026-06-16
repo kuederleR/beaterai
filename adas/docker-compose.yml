@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
       args:
-        ROS_DISTRO: jazzy
+        ROS_DISTRO: humble
     runtime: nvidia
     deploy:
       resources:

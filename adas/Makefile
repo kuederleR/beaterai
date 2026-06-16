@@ -1,6 +1,6 @@
 .PHONY: build run jetson-build jetson-run dev-shell jetson-shell diag jetson-diag clean
 
-ROS_DISTRO ?= jazzy
+ROS_DISTRO ?= humble
 
 build:
 	docker compose build adas-pipeline
