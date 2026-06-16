@@ -25,6 +25,7 @@ RUN pip3 install --no-cache-dir \
 WORKDIR /workspace
 
 COPY adas_ws/src /workspace/src
+COPY test_diagnostic.py /workspace/test_diagnostic.py
 
 RUN . /opt/ros/${ROS_DISTRO}/setup.sh && \
     colcon build --symlink-install

@@ -60,6 +60,7 @@ RUN pip3 install --no-cache-dir \
 # Workspace setup
 WORKDIR /workspace
 COPY adas_ws/src /workspace/src
+COPY test_diagnostic.py /workspace/test_diagnostic.py
 
 RUN . /opt/ros/jazzy/setup.sh && \
     colcon build --symlink-install
