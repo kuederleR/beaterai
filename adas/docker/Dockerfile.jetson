@@ -6,7 +6,7 @@
 # Build:
 #   docker compose build adas-pipeline-jetson
 
-FROM nvcr.io/nvidia/pytorch:26.03-py3-igpu
+FROM nvcr.io/nvidia/pytorch:26.05-py3-igpu
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
