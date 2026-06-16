@@ -1,0 +1,6 @@
+adas_ws/install
+adas_ws/build
+adas_ws/log
+__pycache__
+*.pyc
+.git

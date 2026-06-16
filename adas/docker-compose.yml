@@ -1,0 +1,52 @@
+services:
+  adas-pipeline:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        ROS_DISTRO: jazzy
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./adas_ws/src:/workspace/src
+      - /dev/video0:/dev/video0
+    devices:
+      - /dev/video0:/dev/video0
+    restart: unless-stopped
+
+  adas-pipeline-jetson:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.jetson
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./adas_ws/src:/workspace/src
+      - /dev/video0:/dev/video0
+    devices:
+      - /dev/video0:/dev/video0
+    restart: unless-stopped

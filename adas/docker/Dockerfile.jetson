@@ -1,0 +1,70 @@
+# Jetson Orin Nano Dockerfile
+# Base: NVIDIA L4T JetPack (Ubuntu 22.04 Jammy)
+# ROS2: Jazzy installed via binary release for aarch64
+# PyTorch: Jetson-specific build from NVIDIA index
+#
+# Build:
+#   docker build -f docker/Dockerfile.jetson -t adas-jetson .
+
+FROM nvcr.io/nvidia/l4t-jetpack:r36.4.0
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV ROS_DISTRO=jazzy
+
+SHELL ["/bin/bash", "-c"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    gnupg \
+    wget \
+    python3-pip \
+    python3-numpy \
+    python3-setuptools \
+    python3-colcon-common-extensions \
+    python3-pydantic \
+    python3-lark \
+    python3-sip \
+    libpython3-dev \
+    v4l-utils \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir setuptools lark pybind11 catkin_pkg
+
+# Install ROS2 Jazzy aarch64 binary release
+RUN ROS2_PKG="ros2-jazzy-20250422-linux-aarch64.tar.gz" && \
+    curl -L \
+      "https://github.com/ros2/ros2/releases/download/release-jazzy-20250422/${ROS2_PKG}" \
+      -o /tmp/ros2.tar.gz && \
+    mkdir -p /opt/ros/jazzy && \
+    tar xf /tmp/ros2.tar.gz -C /opt/ros/jazzy --strip-components=1 && \
+    rm /tmp/ros2.tar.gz
+
+# Install missing ROS2 Python deps in the venv
+RUN . /opt/ros/jazzy/setup.sh && \
+    pip3 install --no-cache-dir catkin-pkg lark
+
+# Install Jetson PyTorch from NVIDIA index
+RUN pip3 install --no-cache-dir \
+    --index-url https://download.pytorch.org/whl/jetson \
+    torch torchvision
+
+# Install depth estimation dependencies
+RUN pip3 install --no-cache-dir \
+    transformers \
+    huggingface-hub \
+    opencv-python-headless
+
+# Workspace setup
+WORKDIR /workspace
+COPY adas_ws/src /workspace/src
+
+RUN . /opt/ros/jazzy/setup.sh && \
+    colcon build --symlink-install
+
+RUN echo "source /opt/ros/jazzy/setup.bash" >> /etc/bash.bashrc && \
+    echo "source /workspace/install/setup.bash" >> /etc/bash.bashrc
+
+CMD ["ros2", "launch", "adas_launch", "adas_pipeline.launch.py"]

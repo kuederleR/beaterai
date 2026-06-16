@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>adas_depth</name>
+  <version>0.1.0</version>
+  <description>Depth estimation node using Depth Anything V3 Small</description>
+  <maintainer email="user@beaterai.com">user</maintainer>
+  <license>MIT</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>adas_camera</depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

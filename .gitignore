@@ -1,3 +1,8 @@
 __pycache__/
 *.pyc
 *.pyo
+
+# ROS2 build artifacts
+adas/adas_ws/install/
+adas/adas_ws/build/
+adas/adas_ws/log/
