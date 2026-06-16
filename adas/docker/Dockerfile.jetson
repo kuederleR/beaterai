@@ -37,9 +37,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-launch-ros \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Jetson PyTorch from NVIDIA index
+# Install PyTorch (tries Jetson NVIDIA index for GPU, falls back to CPU on PyPI)
 RUN pip3 install --no-cache-dir \
-    --index-url https://download.pytorch.org/whl/jetson \
+    --extra-index-url https://download.pytorch.org/whl/jetson \
     torch torchvision
 
 # Install depth estimation dependencies
