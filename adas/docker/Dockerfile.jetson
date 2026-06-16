@@ -1,18 +1,18 @@
 # Jetson Orin Nano Dockerfile
-# Base: NVIDIA L4T JetPack (Ubuntu 22.04 Jammy)
-# ROS2: Humble installed via apt (native on Jammy)
-# PyTorch: Jetson-specific build from NVIDIA index
+# Base: NVIDIA PyTorch container for Jetson (integrated GPU)
+# ROS2: Jazzy installed via apt (native on Ubuntu 24.04 Noble)
+# PyTorch with CUDA: pre-installed in base image
 #
 # Build:
 #   docker compose build adas-pipeline-jetson
 
-FROM nvcr.io/nvidia/l4t-pytorch:r36.4.0
+FROM nvcr.io/nvidia/pytorch:26.03-py3-igpu
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
-ENV ROS_DISTRO=humble
+ENV ROS_DISTRO=jazzy
 
-# Add ROS2 apt repository for Humble (native on Jammy aarch64)
+# Add ROS2 apt repository (Noble aarch64)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
@@ -20,11 +20,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
     -o /usr/share/keyrings/ros-archive-keyring.gpg && \
-    echo "deb [arch=arm64 signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu jammy main" \
+    echo "deb [arch=arm64 signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu noble main" \
     > /etc/apt/sources.list.d/ros2.list
 
-# Install system deps + ROS2 Humble core packages
-# PyTorch with CUDA is pre-installed in l4t-pytorch base
+# Install system deps + ROS2 Jazzy core packages
+# PyTorch with CUDA is pre-installed in the base image
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-numpy \
@@ -33,9 +33,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-colcon-common-extensions \
     v4l-utils \
     build-essential \
-    ros-humble-ros-base \
-    ros-humble-cv-bridge \
-    ros-humble-launch-ros \
+    ros-jazzy-ros-base \
+    ros-jazzy-cv-bridge \
+    ros-jazzy-launch-ros \
     && rm -rf /var/lib/apt/lists/*
 
 # Install depth estimation dependencies
@@ -49,10 +49,10 @@ WORKDIR /workspace
 COPY adas_ws/src /workspace/src
 COPY test_diagnostic.py /workspace/test_diagnostic.py
 
-RUN . /opt/ros/humble/setup.sh && \
+RUN . /opt/ros/jazzy/setup.sh && \
     colcon build --symlink-install
 
-RUN echo "source /opt/ros/humble/setup.bash" >> /etc/bash.bashrc && \
+RUN echo "source /opt/ros/jazzy/setup.bash" >> /etc/bash.bashrc && \
     echo "source /workspace/install/setup.bash" >> /etc/bash.bashrc
 
 CMD ["ros2", "launch", "adas_launch", "adas_pipeline.launch.py"]
