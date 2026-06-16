@@ -6,7 +6,7 @@
 # Build:
 #   docker compose build adas-pipeline-jetson
 
-FROM nvcr.io/nvidia/l4t-jetpack:r36.4.0
+FROM nvcr.io/nvidia/l4t-pytorch:r36.4.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -24,6 +24,7 @@ RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
     > /etc/apt/sources.list.d/ros2.list
 
 # Install system deps + ROS2 Humble core packages
+# PyTorch with CUDA is pre-installed in l4t-pytorch base
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-numpy \
@@ -36,11 +37,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-cv-bridge \
     ros-humble-launch-ros \
     && rm -rf /var/lib/apt/lists/*
-
-# Install PyTorch (tries Jetson NVIDIA index for GPU, falls back to CPU on PyPI)
-RUN pip3 install --no-cache-dir \
-    --extra-index-url https://download.pytorch.org/whl/jetson \
-    torch torchvision
 
 # Install depth estimation dependencies
 RUN pip3 install --no-cache-dir \
