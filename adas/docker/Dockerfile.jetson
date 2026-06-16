@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     v4l-utils \
     build-essential \
+    bzip2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Python build tools (install via pip where apt packages are unavailable)
@@ -36,14 +37,15 @@ RUN pip3 install --no-cache-dir \
     colcon-common-extensions \
     pydantic
 
-# Install ROS2 Jazzy aarch64 binary release
-RUN ROS2_PKG="ros2-jazzy-20250422-linux-aarch64.tar.gz" && \
+# Install ROS2 Jazzy aarch64 binary release (Noble build)
+# Works on L4T r36.x (Jammy) for Python-only nodes; C++ nodes may need Noble base
+RUN ROS2_VER="ros2-jazzy-20260128-linux-noble-arm64.tar.bz2" && \
     curl -L \
-      "https://github.com/ros2/ros2/releases/download/release-jazzy-20250422/${ROS2_PKG}" \
-      -o /tmp/ros2.tar.gz && \
+      "https://github.com/ros2/ros2/releases/download/release-jazzy-20260128/${ROS2_VER}" \
+      -o /tmp/ros2.tar.bz2 && \
     mkdir -p /opt/ros/jazzy && \
-    tar xf /tmp/ros2.tar.gz -C /opt/ros/jazzy --strip-components=1 && \
-    rm /tmp/ros2.tar.gz && \
+    tar xf /tmp/ros2.tar.bz2 -C /opt/ros/jazzy --strip-components=1 && \
+    rm /tmp/ros2.tar.bz2 && \
     ldconfig
 
 # Install missing ROS2 Python deps
