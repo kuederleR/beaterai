@@ -24,30 +24,34 @@ RUN apt-get update && apt-get install -y \
     libomp-dev \
     libcusparselt0 \
     libcusparselt-dev \
+    python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip to ensure wheel compatibility
-RUN python3 -m pip install --upgrade pip
+# Create a virtual environment to avoid PEP 668 (externally-managed) issues
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# Upgrade pip in the venv
+RUN pip install --upgrade pip
 
 # Install ROS2 Python system deps not bundled in /opt/ros/jazzy
-RUN pip3 install --no-cache-dir --break-system-packages \
+RUN pip install --no-cache-dir \
     catkin-pkg \
     lark \
     empy
 
 # cv_bridge was compiled against NumPy < 2; force compatible version
-# Shadow the system numpy with pip instead of apt-get remove to preserve ROS 2 packages
-RUN pip3 install --no-cache-dir --upgrade --force-reinstall --break-system-packages 'numpy==1.26.4'
+RUN pip install --no-cache-dir --upgrade --force-reinstall 'numpy==1.26.4'
 
 # Install JetPack 6.2 compatible PyTorch and Torchvision
 # Point directly to the Jetson AI Lab index for CUDA 12.6 (cu126)
-RUN pip3 install --no-cache-dir --break-system-packages \
+RUN pip install --no-cache-dir \
     torch==2.8.0 \
     torchvision==0.23.0 \
     --index-url=https://pypi.jetson-ai-lab.io/jp6/cu126
 
 # Install depth estimation dependencies
-RUN pip3 install --no-cache-dir --break-system-packages \
+RUN pip install --no-cache-dir \
     transformers \
     huggingface-hub \
     opencv-python-headless
