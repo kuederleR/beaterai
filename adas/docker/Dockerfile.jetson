@@ -32,9 +32,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-colcon-common-extensions \
     v4l-utils \
     build-essential \
-    ros-jazzy-ros-base \
+    ros-jazzy-rclpy \
+    ros-jazzy-ros2cli \
+    ros-jazzy-ros2launch \
     ros-jazzy-cv-bridge \
     ros-jazzy-launch-ros \
+    ros-jazzy-std-msgs \
+    ros-jazzy-sensor-msgs \
+    ros-jazzy-geometry-msgs \
+    ros-jazzy-tf2-ros \
+    ros-jazzy-tf2-geometry-msgs \
     && rm -rf /var/lib/apt/lists/*
 
 # cv_bridge C extension compiled against NumPy 1.x; force-downgrade
