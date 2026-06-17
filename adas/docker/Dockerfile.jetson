@@ -64,8 +64,10 @@ RUN . /opt/ros/jazzy/setup.sh && \
 RUN echo "source /opt/ros/jazzy/setup.bash" >> /etc/bash.bashrc && \
     echo "source /workspace/install/setup.bash" >> /etc/bash.bashrc
 
-# Wrapper sources ROS2 + workspace, then delegates to NVIDIA entrypoint
-COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-ENTRYPOINT ["/entrypoint.sh"]
-CMD ["ros2", "launch", "adas_launch", "adas_pipeline.launch.py"]
+# Add ROS2 to PATH at image level so NVIDIA entrypoint exec finds it
+ENV PATH="/opt/ros/jazzy/bin:${PATH}"
+
+# Launcher: source workspace setup (PYTHONPATH/AMENT_PREFIX_PATH) then exec
+RUN printf '#!/bin/bash\nset -e\n. /workspace/install/setup.sh\nexec "$@"\n' > /launch.sh && \
+    chmod +x /launch.sh
+CMD ["/launch.sh", "ros2", "launch", "adas_launch", "adas_pipeline.launch.py"]
