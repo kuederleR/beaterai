@@ -22,6 +22,9 @@ RUN pip3 install --no-cache-dir \
     huggingface-hub \
     opencv-python-headless
 
+# cv_bridge compiled against NumPy 1.x; force-downgrade
+RUN pip3 install --no-cache-dir --force-reinstall 'numpy==1.26.4'
+
 WORKDIR /workspace
 
 COPY adas_ws/src /workspace/src
