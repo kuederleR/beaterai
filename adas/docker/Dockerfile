@@ -28,7 +28,7 @@ COPY adas_ws/src /workspace/src
 COPY test_diagnostic.py /workspace/test_diagnostic.py
 
 RUN . /opt/ros/${ROS_DISTRO}/setup.sh && \
-    colcon build --symlink-install
+    colcon build
 
 RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> /etc/bash.bashrc && \
     echo "source /workspace/install/setup.bash" >> /etc/bash.bashrc
