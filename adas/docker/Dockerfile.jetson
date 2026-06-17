@@ -46,11 +46,14 @@ RUN pip3 install --no-cache-dir \
 
 # Workspace setup
 WORKDIR /workspace
+# Remove pre-existing packages from base image, then copy ours
+RUN rm -rf /workspace/src/*
 COPY adas_ws/src /workspace/src
 COPY test_diagnostic.py /workspace/test_diagnostic.py
 
 RUN . /opt/ros/jazzy/setup.sh && \
-    colcon build --symlink-install
+    colcon build --symlink-install \
+    --packages-select adas_camera adas_depth adas_launch
 
 RUN echo "source /opt/ros/jazzy/setup.bash" >> /etc/bash.bashrc && \
     echo "source /workspace/install/setup.bash" >> /etc/bash.bashrc
