@@ -1,19 +1,14 @@
 # Jetson Orin Nano Dockerfile
-# Multi-stage: copy ROS2 Jazzy from official image into NVIDIA PyTorch base
+# Uses NVIDIA Isaac ROS base image with ROS 2 Humble, TensorRT, CUDA
 #
 # Build:
 #   docker compose build adas-pipeline-jetson
 
-FROM ros:jazzy-ros-base AS ros2-base
-
-FROM nvcr.io/nvidia/pytorch:26.05-py3
+FROM nvcr.io/nvidia/isaac/ros:aarch64-ros2_humble_b36.2.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
-ENV ROS_DISTRO=jazzy
-
-# Copy ROS2 installation from official image
-COPY --from=ros2-base /opt/ros/jazzy /opt/ros/jazzy
+ENV ROS_DISTRO=humble
 
 # Install build/runtime deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -25,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install ROS2 Python system deps not bundled in /opt/ros/jazzy
+# Install ROS2 Python system deps not bundled in /opt/ros/humble
 RUN pip3 install --no-cache-dir \
     catkin-pkg \
     lark \
@@ -35,8 +30,9 @@ RUN pip3 install --no-cache-dir \
 RUN apt-get remove -y python3-numpy && \
     pip3 install --no-cache-dir --force-reinstall 'numpy==1.26.4'
 
-# PyTorch tries to dlopen UCC from HPCX; version mismatch causes crash
-ENV TORCH_UCC_DISABLE=1
+# Install PyTorch and torchvision for Jetson aarch64 (JetPack 6.2 / CUDA 12.6)
+RUN pip3 install torch==2.8.0 torchvision==0.23.0 \
+    --index-url=https://pypi.jetson-ai-lab.io/jp6/cu126
 
 # Install depth estimation dependencies
 RUN pip3 install --no-cache-dir \
@@ -50,17 +46,17 @@ RUN rm -rf /workspace/src/*
 COPY adas_ws/src /workspace/src
 COPY test_diagnostic.py /workspace/test_diagnostic.py
 
-RUN . /opt/ros/jazzy/setup.sh && \
+RUN . /opt/ros/humble/setup.sh && \
     colcon build \
     --packages-select adas_camera adas_depth adas_launch
 
-RUN echo "source /opt/ros/jazzy/setup.bash" >> /etc/bash.bashrc && \
+RUN echo "source /opt/ros/humble/setup.bash" >> /etc/bash.bashrc && \
     echo "source /workspace/install/setup.bash" >> /etc/bash.bashrc
 
 # Add ROS2 to PATH at image level so NVIDIA entrypoint exec finds it
-ENV PATH="/opt/ros/jazzy/bin:${PATH}"
+ENV PATH="/opt/ros/humble/bin:${PATH}"
 
 # Launcher: source workspace setup, then exec ros2 by full path
-RUN printf '#!/bin/bash\nset -e\n. /opt/ros/jazzy/setup.bash && . /workspace/install/setup.bash\nexec /opt/ros/jazzy/bin/ros2 "$@"\n' > /launch.sh && \
+RUN printf '#!/bin/bash\nset -e\n. /opt/ros/humble/setup.bash && . /workspace/install/setup.bash\nexec /opt/ros/humble/bin/ros2 "$@"\n' > /launch.sh && \
     chmod +x /launch.sh
 CMD ["/launch.sh", "launch", "adas_launch", "adas_pipeline.launch.py"]

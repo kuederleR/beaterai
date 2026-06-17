@@ -164,7 +164,7 @@ def check_ros2():
     results = []
 
     ros_distro = os.environ.get("ROS_DISTRO", "")
-    results.append(check(f"ROS_DISTRO={ros_distro}", ros_distro == "jazzy",
+    results.append(check(f"ROS_DISTRO={ros_distro}", ros_distro == "humble",
                          "Source /opt/ros/jazzy/setup.bash"))
 
     install_sh = os.path.exists("/workspace/install/setup.bash")
