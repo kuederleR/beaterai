@@ -31,7 +31,7 @@ RUN apt-get remove -y python3-numpy && \
     pip3 install --no-cache-dir --force-reinstall --break-system-packages 'numpy==1.26.4'
 
 # Install PyTorch and torchvision for Jetson aarch64 (JetPack 6.2 / CUDA 12.6)
-RUN pip3 install --break-system-packages torch==2.8.0 torchvision==0.23.0 \
+RUN pip3 install --break-system-packages torch==2.11.0 torchvision==0.26.0 \
     --index-url=https://pypi.jetson-ai-lab.io/jp6/cu126
 
 # Install depth estimation dependencies
