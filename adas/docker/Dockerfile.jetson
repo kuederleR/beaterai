@@ -38,6 +38,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-jazzy-launch-ros \
     && rm -rf /var/lib/apt/lists/*
 
+# cv_bridge and other ROS2 C extensions compiled against NumPy 1.x ABI
+RUN pip3 install --no-cache-dir 'numpy<2'
+
+# Remove HPCX from base image - UCC/UCS version mismatch breaks torch/transformers
+RUN rm -rf /opt/hpcx
+
 # Install depth estimation dependencies
 RUN pip3 install --no-cache-dir \
     transformers \
