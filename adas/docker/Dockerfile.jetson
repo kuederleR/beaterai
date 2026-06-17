@@ -1,10 +1,10 @@
 # Jetson Orin Nano Dockerfile
-# Base: NVIDIA PyTorch container for Jetson (integrated GPU)
-# ROS2: Jazzy installed via apt (native on Ubuntu 24.04 Noble)
-# PyTorch with CUDA: pre-installed in base image
+# Multi-stage: copy ROS2 Jazzy from official image into NVIDIA PyTorch base
 #
 # Build:
 #   docker compose build adas-pipeline-jetson
+
+FROM ros:jazzy-ros-base AS ros2-base
 
 FROM nvcr.io/nvidia/pytorch:26.05-py3
 
@@ -12,19 +12,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV ROS_DISTRO=jazzy
 
-# Add ROS2 apt repository (Noble aarch64)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# Copy ROS2 installation from official image
+COPY --from=ros2-base /opt/ros/jazzy /opt/ros/jazzy
 
-RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
-    -o /usr/share/keyrings/ros-archive-keyring.gpg && \
-    echo "deb [arch=arm64 signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu noble main" \
-    > /etc/apt/sources.list.d/ros2.list
-
-# Install system deps + ROS2 Jazzy core packages
-# PyTorch with CUDA is pre-installed in the base image
+# Install build/runtime deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-setuptools \
@@ -32,17 +23,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-colcon-common-extensions \
     v4l-utils \
     build-essential \
-    ros-jazzy-rclpy \
-    ros-jazzy-ros2cli \
-    ros-jazzy-ros2launch \
-    ros-jazzy-cv-bridge \
-    ros-jazzy-launch-ros \
-    ros-jazzy-std-msgs \
-    ros-jazzy-sensor-msgs \
-    ros-jazzy-geometry-msgs \
-    ros-jazzy-tf2-ros \
-    ros-jazzy-tf2-geometry-msgs \
     && rm -rf /var/lib/apt/lists/*
+
+# Install ROS2 Python system deps not bundled in /opt/ros/jazzy
+RUN pip3 install --no-cache-dir \
+    catkin-pkg \
+    lark \
+    empy
 
 # cv_bridge C extension compiled against NumPy 1.x; force-downgrade
 RUN apt-get remove -y python3-numpy && \
@@ -59,7 +46,6 @@ RUN pip3 install --no-cache-dir \
 
 # Workspace setup
 WORKDIR /workspace
-# Remove pre-existing packages from base image, then copy ours
 RUN rm -rf /workspace/src/*
 COPY adas_ws/src /workspace/src
 COPY test_diagnostic.py /workspace/test_diagnostic.py
