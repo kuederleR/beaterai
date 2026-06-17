@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y \
     v4l-utils \
     build-essential \
     python3-venv \
+    python3-opencv \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a virtual environment to avoid PEP 668 (externally-managed) issues
@@ -40,23 +41,23 @@ RUN pip install --no-cache-dir --upgrade --force-reinstall 'numpy==1.26.4'
 # Install depth estimation dependencies
 RUN pip install --no-cache-dir \
     transformers \
-    huggingface-hub \
-    opencv-python-headless
+    huggingface-hub
 
 WORKDIR /workspace
 RUN rm -rf /workspace/src/*
 COPY adas_ws/src /workspace/src
 COPY test_diagnostic.py /workspace/test_diagnostic.py
 
-RUN . /opt/ros/jazzy/setup.sh && \
+RUN . /opt/venv/bin/activate && . /opt/ros/jazzy/setup.sh && \
     colcon build \
     --packages-select adas_camera adas_depth adas_launch
 
-RUN echo "source /opt/ros/jazzy/setup.bash" >> /etc/bash.bashrc && \
+RUN echo "source /opt/venv/bin/activate" >> /etc/bash.bashrc && \
+    echo "source /opt/ros/jazzy/setup.bash" >> /etc/bash.bashrc && \
     echo "source /workspace/install/setup.bash" >> /etc/bash.bashrc
 
 ENV PATH="/opt/ros/jazzy/bin:${PATH}"
 
-RUN printf '#!/bin/bash\nset -e\n. /opt/ros/jazzy/setup.bash && . /workspace/install/setup.bash\nexec /opt/ros/jazzy/bin/ros2 "$@"\n' > /launch.sh && \
+RUN printf '#!/bin/bash\nset -e\n. /opt/venv/bin/activate && . /opt/ros/jazzy/setup.bash && . /workspace/install/setup.bash\nexec /opt/ros/jazzy/bin/ros2 "$@"\n' > /launch.sh && \
     chmod +x /launch.sh
 CMD ["/launch.sh", "launch", "adas_launch", "adas_pipeline.launch.py"]
