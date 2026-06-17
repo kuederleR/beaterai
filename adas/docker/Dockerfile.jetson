@@ -64,5 +64,8 @@ RUN . /opt/ros/jazzy/setup.sh && \
 RUN echo "source /opt/ros/jazzy/setup.bash" >> /etc/bash.bashrc && \
     echo "source /workspace/install/setup.bash" >> /etc/bash.bashrc
 
-# Use bash -c to source ROS2 before launching; NVIDIA entrypoint exec's the CMD
-CMD ["/bin/bash", "-c", "source /opt/ros/jazzy/setup.bash && source /workspace/install/setup.bash && exec ros2 launch adas_launch adas_pipeline.launch.py"]
+# Wrapper sources ROS2 + workspace, then delegates to NVIDIA entrypoint
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["ros2", "launch", "adas_launch", "adas_pipeline.launch.py"]
