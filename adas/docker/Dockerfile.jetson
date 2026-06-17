@@ -20,6 +20,10 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     python3-venv \
     python3-opencv \
+    ros-jazzy-cv-bridge \
+    ros-jazzy-vision-opencv \
+    ros-jazzy-image-transport \
+    ros-jazzy-sensor-msgs \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a virtual environment to avoid PEP 668 (externally-managed) issues
