@@ -67,7 +67,7 @@ RUN echo "source /opt/ros/jazzy/setup.bash" >> /etc/bash.bashrc && \
 # Add ROS2 to PATH at image level so NVIDIA entrypoint exec finds it
 ENV PATH="/opt/ros/jazzy/bin:${PATH}"
 
-# Launcher: source workspace setup (PYTHONPATH/AMENT_PREFIX_PATH) then exec
-RUN printf '#!/bin/bash\nset -e\n. /workspace/install/setup.sh\nexec "$@"\n' > /launch.sh && \
+# Launcher: source workspace setup, then exec ros2 by full path
+RUN printf '#!/bin/bash\nset -e\n. /workspace/install/setup.sh\nexec /opt/ros/jazzy/bin/ros2 "$@"\n' > /launch.sh && \
     chmod +x /launch.sh
-CMD ["/launch.sh", "ros2", "launch", "adas_launch", "adas_pipeline.launch.py"]
+CMD ["/launch.sh", "launch", "adas_launch", "adas_pipeline.launch.py"]
