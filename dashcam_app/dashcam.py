@@ -1108,6 +1108,10 @@ def inference_loop():
     _right_smooth = None
     _left_stale = 0
     _right_stale = 0
+    _left_history = []
+    _right_history = []
+    _HISTORY_MAX = 15
+    _SNAP_CURVE_THRESHOLD = 0.003
 
     _expected_left_bx = None
     _expected_right_bx = None
@@ -1323,6 +1327,7 @@ def inference_loop():
                         _expected_left_missed += 1
                         if _expected_left_missed > 60:
                             _expected_left_bx = None
+                            _left_history.clear()
 
                     if right_lane is not None:
                         det_bx = float(right_lane[np.argmax(right_lane[:, 1]), 0])
@@ -1332,6 +1337,7 @@ def inference_loop():
                         _expected_right_missed += 1
                         if _expected_right_missed > 60:
                             _expected_right_bx = None
+                            _right_history.clear()
 
                     # Update expected lane width
                     if left_lane is not None and right_lane is not None:
@@ -1361,39 +1367,60 @@ def inference_loop():
                                     else:
                                         right_coeffs = poly
 
-                    # Per-side prediction: when one lane is detected but the other is lost,
-                    # predict the missing lane from the detected lane + expected width.
-                    # This prevents jumping to a far lane when the correct lane is temporarily lost.
-                    if left_coeffs is None and right_coeffs is not None and _expected_width_px is not None:
-                        rw = _expected_width_px * (2 * BEV_X_RANGE[1]) / BEV_DISPLAY_WIDTH
-                        left_coeffs = right_coeffs.copy()
-                        left_coeffs[2] = right_coeffs[2] - rw
-                    if right_coeffs is None and left_coeffs is not None and _expected_width_px is not None:
-                        rw = _expected_width_px * (2 * BEV_X_RANGE[1]) / BEV_DISPLAY_WIDTH
-                        right_coeffs = left_coeffs.copy()
-                        right_coeffs[2] = left_coeffs[2] + rw
+                    # ── Raw detection history ──
+                    if left_coeffs is not None:
+                        _left_history.append(left_coeffs.copy())
+                        if len(_left_history) > _HISTORY_MAX:
+                            _left_history.pop(0)
+                    if right_coeffs is not None:
+                        _right_history.append(right_coeffs.copy())
+                        if len(_right_history) > _HISTORY_MAX:
+                            _right_history.pop(0)
 
-                    # Intersection hold: when both lanes are lost and expected positions exist,
-                    # project straight lanes from the expected positions
+                    # ── Loss prediction ──
+                    # Priority: own history → width-copy from other lane
+                    if left_coeffs is None and right_coeffs is not None:
+                        if _left_history:
+                            left_coeffs = np.mean(_left_history[-5:], axis=0).copy()
+                        elif _expected_width_px is not None:
+                            rw = _expected_width_px * (2 * BEV_X_RANGE[1]) / BEV_DISPLAY_WIDTH
+                            left_coeffs = right_coeffs.copy()
+                            left_coeffs[2] = right_coeffs[2] - rw
+                    if right_coeffs is None and left_coeffs is not None:
+                        if _right_history:
+                            right_coeffs = np.mean(_right_history[-5:], axis=0).copy()
+                        elif _expected_width_px is not None:
+                            rw = _expected_width_px * (2 * BEV_X_RANGE[1]) / BEV_DISPLAY_WIDTH
+                            right_coeffs = left_coeffs.copy()
+                            right_coeffs[2] = left_coeffs[2] + rw
+
+                    # ── Both-lost recovery ──
+                    # Priority: history average → intersection hold (vertical lines)
                     if left_coeffs is None and right_coeffs is None:
-                        should_hold = (_expected_left_bx is not None and _expected_right_bx is not None
-                                       and _expected_width_px is not None
-                                       and 20.0 < _expected_width_px < 350.0
-                                       and _intersection_hold < 60)
-                        if should_hold:
-                            n_synth = 30
-                            y_s = np.linspace(0, h_bev - 1, n_synth, dtype=np.float32)
-                            left_bev = np.column_stack([np.full_like(y_s, _expected_left_bx), y_s])
-                            right_bev = np.column_stack([np.full_like(y_s, _expected_right_bx), y_s])
-                            lr = _bev_px_to_road(left_bev, w_bev, h_bev)
-                            rr = _bev_px_to_road(right_bev, w_bev, h_bev)
-                            lv = ~np.isnan(lr[:, 0]) & ~np.isnan(lr[:, 1])
-                            rv = ~np.isnan(rr[:, 0]) & ~np.isnan(rr[:, 1])
-                            if np.sum(lv) >= 4:
-                                left_coeffs = np.polyfit(lr[lv, 1], lr[lv, 0], 2)
-                            if np.sum(rv) >= 4:
-                                right_coeffs = np.polyfit(rr[rv, 1], rr[rv, 0], 2)
-                            _intersection_hold += 1
+                        recovered = False
+                        if _left_history and _right_history:
+                            left_coeffs = np.mean(_left_history[-5:], axis=0).copy()
+                            right_coeffs = np.mean(_right_history[-5:], axis=0).copy()
+                            recovered = True
+                        if not recovered:
+                            should_hold = (_expected_left_bx is not None and _expected_right_bx is not None
+                                           and _expected_width_px is not None
+                                           and 20.0 < _expected_width_px < 350.0
+                                           and _intersection_hold < 60)
+                            if should_hold:
+                                n_synth = 30
+                                y_s = np.linspace(0, h_bev - 1, n_synth, dtype=np.float32)
+                                left_bev = np.column_stack([np.full_like(y_s, _expected_left_bx), y_s])
+                                right_bev = np.column_stack([np.full_like(y_s, _expected_right_bx), y_s])
+                                lr = _bev_px_to_road(left_bev, w_bev, h_bev)
+                                rr = _bev_px_to_road(right_bev, w_bev, h_bev)
+                                lv = ~np.isnan(lr[:, 0]) & ~np.isnan(lr[:, 1])
+                                rv = ~np.isnan(rr[:, 0]) & ~np.isnan(rr[:, 1])
+                                if np.sum(lv) >= 4:
+                                    left_coeffs = np.polyfit(lr[lv, 1], lr[lv, 0], 2)
+                                if np.sum(rv) >= 4:
+                                    right_coeffs = np.polyfit(rr[rv, 1], rr[rv, 0], 2)
+                                _intersection_hold += 1
 
                     if left_coeffs is not None and right_coeffs is not None:
                         y_eval = 5.0
@@ -1422,12 +1449,16 @@ def inference_loop():
                         left_coeffs = None
                         right_coeffs = None
 
-                # EMA smoothing — slow adaptation when moving (hold lane trajectory)
-                alpha = 0.10 if motion.is_moving() else 0.35
+                # ── Curvature-aware smoothing ──
+                # Normal EMA when stable; snap (alpha=1.0) when curve changes dramatically
+                # so intersections and sharp transitions track immediately.
+                base_alpha = 0.10 if motion.is_moving() else 0.35
                 if left_coeffs is not None:
                     if _left_smooth is None or len(_left_smooth) != len(left_coeffs):
                         _left_smooth = left_coeffs.copy()
                     else:
+                        curve_delta = abs(left_coeffs[0] - _left_smooth[0])
+                        alpha = 1.0 if curve_delta > _SNAP_CURVE_THRESHOLD else base_alpha
                         _left_smooth = _left_smooth * (1 - alpha) + left_coeffs * alpha
                     _left_stale = 0
                 elif _left_smooth is not None:
@@ -1440,6 +1471,8 @@ def inference_loop():
                     if _right_smooth is None or len(_right_smooth) != len(right_coeffs):
                         _right_smooth = right_coeffs.copy()
                     else:
+                        curve_delta = abs(right_coeffs[0] - _right_smooth[0])
+                        alpha = 1.0 if curve_delta > _SNAP_CURVE_THRESHOLD else base_alpha
                         _right_smooth = _right_smooth * (1 - alpha) + right_coeffs * alpha
                     _right_stale = 0
                 elif _right_smooth is not None:
