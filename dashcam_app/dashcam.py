@@ -4,7 +4,6 @@ import json
 import logging
 import time
 import threading
-import subprocess
 import datetime
 import cv2
 import numpy as np
@@ -494,94 +493,9 @@ def make_error_frame(message):
     return buf.tobytes()
 
 
-class _V4L2Control:
-    """V4L2 wrapper that sets manual mode on init and exposes set/get.
-    Also manages a software luminance scale factor (always works).
-    No-ops silently on non-Linux.
-    """
-    def __init__(self, dev_path="/dev/video0"):
-        self._dev = dev_path
-        self._available = True
-        self._scale = 1.0  # software brightness scale (always works)
-        try:
-            r = subprocess.run(
-                ["v4l2-ctl", "-d", self._dev, "-c", "auto_exposure=1",
-                 "-c", "backlight_compensation=0"],
-                capture_output=True, timeout=500,
-            )
-            if r.returncode == 0:
-                print(f"[CAM] Manual mode set on {self._dev}", flush=True)
-            else:
-                err = r.stderr.decode().strip()
-                print(f"[CAM] v4l2-ctl init FAILED: {err}", flush=True)
-                self._available = False
-        except FileNotFoundError:
-            print("[CAM] v4l2-ctl not found — using software exposure only", flush=True)
-            self._available = False
-        except subprocess.TimeoutExpired:
-            pass
-
-    def set(self, control, value):
-        if not self._available:
-            return
-        try:
-            r = subprocess.run(
-                ["v4l2-ctl", "-d", self._dev, "-c", f"{control}={int(value)}"],
-                capture_output=True, timeout=500,
-            )
-            if r.returncode != 0:
-                print(f"[CAM] v4l2-ctl {control}={value} FAILED: {r.stderr.decode().strip()}", flush=True)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-
-    def get(self, *controls):
-        """Query V4L2 control values. Returns dict of {name: value}."""
-        result = {}
-        if not self._available:
-            return result
-        for ctrl in controls:
-            try:
-                r = subprocess.run(
-                    ["v4l2-ctl", "-d", self._dev, "-C", ctrl],
-                    capture_output=True, timeout=500, text=True,
-                )
-                if r.returncode == 0:
-                    raw = r.stdout.strip()
-                    # Try to extract numeric value from various output formats:
-                    # "5" or "auto_exposure: 5" or "auto_exposure: ... value=5"
-                    if "value=" in raw:
-                        val = raw.split("value=")[-1].split()[0]
-                    elif ":" in raw:
-                        val = raw.split(":")[-1].strip()
-                    else:
-                        val = raw
-                    result[ctrl] = val
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                pass
-        return result
-
-    def set_scale(self, value):
-        self._scale = max(0.02, min(3.0, value))
-
-    def apply(self, frame):
-        """Apply software exposure compensation to a frame copy."""
-        if abs(self._scale - 1.0) < 0.01:
-            return frame
-        f = frame.astype(np.float32) * self._scale
-        return np.clip(f, 0, 255).astype(np.uint8)
-
-    def state(self):
-        return {
-            "scale": round(self._scale, 2),
-            "v4l2_available": self._available,
-            "v4l2_values": self.get("auto_exposure", "exposure_time_absolute", "gain", "brightness"),
-        }
-
-
 class _CamWrapper:
     def __init__(self):
         self._dev_path = DEV_VIDEO_PATH if (DEV_VIDEO_PATH and os.path.exists(DEV_VIDEO_PATH)) else None
-        self._v4l2 = _V4L2Control(VIDEO_SOURCE) if self._dev_path is None else None
         self._open()
     def _open(self):
         if self._dev_path:
@@ -591,16 +505,6 @@ class _CamWrapper:
             self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
             self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
             self._cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
-    def set_v4l2(self, control, value):
-        if self._v4l2:
-            self._v4l2.set(control, value)
-    def set_scale(self, value):
-        if self._v4l2:
-            self._v4l2.set_scale(value)
-    def apply_exposure(self, frame):
-        return self._v4l2.apply(frame) if self._v4l2 else frame
-    def camera_state(self):
-        return self._v4l2.state() if self._v4l2 else {"scale": 1.0, "v4l2_available": False, "v4l2_values": {}}
     def start(self):
         return self._cap is not None and self._cap.isOpened()
     def read(self):
@@ -1811,8 +1715,7 @@ def inference_loop():
             _t_enc = time.perf_counter()
             _, buf = cv2.imencode('.jpg', im_bev, [cv2.IMWRITE_JPEG_QUALITY, 85])
             if state["debug_feed_active"]:
-                im_display = _camera.apply_exposure(im_debug) if _camera else im_debug
-                _, buf_debug = cv2.imencode('.jpg', im_display, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                _, buf_debug = cv2.imencode('.jpg', im_debug, [cv2.IMWRITE_JPEG_QUALITY, 85])
             timer.track("encode", time.perf_counter() - _t_enc)
 
             with frame_lock:
@@ -1976,7 +1879,6 @@ def status():
         "cuda_available": True,
         "gpu_device_name": "NVIDIA Jetson",
         "model": "YOLOPv2",
-        "camera": _camera.camera_state() if _camera else {"scale": 1.0, "v4l2_available": False, "v4l2_values": {}},
     })
 
 
@@ -2048,22 +1950,6 @@ def api_set_trace_start():
 @app.route('/api/set_crop', methods=['POST'])
 def api_set_crop():
     return jsonify({"success": True})
-
-
-@app.route('/api/set_camera', methods=['POST'])
-def api_set_camera():
-    data = request.json or {}
-    ctrl = _camera
-    if ctrl is None:
-        return jsonify({"success": False, "error": "camera not started"}), 503
-    for key in ("auto_exposure", "exposure_time_absolute", "gain", "brightness"):
-        val = data.get(key)
-        if val is not None:
-            ctrl.set_v4l2(key, int(val))
-    scale = data.get("scale")
-    if scale is not None:
-        ctrl.set_scale(float(scale))
-    return jsonify({"success": True, **ctrl.camera_state()})
 
 
 # ---------------------------------------------------------------------------
