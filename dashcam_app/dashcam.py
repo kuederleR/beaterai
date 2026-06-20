@@ -519,7 +519,7 @@ frame_lock = threading.Lock()
 
 state = {
     "recording": False,
-    "adas_enabled": False,
+    "adas_enabled": True,
     "fcw_warning": False,
     "ldw_warning": False,
     "capture_fps": 0.0,
@@ -2055,6 +2055,8 @@ def api_calibrate():
     state["calib_vp_y_list"] = []
     state["calibration_frames_left"] = 0
     state["error"] = None
+    # Enable ADAS so YOLOP inference runs and produces lane masks for VP detection
+    state["adas_enabled"] = True
     # Clear stale manual BEV calibration so auto-VP won't be overridden
     bev_cal["src_points"] = []
     bev_cal["dst_points"] = []
