@@ -99,6 +99,104 @@ _road_to_bev_M = None
 _fallback_vp = None
 _bev_warp_M = None
 
+# ── Auto-calibration state ──────────────────────────────────────────────
+_VP_BUFFER_MAX = 45
+_vp_buffer = []            # list of (vp_x, vp_y) estimates
+_vp_buffer_ready = False   # True when buffer is full and stable
+_vp_auto_calibrated = False
+
+def _estimate_vp_from_ll_mask(ll_mask, car_center_x):
+    """Estimate vanishing point from lane-line mask.
+
+    Scans rows from bottom up, collects innermost left/right lane pixels,
+    fits a line to each side, and returns their intersection (vp_x, vp_y)
+    in the 640x416 inference coordinate space. Returns None on failure.
+    """
+    h, w = ll_mask.shape[:2]
+    end_row = h // 3
+    start_row = h - 1
+
+    left_px = []
+    right_px = []
+    for row in range(start_row, end_row - 1, -1):
+        nz = np.flatnonzero(ll_mask[row, :])
+        if len(nz) == 0:
+            continue
+        lc = nz[nz < car_center_x]
+        rc = nz[nz > car_center_x]
+        if len(lc) > 0:
+            left_px.append((float(lc[-1]), float(row)))
+        if len(rc) > 0:
+            right_px.append((float(rc[0]), float(row)))
+
+    if len(left_px) < 6 or len(right_px) < 6:
+        return None
+
+    left_a = np.array(left_px, dtype=np.float32)
+    right_a = np.array(right_px, dtype=np.float32)
+
+    # Use bottom half of points for linear fit (closest to car, least curvature)
+    n_left = len(left_a)
+    n_right = len(right_a)
+    left_bot = left_a[max(0, n_left // 2):]
+    right_bot = right_a[max(0, n_right // 2):]
+    if len(left_bot) < 4 or len(right_bot) < 4:
+        return None
+
+    try:
+        l_m, l_b = np.polyfit(left_bot[:, 1], left_bot[:, 0], 1)
+        r_m, r_b = np.polyfit(right_bot[:, 1], right_bot[:, 0], 1)
+    except np.linalg.LinAlgError:
+        return None
+
+    denom = l_m - r_m
+    if abs(denom) < 1e-6:
+        return None
+
+    y_vp = (r_b - l_b) / denom
+    x_vp = l_m * y_vp + l_b
+
+    # Sanity: VP should be above mid-image and within reasonable x-range
+    if y_vp < 0 or y_vp > h * 0.55 or x_vp < -w * 0.5 or x_vp > w * 1.5:
+        return None
+
+    return (x_vp, y_vp)
+
+
+def _rebuild_geometry_from_vp(vp_x, vp_y):
+    """Rebuild road-plane geometry and BEV warp from a (vp_x, vp_y) estimate.
+
+    Updates H_inv, _road_to_bev_M, and _bev_warp_M so all downstream lane
+    detection and display use the new vanishing point.  Saves to calibration.
+    """
+    global _bev_warp_M, _fallback_vp
+    _fallback_compute_homography(vp_x, vp_y)
+    if H_inv is None:
+        return
+
+    # Build an image->BEV warp that matches the _bev_px_to_road convention.
+    # BEV display: BEV_DISPLAY_WIDTH x BEV_DISPLAY_HEIGHT
+    # Road ranges: BEV_X_RANGE, BEV_Y_RANGE
+    w_b = BEV_DISPLAY_WIDTH
+    h_b = BEV_DISPLAY_HEIGHT
+    s_x = w_b / (2.0 * BEV_X_RANGE[1])
+    t_x = w_b / 2.0
+    s_y = -h_b / BEV_Y_RANGE[1]
+    t_y = h_b
+
+    M_disp = np.array([
+        [s_x, 0.0, t_x],
+        [0.0, s_y, t_y],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float32)
+
+    _bev_warp_M = M_disp @ H_inv
+    state["calibration"] = {"vp_x": float(vp_x), "vp_y": float(vp_y)}
+    state["vp_auto_calibrated"] = True
+    save_calibration_state()
+    print(f"[AUTO-CAL] VP updated: ({vp_x:.1f}, {vp_y:.1f})", flush=True)
+
+
 def _fallback_compute_homography(vp_x=None, vp_y=None):
     global H_inv, _road_to_bev_M, _fallback_vp
     if vp_x is None and _fallback_vp is not None:
@@ -106,6 +204,7 @@ def _fallback_compute_homography(vp_x=None, vp_y=None):
     if vp_x is None:
         vp_x = K_INFER[0, 2]
         vp_y = 160.0
+    _fallback_vp = (float(vp_x), float(vp_y))
 
     K_inv = np.linalg.inv(K_INFER)
     u_y = K_inv @ np.array([vp_x, vp_y, 1.0], dtype=np.float32)
@@ -447,30 +546,6 @@ state = {
 video_writer = None
 _camera = None
 
-def _try_load_calibration():
-    calib_path = "models/calibration.json"
-    if not os.path.exists(calib_path):
-        return
-    try:
-        with open(calib_path, 'r') as f:
-            data = json.load(f)
-        if "vp_x" in data and "vp_y" in data:
-            state["calibration"] = {"vp_x": data["vp_x"], "vp_y": data["vp_y"]}
-            print("[INFO] Loaded VP calibration", flush=True)
-        if "ldw_calibration" in data:
-            state["ldw_calibration"] = data["ldw_calibration"]
-            state["adas_enabled"] = True
-            print("[INFO] Loaded LDW calibration", flush=True)
-        if "car_center_x" in data:
-            state["car_center_x"] = int(data["car_center_x"])
-        if "drivable_y_cutoff" in data:
-            state["drivable_y_cutoff"] = int(data["drivable_y_cutoff"])
-            print(f"[INFO] Loaded drivable y cutoff: {data['drivable_y_cutoff']}", flush=True)
-    except Exception as e:
-        print(f"[WARN] Calibration load failed: {e}", flush=True)
-
-_try_load_calibration()
-
 def save_calibration_state():
     calib = {}
     if state.get("calibration"):
@@ -484,6 +559,34 @@ def save_calibration_state():
     os.makedirs("models", exist_ok=True)
     with open("models/calibration.json", "w") as f:
         json.dump(calib, f)
+
+
+def _try_load_calibration():
+    calib_path = "models/calibration.json"
+    if not os.path.exists(calib_path):
+        return
+    try:
+        with open(calib_path, 'r') as f:
+            data = json.load(f)
+        if "vp_x" in data and "vp_y" in data:
+            vp_x, vp_y = data["vp_x"], data["vp_y"]
+            state["calibration"] = {"vp_x": vp_x, "vp_y": vp_y}
+            _rebuild_geometry_from_vp(vp_x, vp_y)
+            print(f"[INFO] Loaded VP calibration: ({vp_x}, {vp_y})", flush=True)
+        if "ldw_calibration" in data:
+            state["ldw_calibration"] = data["ldw_calibration"]
+            state["adas_enabled"] = True
+            print("[INFO] Loaded LDW calibration", flush=True)
+        if "car_center_x" in data:
+            state["car_center_x"] = int(data["car_center_x"])
+        if "drivable_y_cutoff" in data:
+            state["drivable_y_cutoff"] = int(data["drivable_y_cutoff"])
+            print(f"[INFO] Loaded drivable y cutoff: {data['drivable_y_cutoff']}", flush=True)
+    except Exception as e:
+        print(f"[WARN] Calibration load failed: {e}", flush=True)
+
+
+_try_load_calibration()
 
 def make_error_frame(message):
     img = np.zeros((480, 800, 3), dtype=np.uint8)
@@ -1139,6 +1242,38 @@ def inference_loop():
                 else:
                     left_lane_pts = None
                     right_lane_pts = None
+
+                # ── Auto-VP estimation ──
+                if not state.get("vp_converged", False) and ll_mask is not None and not state.get("calibrate_requested", False):
+                    ccx = state.get("car_center_x", INFER_WIDTH // 2)
+                    mask_w = ll_mask.shape[1]
+                    ccx_scaled = int(ccx * mask_w / CAPTURE_WIDTH)
+                    vp_est = _estimate_vp_from_ll_mask(ll_mask, ccx_scaled)
+                    if vp_est is not None:
+                        buf = state.setdefault("_vp_buffer", [])
+                        buf.append(vp_est)
+                        if len(buf) > _VP_BUFFER_MAX:
+                            buf.pop(0)
+                        if len(buf) >= _VP_BUFFER_MAX:
+                            buf_arr = np.array(buf, dtype=np.float32)
+                            med = np.median(buf_arr, axis=0)
+                            mad = np.median(np.abs(buf_arr - med), axis=0)
+                            if mad[0] < 15.0 and mad[1] < 8.0:
+                                new_vp_x, new_vp_y = med[0], med[1]
+                                current = state.get("calibration")
+                                old_x = current["vp_x"] if current else None
+                                old_y = current["vp_y"] if current else None
+                                if old_x is None or old_y is None or \
+                                   abs(new_vp_x - old_x) > 3.0 or abs(new_vp_y - old_y) > 2.0:
+                                    _rebuild_geometry_from_vp(new_vp_x, new_vp_y)
+                                state["vp_converged"] = True
+                                state["vp_auto_calibrated"] = True
+                                print(f"[AUTO-CAL] Converged: VP=({new_vp_x:.1f}, {new_vp_y:.1f}) "
+                                      f"MAD=({mad[0]:.1f}, {mad[1]:.1f})", flush=True)
+                    elif state.get("_vp_buffer"):
+                        buf = state["_vp_buffer"]
+                        if len(buf) > 10:
+                            buf.pop(0)
 
                 timer.track("inference", time.perf_counter() - _t_inf)
 
@@ -1869,6 +2004,9 @@ def status():
         "calibration_ldw_right_progress": calibration_ldw_right_progress,
         "calibration_total": 100,
         "lens_calibrated": state["calibration"] is not None,
+        "vp_auto_calibrated": state.get("vp_auto_calibrated", False),
+        "vp_converged": state.get("vp_converged", False),
+        "vp_buffer_progress": min(100, int(len(state.get("_vp_buffer", [])) / _VP_BUFFER_MAX * 100)),
         "ldw_calibrated": state["ldw_calibration"] is not None,
         "ldw_calibrated_left": state["ldw_calibration"] is not None and "left_pos" in state["ldw_calibration"],
         "ldw_calibrated_right": state["ldw_calibration"] is not None and "right_pos" in state["ldw_calibration"],
@@ -1906,6 +2044,9 @@ def api_toggle_debug_feed():
 @app.route('/api/calibrate', methods=['POST'])
 def api_calibrate():
     state["calibrate_requested"] = True
+    state["_vp_buffer"] = []
+    state["vp_converged"] = False
+    state["vp_auto_calibrated"] = False
     state["calib_vp_x_list"] = []
     state["calib_vp_y_list"] = []
     state["calibration_frames_left"] = 0

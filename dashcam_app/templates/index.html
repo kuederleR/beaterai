@@ -516,7 +516,7 @@
                 <span class="record-label" id="calibrateLabel">Calibrate Lens</span>
             </button>
             <div style="font-size: 12px; color: var(--text-secondary); text-align: center; margin-top: 8px;">
-                Drive straight and click to learn perspective taper.
+                Auto-calibrates vanishing point from lane lines while driving.
             </div>
         </div>
 
@@ -980,13 +980,16 @@
                     document.getElementById('debugFeedToggle').checked = isDebugFeedActive;
                 }
 
-                // Update Lens Calibration UI
-                if (data.calibrating_lens) {
+                // Update Lens Calibration UI (auto-VP)
+                if (data.vp_converged) {
+                    calibrateBtn.style.opacity = '1';
+                    calibrateLabel.innerText = 'VP Auto-Calibrated';
+                } else if (data.vp_buffer_progress > 0) {
                     calibrateBtn.style.opacity = '0.5';
-                    calibrateLabel.innerText = `Calibrating Lens (${data.calibration_lens_progress}%)`;
+                    calibrateLabel.innerText = `Auto-Cal VP (${data.vp_buffer_progress}%)`;
                 } else {
                     calibrateBtn.style.opacity = '1';
-                    calibrateLabel.innerText = data.lens_calibrated ? 'Recalibrate Lens' : 'Calibrate Lens';
+                    calibrateLabel.innerText = 'Calibrate VP';
                 }
 
                 // Update Left LDW Calibration UI
@@ -1172,7 +1175,7 @@
 
         async function requestCalibration() {
             calibrateBtn.style.opacity = '0.5';
-            calibrateLabel.innerText = 'Calibrating Lens (0%)';
+            calibrateLabel.innerText = 'Restarting VP Cal...';
             
             try {
                 await fetch('/api/calibrate', { method: 'POST' });
