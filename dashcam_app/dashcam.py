@@ -2194,12 +2194,24 @@ def api_bev_cal_preview():
 
 @app.route('/api/bev_cal/save', methods=['POST'])
 def api_bev_cal_save():
+    global _bev_warp_M
     src = bev_cal["src_points"]
     dst = bev_cal["dst_points"]
     if len(src) < 4 or any(p is None for p in src):
         return jsonify({"success": False, "error": "need 4 source points"}), 400
     if len(dst) < 4 or any(p is None for p in dst):
         return jsonify({"success": False, "error": "need 4 destination points"}), 400
+
+    # Apply immediately to the live BEV feed
+    _bev_warp_M = cv2.getPerspectiveTransform(
+        np.array(src, dtype=np.float32),
+        np.array(dst, dtype=np.float32),
+    )
+
+    # Clear VP-based calibration state since user explicitly chose manual
+    state["calibration"] = None
+    state["vp_auto_calibrated"] = False
+    state["vp_converged"] = False
 
     calib = {}
     calib_path = "models/calibration.json"
@@ -2220,9 +2232,6 @@ def api_bev_cal_save():
 
 def _load_bev_calibration():
     global _bev_warp_M
-    # Skip old manual BEV calibration when VP calibration is active
-    if state.get("calibration") is not None:
-        return
     calib_path = "models/calibration.json"
     if not os.path.exists(calib_path):
         return
