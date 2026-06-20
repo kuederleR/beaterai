@@ -193,6 +193,10 @@ def _rebuild_geometry_from_vp(vp_x, vp_y):
     _bev_warp_M = M_disp @ H_inv
     state["calibration"] = {"vp_x": float(vp_x), "vp_y": float(vp_y)}
     state["vp_auto_calibrated"] = True
+    # Clear any stale manual BEV calibration so it doesn't override VP-based warp on restart
+    bev_cal["src_points"] = []
+    bev_cal["dst_points"] = []
+    bev_cal["active"] = False
     save_calibration_state()
     print(f"[AUTO-CAL] VP updated: ({vp_x:.1f}, {vp_y:.1f})", flush=True)
 
@@ -1244,7 +1248,7 @@ def inference_loop():
                     right_lane_pts = None
 
                 # ── Auto-VP estimation ──
-                if not state.get("vp_converged", False) and ll_mask is not None and not state.get("calibrate_requested", False):
+                if not state.get("vp_converged", False) and ll_mask is not None:
                     ccx = state.get("car_center_x", INFER_WIDTH // 2)
                     mask_w = ll_mask.shape[1]
                     ccx_scaled = int(ccx * mask_w / CAPTURE_WIDTH)
@@ -2051,6 +2055,10 @@ def api_calibrate():
     state["calib_vp_y_list"] = []
     state["calibration_frames_left"] = 0
     state["error"] = None
+    # Clear stale manual BEV calibration so auto-VP won't be overridden
+    bev_cal["src_points"] = []
+    bev_cal["dst_points"] = []
+    bev_cal["active"] = False
     return jsonify({"status": "calibrating"})
 
 
@@ -2212,6 +2220,9 @@ def api_bev_cal_save():
 
 def _load_bev_calibration():
     global _bev_warp_M
+    # Skip old manual BEV calibration when VP calibration is active
+    if state.get("calibration") is not None:
+        return
     calib_path = "models/calibration.json"
     if not os.path.exists(calib_path):
         return
