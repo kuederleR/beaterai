@@ -726,19 +726,6 @@ def render_bev_frame(lane_mask, detections, left_coeffs, right_coeffs,
     if bg_img is not None:
         im_bev = cv2.resize(bg_img, (w, h), interpolation=cv2.INTER_LINEAR)
         draw_lanes = False
-        if bev_debug is not None:
-            mask = bev_debug["bev_mask"]
-            green = np.zeros_like(im_bev, dtype=np.uint8)
-            green[mask > 0] = (0, 180, 0)
-            cv2.addWeighted(green, 0.2, im_bev, 0.8, 0, dst=im_bev)
-            for bx in bev_debug["peaks"]:
-                cv2.line(im_bev, (bx, 0), (bx, h - 1), (100, 100, 255), 1)
-            for attempt in bev_debug["attempts"]:
-                color = (0, 255, 255) if attempt["tracked"] else (0, 100, 255)
-                for x1, y1, x2, y2, mx, my in attempt["windows"]:
-                    cv2.rectangle(im_bev, (x1, y1), (x2, y2), color, 1)
-                    if mx is not None:
-                        cv2.circle(im_bev, (int(mx), int(my)), 2, (0, 255, 0), -1)
     else:
         im_bev = np.zeros((h, w, 3), dtype=np.uint8)
         draw_lanes = True
@@ -783,18 +770,19 @@ def render_bev_frame(lane_mask, detections, left_coeffs, right_coeffs,
             cv2.fillPoly(overlay, [poly], (120, 60, 30))
             cv2.addWeighted(overlay, 0.4, im_bev, 0.6, 0, dst=im_bev)
 
-        if raw_lanes is not None:
-            for pts in raw_lanes:
-                if len(pts) >= 2:
-                    cv2.polylines(im_bev, [pts.astype(np.int32)],
-                                  False, (220, 220, 220), 2, cv2.LINE_AA)
+        if draw_lanes:
+            if raw_lanes is not None:
+                for pts in raw_lanes:
+                    if len(pts) >= 2:
+                        cv2.polylines(im_bev, [pts.astype(np.int32)],
+                                      False, (220, 220, 220), 2, cv2.LINE_AA)
 
-        if len(left_pts) >= 2:
-            cv2.polylines(im_bev, [np.array(left_pts, dtype=np.int32)],
-                          False, (200, 100, 0), 2, cv2.LINE_AA)
-        if len(right_pts) >= 2:
-            cv2.polylines(im_bev, [np.array(right_pts, dtype=np.int32)],
-                          False, (200, 100, 0), 2, cv2.LINE_AA)
+            if len(left_pts) >= 2:
+                cv2.polylines(im_bev, [np.array(left_pts, dtype=np.int32)],
+                              False, (200, 100, 0), 2, cv2.LINE_AA)
+            if len(right_pts) >= 2:
+                cv2.polylines(im_bev, [np.array(right_pts, dtype=np.int32)],
+                              False, (200, 100, 0), 2, cv2.LINE_AA)
 
     if draw_lanes:
         car_u = int(((compensated_x / (2 * BEV_X_RANGE[1])) + 0.5) * w)
