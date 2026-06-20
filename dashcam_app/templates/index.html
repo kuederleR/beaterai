@@ -1567,6 +1567,9 @@
                 const data = await res.json();
                 if (data.success) {
                     document.getElementById('bevCalStatus').innerText = '✓ Saved';
+                    // Force the BEV feed to reload with the new warp immediately
+                    const feed = document.getElementById('debugFeed');
+                    feed.src = '/video_feed?' + Date.now();
                 } else {
                     document.getElementById('bevCalStatus').innerText = 'Save failed: ' + (data.error || '');
                 }
